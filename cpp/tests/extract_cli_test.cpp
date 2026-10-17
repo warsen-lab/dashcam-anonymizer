@@ -61,9 +61,39 @@ TEST(ExtractCli, RejectsInvalidArguments) {
       {"--input", "a.mp4", "--out", "o", "--jpeg-q", "1"},      // out of range
       {"--input", "a.mp4", "--out", "o", "--bogus", "1"},       // unknown option
       {"--input"},                                              // missing value
+      {"--input", "a.mp4", "--out", "--overwrite"},             // option where a value belongs
+      {"--input", "a.mp4", "--out", "o", "--jpeg-q", "32"},     // above the range
+      {"--input", "a.mp4", "--out", "o", "--jpeg-q", "x"},      // not an integer
+      {"--input", "a.mp4", "--out", "o", "--clip", "x,1"},      // start is not a number
+      {"--input", "a.mp4", "--out", "o", "--clip", "-1,2"},     // negative start
+      {"--input", "a.mp4", "--out", "o", "--fps", "nan"},       // not finite
+      {"--input", "a.mp4", "--out", "o", "--motion-threshold", "-1"},  // negative
   };
   for (const Args& args : invalid) {
     EXPECT_THROW(parseExtractArgs(args), UsageError) << ::testing::PrintToString(args);
+  }
+}
+
+TEST(ExtractCli, ReportsOptionUsedAsValue) {
+  const Args args = {"--input", "a.mp4", "--out", "--overwrite"};
+
+  try {
+    parseExtractArgs(args);
+    FAIL() << "expected UsageError";
+  } catch (const UsageError& e) {
+    EXPECT_STREQ(e.what(), "--out needs a value, got option '--overwrite'");
+  }
+}
+
+TEST(ExtractCli, AcceptsNegativeNumbersAsValuesUntilValidation) {
+  // A single leading dash is a value, so the range check (not the parser) rejects it.
+  const Args args = {"--input", "a.mp4", "--out", "o", "--motion-threshold", "-1"};
+
+  try {
+    parseExtractArgs(args);
+    FAIL() << "expected UsageError";
+  } catch (const UsageError& e) {
+    EXPECT_STREQ(e.what(), "motion threshold must be >= 0");
   }
 }
 

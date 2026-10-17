@@ -1,6 +1,9 @@
 #include "vc_extract/extract_cli.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <string_view>
 
 namespace vc {
 namespace {
@@ -25,6 +28,16 @@ int parseInt(const std::string& option, const std::string& text) {
   throw UsageError(option + " expects an integer, got '" + text + "'");
 }
 
+constexpr std::array<std::string_view, 9> kValueOptions = {
+    "--input", "--out",  "--fps",     "--max-fps", "--motion-threshold",
+    "--dedup", "--clip", "--hwaccel", "--jpeg-q"};
+
+bool takesValue(const std::string& option) {
+  return std::find(kValueOptions.begin(), kValueOptions.end(), option) != kValueOptions.end();
+}
+
+bool looksLikeOption(const std::string& text) { return text.rfind("--", 0) == 0; }
+
 // "<startSec>,<durationSec>"
 ClipWindow parseClip(const std::string& text) {
   const std::size_t comma = text.find(',');
@@ -46,11 +59,15 @@ ExtractOptions parseExtractArgs(const std::vector<std::string>& args) {
       options.overwrite = true;
       continue;
     }
-    if (i + 1 >= args.size()) {
-      throw UsageError(option.rfind("--", 0) == 0 ? option + " needs a value"
-                                                  : "unexpected argument '" + option + "'");
+    if (!takesValue(option)) {
+      throw UsageError(looksLikeOption(option) ? "unknown option '" + option + "'"
+                                               : "unexpected argument '" + option + "'");
     }
+    if (i + 1 >= args.size()) throw UsageError(option + " needs a value");
     const std::string& value = args[++i];
+    if (looksLikeOption(value)) {
+      throw UsageError(option + " needs a value, got option '" + value + "'");
+    }
     if (option == "--input") {
       options.input = value;
     } else if (option == "--out") {

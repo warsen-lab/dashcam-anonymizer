@@ -97,8 +97,10 @@ ExtractStats runExtract(const ExtractOptions& options) {
   stats.outputDir = outputDirFor(options);
   checkOutputDir(options.input, stats.outputDir, options.overwrite);
   prepareOutputDir(stats.outputDir);
-  std::ofstream csv(stats.outputDir / "frames.csv");
+  const fs::path csvPath = stats.outputDir / "frames.csv";
+  std::ofstream csv(csvPath);
   csv << "video,frame,pts_ms,reason,motion_score\n";
+  if (!csv) throw VcError("cannot write " + csvPath.string());
 
   const std::string video = options.input.filename().string();
   const int thumbWidth = std::min(kThumbWidth, reader.info().width);
@@ -125,8 +127,11 @@ ExtractStats runExtract(const ExtractOptions& options) {
     previous = std::move(thumb);
   }
 
+  if (stats.decodedFrames == 0) {
+    throw VcError("no frames could be decoded from " + options.input.string());
+  }
   csv.close();
-  if (!csv) throw VcError("write " + (stats.outputDir / "frames.csv").string() + " failed");
+  if (!csv) throw VcError("write " + csvPath.string() + " failed");
   stats.decodeErrors = reader.decodeErrors();
   stats.usedHardware = reader.usingHardware();
   stats.elapsedSec =

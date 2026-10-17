@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <iostream>
@@ -18,14 +19,20 @@ constexpr int kExitFailure = 1;
 constexpr int kExitUsage = 2;
 constexpr int kExitOutputExists = 3;
 
+double percentOf(int64_t part, int64_t whole) {
+  return whole > 0 ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0;
+}
+
 void printStats(const vc::ExtractStats& s) {
   const double fps = s.elapsedSec > 0 ? static_cast<double>(s.decodedFrames) / s.elapsedSec : 0;
   std::printf("output:        %s\n", s.outputDir.string().c_str());
   std::printf("decoded:       %lld frames (%s decode)\n", static_cast<long long>(s.decodedFrames),
               s.usedHardware ? "hardware" : "software");
-  std::printf("kept:          %lld (base %lld, motion %lld, clip %lld)\n",
+  std::printf("kept:          %lld (base %lld / %.0f%%, motion %lld / %.0f%%, clip %lld / %.0f%%)\n",
               static_cast<long long>(s.keptFrames), static_cast<long long>(s.keptBase),
-              static_cast<long long>(s.keptMotion), static_cast<long long>(s.keptClip));
+              percentOf(s.keptBase, s.keptFrames), static_cast<long long>(s.keptMotion),
+              percentOf(s.keptMotion, s.keptFrames), static_cast<long long>(s.keptClip),
+              percentOf(s.keptClip, s.keptFrames));
   std::printf("decode errors: %lld\n", static_cast<long long>(s.decodeErrors));
   std::printf("elapsed:       %.2f s (%.1f fps)\n", s.elapsedSec, fps);
 }
@@ -51,7 +58,11 @@ int main(int argc, char** argv) {
 
   av_log_set_level(AV_LOG_ERROR);
   try {
-    printStats(vc::runExtract(options));
+    const vc::ExtractStats stats = vc::runExtract(options);
+    printStats(stats);
+    if (options.sampler.clip && stats.keptClip == 0) {
+      std::cerr << "vc_extract: warning: no frames inside the --clip window\n";
+    }
     return kExitOk;
   } catch (const vc::OutputExistsError& e) {
     std::cerr << "vc_extract: " << e.what() << '\n';
