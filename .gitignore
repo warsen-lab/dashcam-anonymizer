@@ -1,0 +1,15 @@
+# 数据、模型与中间产物（含个人信息，不进仓库）
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+runs/
+
+# C++ 构建
+build/
+cmake-build-*/
+
+# 系统
+.DS_Store
