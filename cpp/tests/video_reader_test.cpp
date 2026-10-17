@@ -2,8 +2,15 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "common/vc_error.h"
 #include "sampler/luma_thumb.h"
@@ -83,6 +90,34 @@ TEST(VideoReader, VideoToolboxMatchesSoftwareDecode) {
   EXPECT_EQ(hardware->next(), nullptr);
   EXPECT_EQ(count, 60);
   EXPECT_TRUE(hardware->usingHardware());
+}
+
+TEST(VideoReader, SkipsCorruptPacketsAndCountsThem) {
+  // Overwrite the length prefix of the first NAL unit (right after the "mdat" fourcc) so the
+  // decoder rejects the first access unit.
+  std::vector<char> bytes;
+  {
+    std::ifstream in(test::basicVideo(), std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  const std::string fourcc = "mdat";
+  const auto mdat = std::search(bytes.begin(), bytes.end(), fourcc.begin(), fourcc.end());
+  ASSERT_NE(mdat, bytes.end());
+  const std::size_t prefix = static_cast<std::size_t>(mdat - bytes.begin()) + fourcc.size();
+  ASSERT_LT(prefix + 4, bytes.size());
+  std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(prefix), 4, static_cast<char>(0xFF));
+  const std::filesystem::path corrupt = test::tmpDir() / "basic_corrupt_first_nal.mp4";
+  std::ofstream(corrupt, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+  VideoReader reader(corrupt.string(), HwAccel::None);
+  int64_t count = 0;
+  EXPECT_NO_THROW({
+    while (reader.next() != nullptr) ++count;
+  });
+
+  EXPECT_GE(reader.decodeErrors(), 1);
+  EXPECT_GE(count, 1);
+  EXPECT_EQ(reader.next(), nullptr);
 }
 
 TEST(VideoReader, ParsesHwAccelNames) {

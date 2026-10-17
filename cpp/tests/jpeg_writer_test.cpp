@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -20,6 +22,15 @@ namespace fs = std::filesystem;
 std::vector<unsigned char> readBytes(const fs::path& path) {
   std::ifstream in(path, std::ios::binary);
   return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+double lumaMean(const LumaPlane& luma) {
+  double sum = 0;
+  for (int y = 0; y < luma.height; ++y) {
+    const uint8_t* row = luma.data + static_cast<std::ptrdiff_t>(y) * luma.stride;
+    for (int x = 0; x < luma.width; ++x) sum += row[x];
+  }
+  return sum / (static_cast<double>(luma.width) * luma.height);
 }
 
 TEST(JpegWriter, WritesJpegThatDecodesToSameSize) {
@@ -66,6 +77,22 @@ TEST(JpegWriter, WritesNv12FramesFromTenBitVideo) {
   VideoReader decoded(path.string(), HwAccel::None);
   EXPECT_EQ(decoded.info().width, 640);
   EXPECT_EQ(decoded.info().height, 360);
+}
+
+TEST(JpegWriter, ConvertsLimitedRangeLumaToFullRange) {
+  VideoReader reader(test::basicVideo().string(), HwAccel::None);
+  const VideoFrame* frame = reader.next();
+  ASSERT_NE(frame, nullptr);
+  const double sourceMean = lumaMean(frame->luma());
+  const fs::path path = test::tmpDir() / "jpeg_writer_range.jpg";
+
+  JpegWriter().write(*frame->av, path);
+
+  VideoReader decoded(path.string(), HwAccel::None);
+  const VideoFrame* jpegFrame = decoded.next();
+  ASSERT_NE(jpegFrame, nullptr);
+  // The H.264 source is limited range (16..235); the JPEG is full range (0..255).
+  EXPECT_NEAR(lumaMean(jpegFrame->luma()), (sourceMean - 16.0) * 255.0 / 219.0, 1.5);
 }
 
 TEST(JpegWriter, ThrowsVcErrorForUnwritablePath) {
