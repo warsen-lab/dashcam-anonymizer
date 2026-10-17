@@ -23,9 +23,13 @@ target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)
 
 add_library(vc_extract_lib STATIC
   apps/vc_extract/extract_cli.cpp
+  apps/vc_extract/extract_job.cpp
 )
 target_include_directories(vc_extract_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
 target_link_libraries(vc_extract_lib PUBLIC vc_core)
+
+add_executable(vc_extract apps/vc_extract/main.cpp)
+target_link_libraries(vc_extract PRIVATE vc_extract_lib)
 
 option(VC_BUILD_TESTS "Build the GoogleTest suite" ON)
 if(VC_BUILD_TESTS)
