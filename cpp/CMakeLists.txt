@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 project(video_compliance LANGUAGES CXX)
 
+# Single-config generators (Makefiles, Ninja) default to an unoptimised build otherwise.
+get_property(_vc_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _vc_multi_config AND NOT CMAKE_BUILD_TYPE)
+  message(STATUS "CMAKE_BUILD_TYPE is not set, defaulting to Release")
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
