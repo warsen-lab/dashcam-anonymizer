@@ -6,8 +6,10 @@
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
+#include "common/vc_error.h"
 #include "io/video_reader.h"
 #include "test_media.h"
 
@@ -64,6 +66,34 @@ TEST(JpegWriter, WritesNv12FramesFromTenBitVideo) {
   VideoReader decoded(path.string(), HwAccel::None);
   EXPECT_EQ(decoded.info().width, 640);
   EXPECT_EQ(decoded.info().height, 360);
+}
+
+TEST(JpegWriter, ThrowsVcErrorForUnwritablePath) {
+  VideoReader reader(test::basicVideo().string(), HwAccel::None);
+  const VideoFrame* frame = reader.next();
+  ASSERT_NE(frame, nullptr);
+
+  EXPECT_THROW(JpegWriter().write(*frame->av, test::tmpDir() / "no_such_dir" / "frame.jpg"), VcError);
+}
+
+TEST(JpegWriter, ReusesOneWriterAcrossFrames) {
+  VideoReader reader(test::basicVideo().string(), HwAccel::None);
+  JpegWriter writer;
+  // The first frames include non-key frames, so the writer is reused across picture types.
+  for (int i = 0; i < 3; ++i) {
+    const VideoFrame* frame = reader.next();
+    ASSERT_NE(frame, nullptr);
+    const fs::path path = test::tmpDir() / ("jpeg_writer_reuse_" + std::to_string(i) + ".jpg");
+
+    writer.write(*frame->av, path);
+
+    const std::vector<unsigned char> bytes = readBytes(path);
+    ASSERT_GT(bytes.size(), 4u);
+    EXPECT_EQ(bytes[0], 0xFF);
+    EXPECT_EQ(bytes[1], 0xD8);
+    EXPECT_EQ(bytes[bytes.size() - 2], 0xFF);
+    EXPECT_EQ(bytes[bytes.size() - 1], 0xD9);
+  }
 }
 
 TEST(JpegWriter, RejectsQscaleOutsideRange) {

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
@@ -23,16 +24,18 @@ void JpegWriter::Impl::ensureEncoder(int width, int height) {
   if (encoder && encoder->width == width && encoder->height == height) return;
   const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
   if (codec == nullptr) throw VcError("MJPEG encoder not available");
-  encoder.reset(avcodec_alloc_context3(codec));
-  if (!encoder) throw VcError("avcodec_alloc_context3 failed");
-  encoder->width = width;
-  encoder->height = height;
-  encoder->pix_fmt = AV_PIX_FMT_YUV420P;
-  encoder->color_range = AVCOL_RANGE_JPEG;
-  encoder->time_base = AVRational{1, 25};
-  encoder->flags |= AV_CODEC_FLAG_QSCALE;
-  encoder->global_quality = qscale * FF_QP2LAMBDA;
-  checkAv(avcodec_open2(encoder.get(), codec, nullptr), "open MJPEG encoder");
+  av::CodecContextPtr fresh(avcodec_alloc_context3(codec));
+  if (!fresh) throw VcError("avcodec_alloc_context3 failed");
+  fresh->width = width;
+  fresh->height = height;
+  fresh->pix_fmt = AV_PIX_FMT_YUV420P;
+  fresh->color_range = AVCOL_RANGE_JPEG;
+  fresh->time_base = AVRational{1, 25};
+  fresh->flags |= AV_CODEC_FLAG_QSCALE;
+  fresh->global_quality = qscale * FF_QP2LAMBDA;
+  checkAv(avcodec_open2(fresh.get(), codec, nullptr), "open MJPEG encoder");
+  // Publish only a fully opened encoder so a failed open never leaves a stale context behind.
+  encoder = std::move(fresh);
 }
 
 JpegWriter::JpegWriter(int qscale) : impl_(std::make_unique<Impl>()) {
@@ -56,12 +59,16 @@ void JpegWriter::write(const AVFrame& frame, const std::filesystem::path& path) 
   checkAv(sws_scale_frame(s.sws.get(), s.yuv.get(), &frame), "convert frame for JPEG");
   // MJPEG with AV_CODEC_FLAG_QSCALE takes its quantiser from the frame.
   s.yuv->quality = s.encoder->global_quality;
+  // Source P/B picture types must not leak into the intra-only encoder.
+  s.yuv->pict_type = AV_PICTURE_TYPE_NONE;
 
   checkAv(avcodec_send_frame(s.encoder.get(), s.yuv.get()), "encode JPEG");
   checkAv(avcodec_receive_packet(s.encoder.get(), s.packet.get()), "receive JPEG packet");
   std::ofstream out(path, std::ios::binary);
   out.write(reinterpret_cast<const char*>(s.packet->data), s.packet->size);
   av_packet_unref(s.packet.get());
+  // Close explicitly so a flush failure is reported here rather than swallowed in the destructor.
+  out.close();
   if (!out) throw VcError("write " + path.string() + " failed");
 }
 
