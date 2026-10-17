@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -55,6 +56,31 @@ TEST(FrameSampler, RejectsEmptyClip) {
   EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
 }
 
+TEST(FrameSampler, RejectsNonFiniteValues) {
+  const double kNaN = std::numeric_limits<double>::quiet_NaN();
+  const double kInf = std::numeric_limits<double>::infinity();
+
+  SamplerConfig config;
+  config.baseFps = kNaN;
+  EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
+
+  config = SamplerConfig{};
+  config.baseFps = kInf;
+  EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
+
+  config = SamplerConfig{};
+  config.maxFps = kInf;
+  EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
+
+  config = SamplerConfig{};
+  config.motionThreshold = kNaN;
+  EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
+
+  config = SamplerConfig{};
+  config.dedupThreshold = kNaN;
+  EXPECT_THROW(FrameSampler{config}, std::invalid_argument);
+}
+
 TEST(FrameSampler, KeepsEveryTwelfthFrameAt60FpsWhenStill) {
   FrameSampler sampler(SamplerConfig{});
 
@@ -73,6 +99,7 @@ TEST(FrameSampler, SwitchesToMaxFpsWhileMotionIsHigh) {
   std::vector<int> expected = {0, 12, 24, 36, 48, 60};
   for (int i = 64; i < 120; i += 4) expected.push_back(i);
   EXPECT_EQ(indicesOf(kept), expected);
+  ASSERT_GE(kept.size(), 7u);
   EXPECT_EQ(kept[5].reason, SampleReason::Base);    // frame 60 was due at the base rate
   EXPECT_EQ(kept[6].reason, SampleReason::Motion);  // frame 64 only due because of motion
 }
@@ -82,10 +109,11 @@ TEST(FrameSampler, DedupSkipsFramesSimilarToLastKept) {
   config.dedupThreshold = 0.01;
   FrameSampler sampler(config);
 
+  // Frame 18 is only due if skipped duplicates did not reset the last-kept time.
   const std::vector<Kept> kept =
-      offerFrames(sampler, 30, still, [](int i) { return i < 24 ? 0.001 : 0.5; });
+      offerFrames(sampler, 30, still, [](int i) { return i < 18 ? 0.001 : 0.5; });
 
-  EXPECT_EQ(indicesOf(kept), (std::vector<int>{0, 24}));
+  EXPECT_EQ(indicesOf(kept), (std::vector<int>{0, 18}));
 }
 
 TEST(FrameSampler, ClipKeepsEveryFrameInsideWindowOnly) {

@@ -1,5 +1,6 @@
 #include "sampler/frame_sampler.h"
 
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 
@@ -26,22 +27,25 @@ const char* toString(SampleReason reason) {
 }
 
 FrameSampler::FrameSampler(const SamplerConfig& config) : config_(config) {
-  if (config_.baseFps < kMinBaseFps) {
+  if (!std::isfinite(config_.baseFps) || config_.baseFps < kMinBaseFps) {
     char message[80];
     std::snprintf(message, sizeof(message), "fps must be >= %g, got %g", kMinBaseFps,
                   config_.baseFps);
     throw std::invalid_argument(message);
   }
-  if (config_.maxFps < config_.baseFps) {
+  if (!std::isfinite(config_.maxFps) || config_.maxFps < config_.baseFps) {
     throw std::invalid_argument("max fps must be >= base fps");
   }
-  if (config_.motionThreshold < 0) {
+  if (!std::isfinite(config_.motionThreshold) || config_.motionThreshold < 0) {
     throw std::invalid_argument("motion threshold must be >= 0");
   }
-  if (config_.dedupThreshold && *config_.dedupThreshold < 0) {
+  if (config_.dedupThreshold &&
+      (!std::isfinite(*config_.dedupThreshold) || *config_.dedupThreshold < 0)) {
     throw std::invalid_argument("dedup threshold must be >= 0");
   }
-  if (config_.clip && (config_.clip->startMs < 0 || config_.clip->durationMs <= 0)) {
+  if (config_.clip &&
+      (!std::isfinite(config_.clip->startMs) || !std::isfinite(config_.clip->durationMs) ||
+       config_.clip->startMs < 0 || config_.clip->durationMs <= 0)) {
     throw std::invalid_argument("clip needs start >= 0 and duration > 0");
   }
 }

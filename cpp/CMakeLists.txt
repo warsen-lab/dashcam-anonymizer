@@ -8,7 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 
-add_library(vc_core
+add_library(vc_core STATIC
   src/sampler/frame_sampler.cpp
 )
 target_include_directories(vc_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
