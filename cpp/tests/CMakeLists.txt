@@ -3,12 +3,13 @@ find_program(VC_FFMPEG_EXECUTABLE ffmpeg REQUIRED)
 
 add_executable(vc_tests
   test_media.cpp
+  extract_cli_test.cpp
   frame_sampler_test.cpp
   jpeg_writer_test.cpp
   luma_thumb_test.cpp
   video_reader_test.cpp
 )
-target_link_libraries(vc_tests PRIVATE vc_core GTest::gtest_main)
+target_link_libraries(vc_tests PRIVATE vc_extract_lib vc_core GTest::gtest_main)
 target_compile_definitions(vc_tests PRIVATE
   VC_FFMPEG="${VC_FFMPEG_EXECUTABLE}"
   VC_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp")
