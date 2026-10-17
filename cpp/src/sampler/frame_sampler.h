@@ -28,6 +28,11 @@ struct SamplerConfig {
 
 // Decides which decoded frames to keep. Feed every decoded frame in display
 // order; the caller computes the scores, so this class is pure logic.
+//
+// ptsMs is expected to be non-decreasing. A frame whose ptsMs is below the last
+// kept frame's is treated as a timestamp discontinuity: it is kept
+// (SampleReason::Base, regardless of the dedup threshold) and timing restarts from
+// it. Clip mode compares ptsMs with the window only and has no such state.
 class FrameSampler {
  public:
   // Throws std::invalid_argument for an invalid config.

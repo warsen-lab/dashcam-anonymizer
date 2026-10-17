@@ -56,7 +56,10 @@ SampleReason FrameSampler::offer(double ptsMs, double motionScore, double diffTo
     const bool inside = ptsMs >= start && ptsMs < start + config_.clip->durationMs;
     return inside ? SampleReason::Clip : SampleReason::None;
   }
-  if (!lastKeptMs_) {
+  // The first frame, or a backwards timestamp jump (concatenated or repaired
+  // recordings): keep it and restart timing here. Without this, elapsed would stay
+  // negative and the sampler would stall until the clock caught up again.
+  if (!lastKeptMs_ || ptsMs < *lastKeptMs_) {
     lastKeptMs_ = ptsMs;
     return SampleReason::Base;
   }

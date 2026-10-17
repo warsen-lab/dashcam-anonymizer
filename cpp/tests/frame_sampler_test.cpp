@@ -116,6 +116,23 @@ TEST(FrameSampler, DedupSkipsFramesSimilarToLastKept) {
   EXPECT_EQ(indicesOf(kept), (std::vector<int>{0, 18}));
 }
 
+TEST(FrameSampler, KeepsFrameWhenTimestampsJumpBackwards) {
+  FrameSampler sampler(SamplerConfig{});
+
+  // Frames 60..119 restart the clock at 0 ms (e.g. a concatenated recording).
+  std::vector<Kept> kept;
+  for (int i = 0; i < 120; ++i) {
+    const double pts = ptsAt60Fps(i < 60 ? i : i - 60);
+    const SampleReason reason = sampler.offer(pts, still(i), different(i));
+    if (reason != SampleReason::None) kept.push_back({i, reason});
+  }
+
+  EXPECT_EQ(indicesOf(kept), (std::vector<int>{0, 12, 24, 36, 48, 60, 72, 84, 96, 108}));
+  ASSERT_GE(kept.size(), 6u);
+  EXPECT_EQ(kept[5].index, 60);
+  EXPECT_EQ(kept[5].reason, SampleReason::Base);
+}
+
 TEST(FrameSampler, ClipKeepsEveryFrameInsideWindowOnly) {
   SamplerConfig config;
   config.clip = ClipWindow{500.0, 100.0};

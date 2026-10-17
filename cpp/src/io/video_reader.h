@@ -26,8 +26,11 @@ struct VideoInfo {
 // A decoded frame in CPU memory, always 8-bit YUV (planar or NV12), so
 // plane 0 is the luma plane.
 struct VideoFrame {
-  int64_t index = 0;  // 0-based, display order
-  double ptsMs = 0;   // relative to the stream start
+  // 0-based count of the frames the decoder has returned, in decoder output
+  // (display) order. Frames lost to corrupt packets are not counted, so this can
+  // drift from the container's own frame numbering.
+  int64_t index = 0;
+  double ptsMs = 0;  // relative to the stream start
   const AVFrame* av = nullptr;
 
   LumaPlane luma() const;

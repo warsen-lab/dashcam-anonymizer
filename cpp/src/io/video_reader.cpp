@@ -1,6 +1,7 @@
 #include "io/video_reader.h"
 
 #include <stdexcept>
+#include <string>
 
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
@@ -151,7 +152,12 @@ const VideoFrame* VideoReader::Impl::publish() {
   const int64_t ts = decoded->best_effort_timestamp;
   current.index = nextIndex++;
   if (ts == AV_NOPTS_VALUE) {
-    current.ptsMs = info.fps > 0 ? static_cast<double>(current.index) * 1000.0 / info.fps : 0.0;
+    // Without a frame rate every such frame would get ptsMs 0 and freeze the sampler.
+    if (!(info.fps > 0)) {
+      throw VcError("frame " + std::to_string(current.index) +
+                    " has no timestamp and the stream frame rate is unknown");
+    }
+    current.ptsMs = static_cast<double>(current.index) * 1000.0 / info.fps;
   } else {
     current.ptsMs = static_cast<double>(ts - startPts) * av_q2d(timeBase) * 1000.0;
   }
