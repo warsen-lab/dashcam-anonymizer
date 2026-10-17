@@ -18,14 +18,49 @@ namespace vc {
 namespace fs = std::filesystem;
 namespace {
 
-void prepareOutputDir(const fs::path& dir, bool overwrite) {
+// <outRoot>/<input stem>; refuses names that resolve to the output root or its parent.
+fs::path outputDirFor(const ExtractOptions& options) {
+  const fs::path stem = options.input.stem();
+  if (stem.empty() || stem == "." || stem == "..") {
+    throw VcError("cannot derive an output directory name from " + options.input.string());
+  }
+  return options.outRoot / stem;
+}
+
+// A directory vc_extract may replace: empty, or holding the frames.csv of a previous run.
+bool looksLikeExtractOutput(const fs::path& dir) {
+  return fs::is_directory(dir) &&
+         (fs::is_empty(dir) || fs::is_regular_file(dir / "frames.csv"));
+}
+
+// True when path is dir itself or lies below it. Both must be weakly canonical.
+bool isSameOrInside(const fs::path& path, const fs::path& dir) {
+  const fs::path relative = path.lexically_relative(dir);
+  return !relative.empty() && *relative.begin() != "..";
+}
+
+// Validates everything that could make creating `dir` destructive, without touching the
+// filesystem.
+void checkOutputDir(const fs::path& input, const fs::path& dir, bool overwrite) {
   if (fs::exists(dir)) {
     if (!overwrite) {
       throw OutputExistsError("output directory exists: " + dir.string() +
                               " (pass --overwrite to replace it)");
     }
-    fs::remove_all(dir);
+    if (!looksLikeExtractOutput(dir)) {
+      throw OutputExistsError("refusing to overwrite " + dir.string() +
+                              ": not a vc_extract output directory");
+    }
   }
+  if (isSameOrInside(fs::weakly_canonical(fs::absolute(input)),
+                     fs::weakly_canonical(fs::absolute(dir)))) {
+    throw VcError("output directory " + dir.string() +
+                  " would contain the input video; choose another --out");
+  }
+}
+
+void prepareOutputDir(const fs::path& dir) {
+  fs::remove_all(dir);  // no-op when absent
   fs::create_directories(dir);
 }
 
@@ -59,8 +94,9 @@ ExtractStats runExtract(const ExtractOptions& options) {
   JpegWriter jpeg(options.jpegQscale);
 
   ExtractStats stats;
-  stats.outputDir = options.outRoot / options.input.stem();
-  prepareOutputDir(stats.outputDir, options.overwrite);
+  stats.outputDir = outputDirFor(options);
+  checkOutputDir(options.input, stats.outputDir, options.overwrite);
+  prepareOutputDir(stats.outputDir);
   std::ofstream csv(stats.outputDir / "frames.csv");
   csv << "video,frame,pts_ms,reason,motion_score\n";
 

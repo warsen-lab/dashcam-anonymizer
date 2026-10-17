@@ -27,8 +27,22 @@ struct ExtractStats {
 };
 
 // Decodes options.input and writes <outRoot>/<stem>/<frame:06d>.jpg plus
-// frames.csv. The input is opened before the output directory is touched, so a
-// bad input never deletes existing output. Throws OutputExistsError or VcError.
+// frames.csv, where <stem> is the input's file stem.
+//
+// The input is opened and every check below runs before anything is deleted or
+// created, so a bad input or a refused output never destroys existing files:
+//  - an input whose stem is empty, "." or ".." has no usable directory name
+//    -> VcError;
+//  - an existing <outRoot>/<stem> -> OutputExistsError unless options.overwrite;
+//    with overwrite it is replaced only if it is a directory that is empty or
+//    holds a frames.csv (a previous vc_extract output), otherwise
+//    OutputExistsError ("not a vc_extract output directory");
+//  - an output directory that is, or would contain, the input file -> VcError.
+//
+// Throws OutputExistsError or VcError for the cases above and for I/O and
+// decode failures; std::invalid_argument for an invalid sampler or JPEG
+// setting; std::filesystem::filesystem_error when the filesystem cannot be
+// inspected or modified.
 ExtractStats runExtract(const ExtractOptions& options);
 
 }  // namespace vc

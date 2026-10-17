@@ -127,6 +127,66 @@ TEST(ExtractJob, RefusesExistingOutputUnlessOverwrite) {
   EXPECT_FALSE(fs::exists(first.outputDir / "stale.txt"));
 }
 
+TEST(ExtractJob, OverwriteRefusesDirectoryWithoutFramesCsv) {
+  const fs::path outRoot = freshOutRoot("overwrite_foreign_dir");
+  fs::create_directories(outRoot / "basic");
+  std::ofstream(outRoot / "basic" / "notes.txt") << "not ours";
+  ExtractOptions options = optionsFor(test::basicVideo(), outRoot);
+  options.overwrite = true;
+
+  EXPECT_THROW(runExtract(options), OutputExistsError);
+
+  EXPECT_TRUE(fs::exists(outRoot / "basic" / "notes.txt"));
+}
+
+TEST(ExtractJob, OverwriteRefusesWhenOutputWouldContainInput) {
+  const fs::path outRoot = freshOutRoot("overwrite_contains_input");
+  fs::create_directories(outRoot / "basic");
+  const fs::path input = outRoot / "basic" / "basic.mp4";
+  fs::copy_file(test::basicVideo(), input);
+  std::ofstream(outRoot / "basic" / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n";
+  ExtractOptions options = optionsFor(input, outRoot);
+  options.overwrite = true;
+
+  EXPECT_THROW(runExtract(options), VcError);
+
+  EXPECT_TRUE(fs::is_regular_file(input));
+  EXPECT_EQ(fs::file_size(input), fs::file_size(test::basicVideo()));
+}
+
+TEST(ExtractJob, RefusesOutputPathThatIsTheInputFile) {
+  const fs::path outRoot = freshOutRoot("output_is_input");
+  fs::create_directories(outRoot);
+  const fs::path input = outRoot / "trip01";  // no extension: stem == file name
+  fs::copy_file(test::basicVideo(), input);
+  ExtractOptions options = optionsFor(input, outRoot);
+  options.overwrite = true;
+
+  EXPECT_THROW(runExtract(options), VcError);
+
+  EXPECT_TRUE(fs::is_regular_file(input));
+  EXPECT_EQ(fs::file_size(input), fs::file_size(test::basicVideo()));
+}
+
+TEST(ExtractJob, RefusesInputWhoseStemCannotNameADirectory) {
+  const fs::path root = freshOutRoot("dot_stem");
+  const fs::path outRoot = root / "out";
+  fs::create_directories(root / "in");
+  fs::create_directories(outRoot);
+  const fs::path input = root / "in" / "..mp4";  // stem is "." -> outRoot / "." is outRoot itself
+  fs::copy_file(test::basicVideo(), input);
+  // Make outRoot look like a previous output so only the stem check can stop the wipe.
+  std::ofstream(outRoot / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n";
+  std::ofstream(outRoot / "other.txt") << "another video's frames";
+  ExtractOptions options = optionsFor(input, outRoot);
+  options.overwrite = true;
+
+  EXPECT_THROW(runExtract(options), VcError);
+
+  EXPECT_TRUE(fs::is_regular_file(input));
+  EXPECT_TRUE(fs::exists(outRoot / "other.txt"));
+}
+
 TEST(ExtractJob, BadInputLeavesExistingOutputAlone) {
   const fs::path outRoot = freshOutRoot("bad_input");
   fs::create_directories(outRoot / "missing");
