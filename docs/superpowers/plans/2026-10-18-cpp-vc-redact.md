@@ -610,9 +610,9 @@ TEST(YoloDecode, MapsBackByRThresholdsAndSuppressesPerClass) {
   EXPECT_EQ(boxes[0].cls, 0);
   EXPECT_FLOAT_EQ(boxes[0].score, 0.9f);
   EXPECT_NEAR(boxes[0].x1, 56, 1e-3);
-  EXPECT_NEAR(boxes[0].y1, 24, 1e-3);
+  EXPECT_NEAR(boxes[0].y1, 28, 1e-3);
   EXPECT_NEAR(boxes[0].x2, 72, 1e-3);
-  EXPECT_NEAR(boxes[0].y2, 40, 1e-3);
+  EXPECT_NEAR(boxes[0].y2, 36, 1e-3);
   EXPECT_EQ(boxes[1].cls, 1);
   EXPECT_FLOAT_EQ(boxes[1].score, 0.5f);
 }

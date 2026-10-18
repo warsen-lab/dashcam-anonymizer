@@ -1,13 +1,29 @@
 import numpy as np
 import pytest
 
-from vc_train.geometry import PAD_VALUE, decode_yolov8, letterbox, letterbox_scale
+from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox, letterbox_scale
 
 
 def test_letterbox_scale_fits_the_limiting_side():
     assert letterbox_scale(1920, 1080, 1920, 1088) == 1.0
     assert letterbox_scale(3840, 2160, 1920, 1088) == 0.5
     assert letterbox_scale(100, 50, 64, 64) == pytest.approx(0.64)
+
+
+@pytest.mark.parametrize("sizes", [(0, 100, 64, 64), (100, 0, 64, 64), (-5, 100, 64, 64), (100, 50, 0, 64), (100, 50, 64, -32)])
+def test_letterbox_scale_rejects_non_positive_sizes(sizes):
+    with pytest.raises(ValueError, match="positive"):
+        letterbox_scale(*sizes)
+
+
+@pytest.mark.parametrize("width, height", [(0, 64), (64, 0), (-32, 64), (100, 64), (64, 1090)])
+def test_check_input_size_wants_positive_multiples_of_32(width, height):
+    with pytest.raises(ValueError, match="positive multiple of 32"):
+        check_input_size(width, height)
+
+
+def test_check_input_size_accepts_the_default_input():
+    check_input_size(1920, 1088)
 
 
 def test_letterbox_places_image_top_left_in_rgb_and_pads_with_114():
@@ -102,3 +118,32 @@ def test_decode_keeps_a_score_exactly_at_the_threshold():
     pred = _pred([(32, 16, 8, 4, 0.15, 0.0)])
     boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
     assert len(boxes) == 1 and boxes[0].cls == "face"
+
+
+@pytest.mark.parametrize(
+    "cx, cy, w, h",
+    [(np.nan, 16, 8, 4), (32, np.inf, 8, 4), (32, 16, np.nan, 4), (32, 16, 8, -np.inf)],
+)
+def test_decode_stops_on_a_non_finite_box_that_passes_the_threshold(cx, cy, w, h):
+    pred = _pred([(32, 16, 8, 4, 0.9, 0.0), (cx, cy, w, h, 0.5, 0.0)])
+    with pytest.raises(ValueError, match="non-finite box coordinates"):
+        decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
+
+
+def test_decode_ignores_non_finite_boxes_below_the_threshold():
+    pred = _pred(
+        [
+            (32, 16, 8, 4, 0.9, 0.0),  # kept
+            (np.nan, np.inf, np.nan, 4, 0.05, 0.0),  # below the threshold: its box is never read
+        ]
+    )
+    boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
+    assert [b.cls for b in boxes] == ["face"]
+
+
+@pytest.mark.parametrize("face, plate", [(np.nan, 0.5), (0.1, np.nan), (np.inf, 0.0), (0.0, -np.inf)])
+def test_decode_stops_on_any_non_finite_class_score(face, plate):
+    # a NaN score used to be dropped silently (numpy max is NaN, NaN >= threshold is False); it must stop the run
+    pred = _pred([(32, 16, 8, 4, 0.9, 0.0), (32, 16, 8, 4, face, plate)])
+    with pytest.raises(ValueError, match="non-finite scores"):
+        decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)

@@ -9,4 +9,11 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "models: needs the cached teacher weights and the sg_drive_600s sample frames",
+    "yolo: needs the cached YOLOv8n COCO weights; trains a tiny model on the CPU (about a minute)",
+]
+# Only the three known torch 2.14 / ultralytics 8.4 export warnings; anything else still fails under -W error.
+filterwarnings = [
+    'ignore:You are using the legacy TorchScript-based ONNX export:DeprecationWarning',
+    'ignore:The feature will be removed:DeprecationWarning:torch\.onnx\._internal\.torchscript_exporter\.utils',
+    'ignore:Converting a tensor to a Python boolean:torch.jit.TracerWarning',
 ]
