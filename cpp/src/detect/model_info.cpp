@@ -27,14 +27,20 @@ ModelInfo parseModelInfo(const std::string& text, const std::string& origin) {
     m.classes = j.at("classes").get<std::vector<std::string>>();
     if (m.classes.empty()) throw fail("classes is empty");
     const nlohmann::json& input = j.at("input");
-    m.inputWidth = input.at("width").get<int>();
-    m.inputHeight = input.at("height").get<int>();
+    // get<int>() would silently truncate 1088.5 to 1088, so the JSON number must be an integer.
+    const auto integerField = [&](const char* field) {
+      const nlohmann::json& v = input.at(field);
+      if (!v.is_number_integer()) throw fail(std::string("input.") + field + " must be an integer");
+      return v.get<int>();
+    };
+    m.inputWidth = integerField("width");
+    m.inputHeight = integerField("height");
     if (m.inputWidth <= 0 || m.inputHeight <= 0 || m.inputWidth % 32 != 0 || m.inputHeight % 32 != 0) {
       throw fail("input width and height must be positive multiples of 32");
     }
     if (input.at("color").get<std::string>() != "RGB") throw fail("input.color must be \"RGB\"");
     if (input.at("letterbox").get<std::string>() != "top_left") throw fail("input.letterbox must be \"top_left\"");
-    if (input.at("pad_value").get<int>() != kPadValue) throw fail("input.pad_value must be 114");
+    if (integerField("pad_value") != kPadValue) throw fail("input.pad_value must be 114");
     if (std::abs(input.at("scale").get<double>() - 1.0 / 255.0) > 1e-9) throw fail("input.scale must be 1/255");
     return m;
   } catch (const nlohmann::json::exception& e) {

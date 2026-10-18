@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <limits>
 #include <vector>
 
 namespace vc {
@@ -49,6 +50,23 @@ TEST(YoloDecode, ClipsToTheFrame) {
 TEST(YoloDecode, KeepsScoresEqualToTheThreshold) {
   const std::vector<float> p = pred({{10, 10, 4, 4, 0.15f, 0.0f}});
   EXPECT_EQ(decodeYolov8(p.data(), 2, 1, makeLetterbox(20, 20, 20, 20), {}).size(), 1u);
+}
+
+TEST(YoloDecode, DropsAnchorsWithNanScores) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const std::vector<float> p = pred({{10, 10, 4, 4, nan, 0.9f},
+                                     {10, 10, 4, 4, 0.9f, nan}});
+  EXPECT_TRUE(decodeYolov8(p.data(), 2, 2, makeLetterbox(20, 20, 20, 20), {}).empty());
+}
+
+TEST(YoloDecode, ClipsEachAxisToItsOwnFrameSize) {
+  const std::vector<float> p = pred({{38, 18, 10, 10, 0.8f, 0.0f}});
+  const std::vector<Box> boxes = decodeYolov8(p.data(), 2, 1, makeLetterbox(40, 20, 40, 20), {});
+  ASSERT_EQ(boxes.size(), 1u);
+  EXPECT_FLOAT_EQ(boxes[0].x1, 33);
+  EXPECT_FLOAT_EQ(boxes[0].y1, 13);
+  EXPECT_FLOAT_EQ(boxes[0].x2, 40);
+  EXPECT_FLOAT_EQ(boxes[0].y2, 20);
 }
 
 }  // namespace
