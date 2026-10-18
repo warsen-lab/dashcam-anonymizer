@@ -7,6 +7,9 @@
 namespace vc {
 namespace {
 
+// A box missed at this many keyframes in a row is dropped; fewer and it lives on as a ghost track.
+constexpr int kMaxMissedKeyframes = 1;
+
 struct Point {
   double x = 0;
   double y = 0;
@@ -58,6 +61,21 @@ std::vector<double> fractions(const std::vector<FrameTime>& frames, const FrameT
   return t;
 }
 
+// Frame indices must be strictly increasing.
+void requireIncreasing(const std::vector<FrameTime>& frames) {
+  for (size_t k = 1; k < frames.size(); ++k) {
+    if (frames[k].index <= frames[k - 1].index) {
+      throw std::invalid_argument("BoxTimeline: frame indices must be strictly increasing");
+    }
+  }
+}
+
+bool validConfig(const TimelineConfig& c) {
+  return std::isfinite(c.matchMaxDistance) && c.matchMaxDistance > 0 && std::isfinite(c.expandFraction) &&
+         c.expandFraction >= 0 && std::isfinite(c.motionExpandFraction) && c.motionExpandFraction >= 0 &&
+         std::isfinite(c.minBoxPx) && c.minBoxPx >= 0;
+}
+
 }  // namespace
 
 const char* toString(MaskOrigin origin) {
@@ -75,10 +93,7 @@ const char* toString(MaskOrigin origin) {
 BoxTimeline::BoxTimeline(const TimelineConfig& config, int frameWidth, int frameHeight)
     : config_(config), width_(frameWidth), height_(frameHeight) {
   if (frameWidth <= 0 || frameHeight <= 0) throw std::invalid_argument("BoxTimeline: frame size must be positive");
-  if (!(config.matchMaxDistance > 0) || config.expandFraction < 0 || config.motionExpandFraction < 0 ||
-      config.minBoxPx < 0) {
-    throw std::invalid_argument("BoxTimeline: invalid config");
-  }
+  if (!validConfig(config)) throw std::invalid_argument("BoxTimeline: invalid config");
 }
 
 std::vector<std::pair<size_t, size_t>> BoxTimeline::match(const Keyframe& next, double steps) const {
@@ -87,32 +102,33 @@ std::vector<std::pair<size_t, size_t>> BoxTimeline::match(const Keyframe& next, 
     size_t i;
     size_t j;
   };
-  const Keyframe& prev = *prev_;
   std::vector<Candidate> candidates;
-  for (size_t i = 0; i < prev.boxes.size(); ++i) {
+  for (size_t i = 0; i < tracks_.size(); ++i) {
+    const Box& a = tracks_[i].box;
+    const Point from = centerOf(a);
     for (size_t j = 0; j < next.boxes.size(); ++j) {
-      const Box& a = prev.boxes[i];
       const Box& b = next.boxes[j];
       if (a.cls != b.cls) continue;
-      Point predicted = centerOf(a);
-      if (velocity_[i]) {
-        predicted.x += velocity_[i]->x * steps;
-        predicted.y += velocity_[i]->y * steps;
-      }
       const Point actual = centerOf(b);
+      // A target that stops still matches: take the better of "keeps moving" and "stayed put".
+      double distance = std::hypot(actual.x - from.x, actual.y - from.y);
+      if (const auto& v = tracks_[i].velocity) {
+        distance = std::min(distance, std::hypot(actual.x - (from.x + v->x * steps),
+                                                 actual.y - (from.y + v->y * steps)));
+      }
       const double size = std::max(1.0, (a.width() + a.height() + b.width() + b.height()) / 4.0);
-      const double cost = std::hypot(actual.x - predicted.x, actual.y - predicted.y) / size;
+      const double cost = distance / size;
       if (cost <= config_.matchMaxDistance) candidates.push_back({cost, i, j});
     }
   }
   std::stable_sort(candidates.begin(), candidates.end(),
                    [](const Candidate& p, const Candidate& q) { return p.cost < q.cost; });
-  std::vector<bool> usedPrev(prev.boxes.size(), false);
+  std::vector<bool> usedTrack(tracks_.size(), false);
   std::vector<bool> usedNext(next.boxes.size(), false);
   std::vector<std::pair<size_t, size_t>> pairs;
   for (const Candidate& c : candidates) {
-    if (usedPrev[c.i] || usedNext[c.j]) continue;
-    usedPrev[c.i] = true;
+    if (usedTrack[c.i] || usedNext[c.j]) continue;
+    usedTrack[c.i] = true;
     usedNext[c.j] = true;
     pairs.emplace_back(c.i, c.j);
   }
@@ -140,82 +156,101 @@ void BoxTimeline::add(std::vector<MaskBox>& out, const Box& box, double motionX,
 
 std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTime>& frames,
                                                        const Keyframe& next) {
-  if (!prev_) {
+  if (!keyTime_) {
     if (!frames.empty()) throw std::invalid_argument("BoxTimeline: frames before the first keyframe");
-    prev_ = next;
-    velocity_.assign(next.boxes.size(), std::nullopt);
+    std::vector<Track> tracks;
+    for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0});
+    keyTime_ = next.time;
+    tracks_ = std::move(tracks);
     return {};
   }
-  const Keyframe& prev = *prev_;
-  if (frames.empty() || frames.front().index != prev.time.index) {
+  const FrameTime& prevTime = *keyTime_;
+  if (frames.empty() || frames.front().index != prevTime.index) {
     throw std::invalid_argument("BoxTimeline: frames must start at the previous keyframe");
   }
+  requireIncreasing(frames);
   if (next.time.index <= frames.back().index) {
     throw std::invalid_argument("BoxTimeline: the next keyframe must follow the frames");
   }
-  const double steps = static_cast<double>(next.time.index - prev.time.index);
+  const double steps = static_cast<double>(next.time.index - prevTime.index);
   const std::vector<std::pair<size_t, size_t>> pairs = match(next, steps);
-  std::vector<bool> prevUsed(prev.boxes.size(), false);
+  // Per track, the box it was matched with (or none), and per next box whether it was claimed.
+  std::vector<std::optional<size_t>> matched(tracks_.size());
   std::vector<bool> nextUsed(next.boxes.size(), false);
   for (const auto& [i, j] : pairs) {
-    prevUsed[i] = true;
+    matched[i] = j;
     nextUsed[j] = true;
   }
-  const std::vector<double> t = fractions(frames, prev.time, next.time);
+  const std::vector<double> t = fractions(frames, prevTime, next.time);
   std::vector<std::vector<MaskBox>> masks(frames.size());
   for (size_t k = 0; k < frames.size(); ++k) {
-    const bool atKey = frames[k].index == prev.time.index;
-    const double since = static_cast<double>(frames[k].index - prev.time.index);
-    for (const auto& [i, j] : pairs) {
-      const Point a = centerOf(prev.boxes[i]);
-      const Point b = centerOf(next.boxes[j]);
-      add(masks[k], lerp(prev.boxes[i], next.boxes[j], t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
-          atKey ? MaskOrigin::Detected : MaskOrigin::Interpolated);
-    }
-    for (size_t i = 0; i < prev.boxes.size(); ++i) {
-      if (prevUsed[i]) continue;
-      const Velocity v = velocity_[i].value_or(Velocity{});
-      add(masks[k], shifted(prev.boxes[i], v.x * since, v.y * since), std::abs(v.x) * steps,
-          std::abs(v.y) * steps, atKey ? MaskOrigin::Detected : MaskOrigin::Extended);
+    const bool atKey = frames[k].index == prevTime.index;
+    const double since = static_cast<double>(frames[k].index - prevTime.index);
+    for (size_t i = 0; i < tracks_.size(); ++i) {
+      const Track& track = tracks_[i];
+      const MaskOrigin keyOrigin = track.missed == 0 ? MaskOrigin::Detected : MaskOrigin::Extended;
+      if (matched[i]) {
+        const Box& to = next.boxes[*matched[i]];
+        const Point a = centerOf(track.box);
+        const Point b = centerOf(to);
+        add(masks[k], lerp(track.box, to, t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
+            atKey ? keyOrigin : MaskOrigin::Interpolated);
+      } else {
+        const Velocity v = track.velocity.value_or(Velocity{});
+        add(masks[k], shifted(track.box, v.x * since, v.y * since), std::abs(v.x) * steps,
+            std::abs(v.y) * steps, atKey ? keyOrigin : MaskOrigin::Extended);
+      }
     }
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       if (!nextUsed[j]) add(masks[k], next.boxes[j], 0.0, 0.0, MaskOrigin::Extended);
     }
   }
-  std::vector<std::optional<Velocity>> velocity(next.boxes.size());
+  // Detections first (matched ones carry their velocity), then the ghosts of tracks that were missed.
+  std::vector<Track> tracks;
+  tracks.reserve(next.boxes.size());
+  for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0});
   for (const auto& [i, j] : pairs) {
-    const Point a = centerOf(prev.boxes[i]);
+    const Point a = centerOf(tracks_[i].box);
     const Point b = centerOf(next.boxes[j]);
-    velocity[j] = Velocity{(b.x - a.x) / steps, (b.y - a.y) / steps};
+    tracks[j].velocity = Velocity{(b.x - a.x) / steps, (b.y - a.y) / steps};
   }
-  velocity_ = std::move(velocity);
+  for (size_t i = 0; i < tracks_.size(); ++i) {
+    const Track& track = tracks_[i];
+    if (matched[i] || track.missed >= kMaxMissedKeyframes) continue;
+    const Velocity v = track.velocity.value_or(Velocity{});
+    tracks.push_back({shifted(track.box, v.x * steps, v.y * steps), track.velocity, track.missed + 1});
+  }
+  keyTime_ = next.time;
+  tracks_ = std::move(tracks);
   lastSteps_ = steps;
-  prev_ = next;
   return masks;
 }
 
 std::vector<std::vector<MaskBox>> BoxTimeline::finish(const std::vector<FrameTime>& frames) {
-  if (!prev_) {
+  if (!keyTime_) {
     if (!frames.empty()) throw std::invalid_argument("BoxTimeline: frames before the first keyframe");
     return {};
   }
-  const Keyframe& prev = *prev_;
-  if (!frames.empty() && frames.front().index != prev.time.index) {
+  const FrameTime& prevTime = *keyTime_;
+  if (!frames.empty() && frames.front().index != prevTime.index) {
     throw std::invalid_argument("BoxTimeline: frames must start at the previous keyframe");
   }
-  const double steps = lastSteps_ > 0 ? lastSteps_ : 1.0;
+  requireIncreasing(frames);
+  // Extrapolating further than one interval would only drift away from the target.
+  const double cap = lastSteps_ > 0 ? lastSteps_ : 1.0;
   std::vector<std::vector<MaskBox>> masks(frames.size());
   for (size_t k = 0; k < frames.size(); ++k) {
-    const bool atKey = frames[k].index == prev.time.index;
-    const double since = static_cast<double>(frames[k].index - prev.time.index);
-    for (size_t i = 0; i < prev.boxes.size(); ++i) {
-      const Velocity v = velocity_[i].value_or(Velocity{});
-      add(masks[k], shifted(prev.boxes[i], v.x * since, v.y * since), std::abs(v.x) * steps,
-          std::abs(v.y) * steps, atKey ? MaskOrigin::Detected : MaskOrigin::Extended);
+    const bool atKey = frames[k].index == prevTime.index;
+    const double since = std::min(static_cast<double>(frames[k].index - prevTime.index), cap);
+    for (const Track& track : tracks_) {
+      const Velocity v = track.velocity.value_or(Velocity{});
+      const MaskOrigin keyOrigin = track.missed == 0 ? MaskOrigin::Detected : MaskOrigin::Extended;
+      add(masks[k], shifted(track.box, v.x * since, v.y * since), std::abs(v.x) * cap, std::abs(v.y) * cap,
+          atKey ? keyOrigin : MaskOrigin::Extended);
     }
   }
-  prev_.reset();
-  velocity_.clear();
+  keyTime_.reset();
+  tracks_.clear();
   lastSteps_ = 0;
   return masks;
 }

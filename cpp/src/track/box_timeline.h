@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -41,8 +42,10 @@ struct TimelineConfig {
 };
 
 // Turns detections on keyframes into masks for every frame (main spec §7.2): boxes matched across
-// keyframes are interpolated, unmatched ones are extended over one keyframe interval, and every
-// mask is expanded. Feed keyframes in order; frames are identified by decode index.
+// keyframes are interpolated, unmatched ones are extended, and every mask is expanded. A box missed
+// at one keyframe is kept for one more interval as a ghost track (moved along its velocity, masked
+// as `extended`) and can still be matched at the next keyframe; a second miss drops it. Feed
+// keyframes in order; frames are identified by decode index.
 class BoxTimeline {
  public:
   // Throws std::invalid_argument for a non-positive frame size or invalid config.
@@ -54,13 +57,21 @@ class BoxTimeline {
   std::vector<std::vector<MaskBox>> advance(const std::vector<FrameTime>& frames, const Keyframe& next);
 
   // Masks for the frames from the last keyframe (inclusive) to the end, extending every box
-  // forward; resets the timeline.
+  // (ghosts included) forward along its velocity; the shift stops growing after one keyframe
+  // interval. Resets the timeline.
   std::vector<std::vector<MaskBox>> finish(const std::vector<FrameTime>& frames);
 
  private:
   struct Velocity {
     double x = 0;
     double y = 0;
+  };
+
+  // A box on the last keyframe: a real detection (missed == 0) or a ghost (missed keyframes in a row).
+  struct Track {
+    Box box;
+    std::optional<Velocity> velocity;  // px per frame index
+    int missed = 0;
   };
 
   std::vector<std::pair<size_t, size_t>> match(const Keyframe& next, double steps) const;
@@ -70,9 +81,9 @@ class BoxTimeline {
   TimelineConfig config_;
   int width_;
   int height_;
-  std::optional<Keyframe> prev_;
-  std::vector<std::optional<Velocity>> velocity_;  // per box of prev_, px per frame index
-  double lastSteps_ = 0;                           // frames in the last interval
+  std::optional<FrameTime> keyTime_;  // the last keyframe
+  std::vector<Track> tracks_;         // its boxes, then its ghosts
+  double lastSteps_ = 0;              // frames in the last interval
 };
 
 }  // namespace vc
