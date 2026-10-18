@@ -9,4 +9,5 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "models: needs the cached teacher weights and the sg_drive_600s sample frames",
+    "yolo: needs the cached YOLOv8n COCO weights; trains a tiny model on the CPU (about a minute)",
 ]
