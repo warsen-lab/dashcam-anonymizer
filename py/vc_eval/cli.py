@@ -104,7 +104,11 @@ def _run(args) -> int:
     )
     summary = run_all(cfg)
     chosen = summary["chosen_fps"]
-    print(f"run: chosen {chosen:g} fps" if chosen is not None else "run: no detection rate passed P1-P3")
+    print(
+        f"run: candidate {chosen:g} fps (P1-P3 passed; P4: review index.html)"
+        if chosen is not None
+        else "run: no detection rate passed P1-P3"
+    )
     print(f"run: {args.out / 'index.html'}")
     return 0 if chosen is not None else 1
 

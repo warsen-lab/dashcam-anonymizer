@@ -17,7 +17,8 @@ from vc_label.review import ensure_outside
 from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
 from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
 from vc_eval.integrity import check_integrity, probe, probe_cache
-from vc_eval.metrics import HEATMAP_MIN_TARGETS, Rate
+from vc_eval.metrics import Rate
+from vc_eval.report import summary_md
 from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
 from vc_eval.temporal import TemporalReport, evaluate_temporal
 
@@ -26,8 +27,6 @@ MAX_UNCERTAIN_TILES = 60
 MAX_TEMPORAL_TILES = 30
 STDERR_TAIL_LINES = 20
 MIN_DETECT_FPS = 5.0
-STAGES = ("decode", "detect", "track", "mosaic", "encode")
-DASH = "—"
 
 
 @dataclass
@@ -152,6 +151,8 @@ def coverage_json(c: CoverageReport) -> dict:
     # the rates above are the confident tier; the flagged (low-confidence) reference boxes are reported here and never gate
     out["uncertain"] = {cls: rate_json(c.classes[cls].uncertain) for cls in LABEL_CLASSES}
     out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
+    # the whole grid (rows top to bottom, columns left to right), not just the weakest cell: the cells under 30 targets are the ones P2 skips
+    out["heatmap"] = {cls: [[rate_json(rate) for rate in row] for row in c.classes[cls].heatmap] for cls in LABEL_CLASSES}
     out["passed"] = c.passed()
     return out
 
@@ -172,6 +173,7 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
             "redacted_frames": integrity.redacted_frames,
         },
         "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
+        "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),
         "detector": stats.get("detector", ""),
@@ -204,6 +206,7 @@ def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[
         "stems": list(stems),
         "coverage": coverage,
         "stray": {"max": pooled.stray_max, "mean": pooled.stray_mean, "p95": pooled.stray_p95},
+        "misses": {kind: sum(r["misses"][kind] for r in runs if r["fps"] == fps) for kind in ("confident", "uncertain", "temporal")},
         "integrity_passed": integrity_passed,
         "passed": coverage["passed"] and integrity_passed,
     }
@@ -218,10 +221,47 @@ def _href(path: str | Path) -> str:
     return quote(Path(path).as_posix())
 
 
+def _reference_tiers(coverage: dict) -> dict:
+    """Per class, how many must-mask reference targets are confident (gate P1 / P2) and how many uncertain (report only).
+
+    The split is a property of the reference, so any detection rate's pooled coverage gives the same counts.
+    """
+    tiers = {}
+    for cls in LABEL_CLASSES:
+        confident, uncertain = coverage[cls]["total"], coverage["uncertain"][cls]["total"]
+        share = None if confident + uncertain == 0 else uncertain / (confident + uncertain)
+        tiers[cls] = {"confident": confident, "uncertain": uncertain, "uncertain_share": share}
+    return tiers
+
+
+def _spot_counts(reports: dict[str, tuple[CoverageReport, TemporalReport]]) -> dict[str, dict]:
+    """Per stem and kind of miss: how many there are and how many of them the spot-check page shows."""
+    counted = lambda items, limit: {"total": len(items), "shown": len(_spread(items, limit))}  # noqa: E731
+    return {
+        stem: {
+            "confident": counted(coverage.misses, MAX_MISS_TILES),
+            "uncertain": counted(coverage.uncertain_misses, MAX_UNCERTAIN_TILES),
+            "temporal": counted(tempo.misses, MAX_TEMPORAL_TILES),
+        }
+        for stem, (coverage, tempo) in reports.items()
+    }
+
+
+def _counted(note: str, counts: dict[str, dict], kind: str) -> str:
+    """The section note followed by, per stem, how many misses there are and how many are shown (an even spread)."""
+    per_stem = "；".join(f"{stem}：共 {c[kind]['total']} 个，均匀抽取展示 {c[kind]['shown']} 个" for stem, c in counts.items())
+    return f"{note} {per_stem}。"
+
+
 def _spot_sections(
-    cfg: RunConfig, fps: float, reports: dict[str, tuple[CoverageReport, TemporalReport]], frame_counts: dict[str, int | None]
+    cfg: RunConfig,
+    fps: float,
+    reports: dict[str, tuple[CoverageReport, TemporalReport]],
+    frame_counts: dict[str, int | None],
+    counts: dict[str, dict],
 ) -> list[Section]:
-    """`frame_counts` holds the decoded frame count of each stem's redacted video, which integrity already counted."""
+    """`frame_counts` holds the decoded frame count of each stem's redacted video, which integrity already counted;
+    `counts` is _spot_counts of the same reports."""
     img = cfg.out / "img"
     rng = random.Random(cfg.seed)
     misses, uncertain, temporal, random_items, links = [], [], [], [], []
@@ -260,134 +300,28 @@ def _spot_sections(
                 shutil.rmtree(scratch)
     return [
         Section("打码视频", "请完整看一遍，留意是否有露出的人脸或车牌。", [], links),
-        Section("未遮住的参照目标", "老师标注里必须遮住、但打码框覆盖不足 80% 的高置信目标（P1 / P2 按这一层判定）。", misses),
+        Section(
+            "未遮住的参照目标",
+            _counted("老师标注里必须遮住、但打码框覆盖不足 80% 的高置信目标（P1 / P2 按这一层判定）。", counts, "confident"),
+            misses,
+        ),
         Section(
             "低置信参照里没遮住的目标",
-            "这些是老师自己拿不准的参照框（分数偏低，或只有一个人脸老师检出），打码框覆盖不足 80%。其中不少是老师误检"
-            "（路障、标志、贴纸、装饰物），也有一部分是真的模糊车牌，请逐个用眼睛判断该不该遮；它们不计入 P1 / P2。",
+            _counted(
+                "这些是老师自己拿不准的参照框（分数偏低，或只有一个人脸老师检出），打码框覆盖不足 80%。其中不少是老师误检"
+                "（路障、标志、贴纸、装饰物），也有一部分是真的模糊车牌，请逐个用眼睛判断该不该遮；它们不计入 P1 / P2。",
+                counts,
+                "uncertain",
+            ),
             uncertain,
         ),
-        Section("逐帧检测有、稀疏打码漏掉", "同一模型逐帧检测到、但关键帧 + 补框没盖住的框（打码后画面）。", temporal),
+        Section(
+            "逐帧检测有、稀疏打码漏掉",
+            _counted("同一模型逐帧检测到、但关键帧 + 补框没盖住的框（打码后画面）。", counts, "temporal"),
+            temporal,
+        ),
         Section("随机打码帧", "随机抽取的打码后画面，检查漏打与误打。", random_items),
     ]
-
-
-def _pct(rate: dict) -> str:
-    if not rate["total"]:
-        return DASH
-    lo, hi = rate["ci"]
-    return f"{rate['value']:.1%} ({lo * 100:.1f}–{hi:.1%})，n={rate['total']}"
-
-
-def _weakest(coverage: dict) -> str:
-    w = coverage["weakest_cell"]
-    if w is None:
-        return f"n/a（无热力格达到 {HEATMAP_MIN_TARGETS} 个目标）"
-    return f"{w['cls']} r{w['row']}c{w['col']} {w['value']:.1%}（n={w['total']}）"
-
-
-def _number(value, fmt: str) -> str:
-    return DASH if value is None else format(value, fmt)
-
-
-def _failed_details(integrity: dict) -> str:
-    failed = [f"{name}: {integrity['details'].get(name, 'failed')}" for name, ok in integrity["checks"].items() if not ok]
-    return "；".join(failed).replace("|", "/")
-
-
-def _segment_text(segments: list[dict]) -> str:
-    """Frame size and source codec of the segments, once if they agree, per segment otherwise."""
-    kinds = {(s["width"], s["height"], s["codec"]) for s in segments}
-    text = lambda s: f"{s['width']}×{s['height']}，源视频 {s['codec']}"  # noqa: E731
-    if len(kinds) == 1:
-        return text(segments[0])
-    return "；".join(f"{s['stem']} {text(s)}" for s in segments)
-
-
-def _summary_md(summary: dict) -> str:
-    runs = summary["runs"]
-    pooled = summary["pooled"]
-    first = runs[0] if runs else {}
-    chosen = summary["chosen_fps"]
-    mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
-    if chosen is None:
-        chosen_line = "- 选定检测频率：无满足 P1–P3 的频率"
-    else:
-        unjudged = any(p["fps"] == chosen and p["coverage"]["p2"] == "n/a" for p in pooled)
-        note = f"（没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 空洞满足；空间上的薄弱点只能靠 P4 抽查把关）"
-        chosen_line = f"- 选定检测频率：{chosen:g} fps" + (note if unjudged else "")
-    lines = [
-        "# 代理验证结果",
-        "",
-        f"- 模型：{summary['model']}；检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
-        chosen_line,
-        "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
-        "- 参照分两层：P1 / P2 只按高置信参照（没被 `low_score` / `face_single_source` 标记的框）判定；低置信参照单列，只报告，不设门槛。",
-        "",
-        "## 最终覆盖率（P1 / P2，高置信参照）",
-        "",
-        "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） | 最弱热力格 | 通过 |",
-        "|---|---|---|---|---|---|",
-    ]
-    for fps in sorted({r["fps"] for r in runs}):
-        for r in (r for r in runs if r["fps"] == fps):
-            c = r["coverage"]
-            lines.append(f"| {r['stem']} | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | — |")
-        p = next(p for p in pooled if p["fps"] == fps)
-        c = p["coverage"]
-        lines.append(f"| 合计 | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
-    lines += ["", "合计行是各段目标数相加后的覆盖率，P1 / P2 以它为准，“通过”一栏只在合计行；各段行仅供参考。"]
-    if any(r["coverage"]["p2"] == "n/a" for r in runs) or any(p["coverage"]["p2"] == "n/a" for p in pooled):
-        lines += [
-            "",
-            f"n/a：没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，所以 P2 空洞满足（不阻止选定）；空间上的薄弱点只能靠用户的抽查（P4）把关。",
-        ]
-    lines += [
-        "",
-        "## 低置信参照（只报告，不设门槛）",
-        "",
-        "被 `low_score` / `face_single_source` 标记的参照框，只算必须遮住的。其中不少是老师误检（路障、标志、贴纸、装饰物），"
-        "也有一部分是真的模糊车牌，所以不进 P1 / P2；没遮住的在抽查页的“低置信参照里没遮住的目标”一节，请用眼睛判断。",
-        "",
-        "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） |",
-        "|---|---|---|---|",
-    ]
-    for fps in sorted({r["fps"] for r in runs}):
-        for r in (r for r in runs if r["fps"] == fps):
-            u = r["coverage"]["uncertain"]
-            lines.append(f"| {r['stem']} | {fps:g} | {_pct(u['face'])} | {_pct(u['plate'])} |")
-        u = next(p for p in pooled if p["fps"] == fps)["coverage"]["uncertain"]
-        lines.append(f"| 合计 | {fps:g} | {_pct(u['face'])} | {_pct(u['plate'])} |")
-    lines += ["", "## 时间覆盖率", "", "| 段 | fps | 人脸 | 车牌 |", "|---|---|---|---|"]
-    lines += [f"| {r['stem']} | {r['fps']:g} | {_pct(r['temporal']['face'])} | {_pct(r['temporal']['plate'])} |" for r in runs]
-    lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 分辨率 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|---|"]
-    for r in runs:
-        i = r["integrity"]
-        k = i["checks"]
-        cells = " | ".join(mark(k.get(name)) for name in ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"))
-        lines.append(f"| {r['stem']} | {r['fps']:g} | {cells} | {_failed_details(i)} |")
-    lines += ["", "## 误打面积（只报告）", "", "| 段 | fps | 最大 | 均值 | 95 分位 |", "|---|---|---|---|---|"]
-    lines += [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
-    lines += [
-        "", f"## 速度（本机，{_segment_text(summary['segments'])}）", "",
-        "各阶段为吞吐（帧/秒），总耗时为整段秒数；后端见开头的检测后端与编码器。", "",
-        "| 段 | fps | 解码 | 检测 | 补框 | 打码 | 编码 | 总耗时 |", "|---|---|---|---|---|---|---|---|",
-    ]
-    for r in runs:
-        cells = " | ".join(_number(r["stages"].get(s, {}).get("fps"), ".0f") for s in STAGES)
-        lines.append(f"| {r['stem']} | {r['fps']:g} | {cells} | {_number(r['elapsed_s'], '.1f')} s |")
-    c = summary["consistency"]
-    lines += [
-        "",
-        "## C++ / Python 一致性",
-        "",
-        f"{c['images']} 张图、{c['boxes']} 个框，配上 {c['matched']} 个（其中分数 ≥ 0.3 的 {c['matched_confident']} 个）。"
-        f"分数 ≥ 0.3 的配对最大坐标差 {c['max_diff_px']:.3f} px（门槛 < 1 px，判定只看这一项）；"
-        f"所有配对最大坐标差 {c['max_diff_all_px']:.3f} px（含低分框，只报告，贴着阈值的低分框在两个运行时之间本来就会有出入）；"
-        f"未配上（分数 ≥ 0.3）{c['unmatched_confident']} 个、（< 0.3）{c['unmatched_low']} 个：{'通过' if c['passed'] else '未通过'}。",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
@@ -418,17 +352,28 @@ def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
         segments.append({"stem": stem, "width": coverage.width, "height": coverage.height, "codec": codec})
     pooled = [_pooled_entry(cfg.stems, fps, runs, reports) for fps in sorted(cfg.fps_values)]
     chosen = _choose(pooled)
-    summary = {"model": str(cfg.model), "chosen_fps": chosen, "segments": segments, "runs": runs, "pooled": pooled, "consistency": consistency}
+    spot_fps = chosen if chosen is not None else min(cfg.fps_values)
+    spot_reports = {stem: reports[(stem, spot_fps)] for stem in cfg.stems}
+    counts = _spot_counts(spot_reports)
+    summary = {
+        "model": str(cfg.model),
+        "chosen_fps": chosen,
+        "segments": segments,
+        "reference": _reference_tiers(pooled[0]["coverage"]),
+        "runs": runs,
+        "pooled": pooled,
+        "spot_check": {"fps": spot_fps, "stems": counts},
+        "consistency": consistency,
+    }
     # the numbers first: a failure while building the page must not lose them
     (cfg.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    (cfg.out / "summary.md").write_text(_summary_md(summary), encoding="utf-8")
-    spot_fps = chosen if chosen is not None else min(cfg.fps_values)
+    (cfg.out / "summary.md").write_text(summary_md(summary), encoding="utf-8")
     frame_counts = {r["stem"]: r["integrity"]["redacted_frames"] for r in runs if r["fps"] == spot_fps}
-    sections = _spot_sections(cfg, spot_fps, {stem: reports[(stem, spot_fps)] for stem in cfg.stems}, frame_counts)
-    write_spotcheck(
-        cfg.out,
-        "打码抽查",
-        f"检测频率 {spot_fps:g} fps。参照为老师融合标注（代理），老师漏标的目标只能靠人眼发现。",
-        sections,
+    sections = _spot_sections(cfg, spot_fps, spot_reports, frame_counts, counts)
+    intro = (
+        f"候选检测频率 {spot_fps:g} fps（P1–P3 通过；P4 由你看完本页后确认）。"
+        if chosen is not None
+        else f"没有检测频率通过 P1–P3，下面是扫描里最小的 {spot_fps:g} fps。"
     )
+    write_spotcheck(cfg.out, "打码抽查", f"{intro}参照为老师融合标注（代理），老师漏标的目标只能靠人眼发现。", sections)
     return summary

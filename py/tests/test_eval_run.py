@@ -17,6 +17,7 @@ from vc_label.contracts import Box, Detection, write_jsonl
 from vc_eval.cli import main
 from vc_eval import integrity
 from vc_eval.integrity import FFMPEG
+from vc_eval.metrics import size_bin_labels, wilson_interval
 from vc_eval.run import RunConfig, run_all
 
 STEM = "seg"
@@ -89,8 +90,13 @@ def _rows(path):
         return list(csv.DictReader(f))
 
 
-def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,)):
-    """`masks` is a list of mask dicts for every frame, or a function (stem, frame) -> list of mask dicts."""
+STAGES = ("decode", "detect", "track", "mosaic", "encode")
+
+
+def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,), busy=None):
+    """`masks` is a list of mask dicts for every frame, or a function (stem, frame) -> list of mask dicts.
+
+    `busy` maps a stage to its busy seconds in stats.json (0.1 for the stages it does not name)."""
     masks_of = masks if callable(masks) else (lambda stem, frame: list(masks))
 
     def run(cmd, check, capture_output, text):
@@ -113,7 +119,7 @@ def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,)):
         (d / "stats.json").write_text(json.dumps({
             "frames": N, "detect_every_frame": "--detect-every-frame" in cmd,
             "detector": "student/CPU", "encoder": "libx264", "elapsed_s": 1.5,
-            "stages": {s: {"busy_s": 0.1, "items": N, "fps": 300.0} for s in ("decode", "detect", "track", "mosaic", "encode")},
+            "stages": {s: {"busy_s": (busy or {}).get(s, 0.1), "items": N, "fps": 300.0} for s in STAGES},
         }))
     return run
 
@@ -182,7 +188,7 @@ def test_summary_marks_unjudgeable_p2_and_empty_rates(tmp_path, monkeypatch):
     assert summary["runs"][0]["temporal"]["plate"]["value"] is None  # JSON must not carry NaN
     md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
     assert "n/a" in _row(md, "| seg | 5 |")  # the first table: coverage with its weakest heatmap cell
-    assert "P2 空洞满足" in _row(md, "- 选定检测频率")
+    assert "P2 空洞满足" in _row(md, "- 候选检测频率")
     coverage_table = md.split("## 最终覆盖率")[1].split("##")[0]
     assert "空洞满足" in coverage_table and "P4" in coverage_table and "没有热力格达到 30 个目标" in coverage_table
     assert "不算通过" not in md
@@ -265,7 +271,7 @@ def test_p1_is_judged_on_the_pooled_segments(tmp_path, monkeypatch, missed_faces
     assert "n=200" in _row(table, "| 合计 | 5 |")
     for stem in ("sega", "segb"):
         assert _row(table, f"| {stem} | 5 |").rstrip().endswith("| — |")  # only the pooled row carries the verdict
-    assert "- 选定检测频率：" + ("5 fps" if chosen else "无满足") in md
+    assert "- 候选检测频率：" + ("5 fps（P1–P3 通过；P4 待你看完 index.html 确认）" if chosen else "无满足 P1–P3") in md
 
 
 def test_integrity_must_pass_for_every_segment_not_just_the_pool(tmp_path, monkeypatch):
@@ -451,6 +457,199 @@ def test_the_extracted_frames_are_deleted_even_when_a_tile_fails(tmp_path, monke
         run_all(_cfg(tmp_path), runner=_fake_runner([]))
     assert not (tmp_path / "report" / "img" / STEM / "redacted").exists()
     assert (tmp_path / "report" / "summary.md").is_file()  # the numbers were written first
+
+
+def _coverage_section(md):
+    return md.split("## 最终覆盖率")[1].split("\n## ")[0]
+
+
+def test_a_passing_class_with_too_few_targets_gets_a_sample_size_warning_under_the_pooled_row(tmp_path, monkeypatch):
+    _setup(tmp_path)  # 5 faces and 5 plates, all masked: 100 % of 5 passes P1 but proves little
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["chosen_fps"] == 5
+    lo = f"{wilson_interval(5, 5)[0]:.1%}"
+    lines = _coverage_section((tmp_path / "report" / "summary.md").read_text(encoding="utf-8")).splitlines()
+    for cls in ("人脸", "车牌"):
+        warning = f"- {cls} n=5：即使全部遮住，95% 区间下限只有 {lo}，样本不足以证明 ≥ 99%"
+        assert warning in lines
+    pooled = next(n for n, line in enumerate(lines) if line.startswith("| 合计 | 5 |"))
+    assert lines[pooled + 1] == "" and lines[pooled + 2].startswith("- 人脸 n=5：") and lines[pooled + 3].startswith("- 车牌 n=5：")
+    pooled10 = next(n for n, line in enumerate(lines) if line.startswith("| 合计 | 10 |"))
+    assert lines[pooled10 + 2].startswith("- 人脸 n=5：")  # every detection rate has its own pooled row with its own warning
+    chosen = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("- 候选检测频率")[1].splitlines()[0]
+    assert "样本量不足以证明" in chosen and "人脸" in chosen and "车牌" in chosen
+
+
+def test_the_warning_says_what_was_measured_when_not_everything_was_covered(tmp_path, monkeypatch):
+    summary = _grid_run(tmp_path, monkeypatch, missed_faces=2)  # 198 / 200 faces: exactly 99 %, a pass
+    assert summary["chosen_fps"] == 5
+    lo = f"{wilson_interval(198, 200)[0]:.1%}"
+    lines = _coverage_section((tmp_path / "report" / "summary.md").read_text(encoding="utf-8")).splitlines()
+    assert f"- 人脸 n=200：实测 198/200，95% 区间下限只有 {lo}，样本不足以证明 ≥ 99%" in lines
+    assert f"- 车牌 n=200：即使全部遮住，95% 区间下限只有 {f'{wilson_interval(200, 200)[0]:.1%}'}，样本不足以证明 ≥ 99%" in lines
+
+
+def test_no_sample_size_warning_for_a_class_that_fails_or_has_no_targets(tmp_path, monkeypatch):
+    summary = _grid_run(tmp_path, monkeypatch, missed_faces=3)  # 197 / 200: P1 fails, so there is nothing to caveat
+    assert summary["chosen_fps"] is None
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- 人脸 n=" not in md and "- 车牌 n=200：" in md  # the plates still pass with too few targets
+    assert "样本量不足以证明" not in md.split("- 候选检测频率")[1].splitlines()[0]
+
+
+def test_the_candidate_line_and_the_cli_do_not_claim_more_than_p1_to_p3(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    import vc_eval.run as run_module
+
+    real = run_module.run_all
+    roots = dict(videos=tmp_path / "videos", frames_root=tmp_path / "frames", labels_root=tmp_path / "labels", redacted_root=tmp_path / "redacted")
+    monkeypatch.setattr(run_module, "run_all", lambda cfg: real(dataclasses.replace(cfg, **roots), runner=_fake_runner([])))
+    assert main(["run", "--stems", STEM, "--model", str(tmp_path / "model"), "--out", str(tmp_path / "report"), "--fps", "5,10"]) == 0
+    out = capsys.readouterr().out
+    assert "run: candidate 5 fps (P1-P3 passed; P4: review index.html)" in out and "chosen" not in out
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- 候选检测频率：5 fps（P1–P3 通过；P4 待你看完 index.html 确认）" in md and "选定" not in md
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    assert "候选检测频率 5 fps" in page and "P4" in page
+
+
+def test_the_summary_says_pixel_level_masking_is_not_what_these_numbers_measure(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    line = next(line for line in md.splitlines() if "masks.jsonl" in line and "像素" in line)
+    assert "C++" in line and "P4" in line and "不是" in line
+
+
+def test_the_summary_lists_how_much_of_the_reference_is_confident_and_how_much_is_gated_out(tmp_path, monkeypatch):
+    _setup(tmp_path, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))  # 5 confident + 5 uncertain faces, 5 confident plates
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["reference"] == {
+        "face": {"confident": 5, "uncertain": 5, "uncertain_share": 0.5},
+        "plate": {"confident": 5, "uncertain": 0, "uncertain_share": 0.0},
+    }
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    tiers = md.split("## 参照分层")[1].split("\n## ")[0]
+    assert "| 人脸 | 5（50.0%） | 5（50.0%） | 10 |" in tiers and "| 车牌 | 5（100.0%） | 0（0.0%） | 5 |" in tiers
+
+
+def test_reference_tiers_are_pooled_over_the_segments_and_a_class_without_targets_has_no_share(tmp_path, monkeypatch):
+    for stem in ("sega", "segb"):
+        _setup(tmp_path, stem, teachers=(TEACHERS[0], UNCERTAIN), flagged=(UNCERTAIN,))  # no plates at all
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path, stems=["sega", "segb"], fps_values=[5]), runner=_fake_runner([]))
+    assert summary["reference"]["face"] == {"confident": 10, "uncertain": 10, "uncertain_share": 0.5}
+    assert summary["reference"]["plate"] == {"confident": 0, "uncertain": 0, "uncertain_share": None}
+    tiers = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 参照分层")[1].split("\n## ")[0]
+    assert "| 车牌 | 0 | 0 | 0 |" in tiers
+
+
+def test_every_miss_section_says_how_many_there_are_and_how_many_are_shown(tmp_path, monkeypatch):
+    flagged = tuple(Box("face", 5 + 50 * k, 2, 25 + 50 * k, 22, score=0.3, src="teacher_yunet") for k in range(3))
+    _setup(tmp_path, labelled=range(N), teachers=(*TEACHERS, *flagged), flagged=flagged)  # 90 uncertain misses
+    _python_dets(monkeypatch)
+    edge = Box("face", 5, 90, 25, 110, src="student")  # the dense run also sees a face nothing masks: 30 temporal misses
+    summary = run_all(_cfg(tmp_path, fps_values=[5]), runner=_fake_runner([], dense=(FACE, edge)))
+
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    assert "seg：共 0 个，均匀抽取展示 0 个" in _section(page, "未遮住的参照目标")
+    assert "seg：共 90 个，均匀抽取展示 60 个" in _section(page, "低置信参照里没遮住的目标")
+    assert "seg：共 30 个，均匀抽取展示 30 个" in _section(page, "逐帧检测有、稀疏打码漏掉")
+    assert summary["runs"][0]["misses"] == {"confident": 0, "uncertain": 90, "temporal": 30}
+    assert summary["pooled"][0]["misses"] == {"confident": 0, "uncertain": 90, "temporal": 30}
+    assert summary["spot_check"] == {
+        "fps": 5,
+        "stems": {STEM: {"confident": {"total": 0, "shown": 0}, "uncertain": {"total": 90, "shown": 60}, "temporal": {"total": 30, "shown": 30}}},
+    }
+    assert len(list((tmp_path / "report" / "img" / STEM).glob("uncertain_*.jpg"))) == 60
+
+
+def test_miss_notes_list_every_segment_with_its_own_counts(tmp_path, monkeypatch):
+    for stem in ("sega", "segb"):
+        _setup(tmp_path, stem, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))
+    _python_dets(monkeypatch)
+    covers_flagged = {"cls": "face", "x1": 95, "y1": 5, "x2": 135, "y2": 55, "origin": "detected"}
+    masks = lambda stem, frame: [MASK, PLATE_MASK] + ([covers_flagged] if stem == "sega" else [])  # noqa: E731
+    summary = run_all(_cfg(tmp_path, stems=["sega", "segb"], fps_values=[5]), runner=_fake_runner([], masks=masks))
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    note = _section(page, "低置信参照里没遮住的目标")
+    assert "sega：共 0 个，均匀抽取展示 0 个" in note and "segb：共 5 个，均匀抽取展示 5 个" in note
+    assert summary["spot_check"]["stems"]["segb"]["uncertain"] == {"total": 5, "shown": 5}
+
+
+def test_summary_json_carries_the_full_heatmap_of_every_coverage_entry(tmp_path, monkeypatch):
+    summary = _grid_run(tmp_path, monkeypatch, missed_faces=1)
+    for entry in (summary["runs"][0]["coverage"], summary["pooled"][0]["coverage"]):
+        face = entry["heatmap"]["face"]
+        assert len(face) == 4 and all(len(row) == 6 for row in face)
+        assert all(set(cell) == {"hits", "total", "value", "ci"} for row in face for cell in row)
+    face = summary["pooled"][0]["coverage"]["heatmap"]["face"]
+    assert [[cell["total"] for cell in row] for row in face] == [[20] * 5 + [0], [20] * 5 + [0], [0] * 6, [0] * 6]
+    assert sum(cell["hits"] for row in face for cell in row) == 199
+    assert face[0][0]["value"] is not None and face[3][5]["value"] is None  # an empty cell is null, never NaN
+    plate = summary["pooled"][0]["coverage"]["heatmap"]["plate"]
+    assert [[cell["total"] for cell in row] for row in plate] == [[0] * 6, [0] * 6, [20] * 5 + [0], [20] * 5 + [0]]
+    json.loads((tmp_path / "report" / "summary.json").read_text())
+
+
+def test_summary_md_details_the_candidate_rate_with_bins_fill_best_effort_and_the_heatmap(tmp_path, monkeypatch):
+    _grid_run(tmp_path, monkeypatch, missed_faces=1)
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    detail = md.split("## 细分")[1].split("\n## ")[0]
+    assert detail.splitlines()[0].startswith("（候选 5 fps")
+    assert "尺寸档" in detail and "时间补洞" in detail and "尽力遮挡" in detail and "热力图" in detail
+    for label in size_bin_labels(H):
+        assert f"| {label} |" in detail  # one row per size bin
+    assert _row(detail, f"| {size_bin_labels(H)[-1]} |").count("n=200") == 2  # the 14 px faces and 20 px plates all sit in the largest bin
+    grid = [line for line in detail.splitlines() if line.startswith("| r")]
+    assert len(grid) == 8  # 4 rows for the faces, 4 for the plates
+    assert grid[0] == "| r0 | 19/20 | 20/20 | 20/20 | 20/20 | 20/20 | — |"
+    assert grid[2] == "| r2 | — | — | — | — | — | — |" and grid[4] == "| r0 | — | — | — | — | — | — |" and grid[6].startswith("| r2 | 20/20 |")
+    assert "| 行 | c0 | c1 | c2 | c3 | c4 | c5 |" in detail
+
+
+def test_summary_md_details_the_smallest_rate_when_none_passes(tmp_path, monkeypatch):
+    _grid_run(tmp_path, monkeypatch, missed_faces=3)  # P1 fails at every rate
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert md.split("## 细分")[1].splitlines()[0].startswith("（最小的 5 fps，没有频率通过 P1–P3")
+
+
+def test_speed_table_shows_busy_seconds_and_share_per_stage_and_estimates_the_slowest(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([], busy={"mosaic": 0.6}))
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    speed = md.split("## 速度")[1].split("\n## ")[0]
+    assert md.count("## 速度（本机，160×120，源视频 h264）") == 1
+    assert "| 段 | fps | 解码 | 检测（关键帧） | 补框 | 打码 | 编码 | 总耗时 |" in speed
+    row = _row(speed, "| seg | 5 |")
+    assert row.split("|")[3:8] == [" 0.1 s（10%） ", " 0.1 s（10%） ", " 0.1 s（10%） ", " 0.6 s（60%） ", " 0.1 s（10%） "]
+    assert row.rstrip().endswith("| 1.5 s |")
+    slowest = next(line for line in speed.splitlines() if "估计最慢阶段" in line)
+    assert "打码" in slowest and "1.2 s" in slowest and "60%" in slowest  # both detection rates together
+    assert "关键帧" in speed.split("| 段 | fps | 解码")[0]  # the note above the table says what the detect column counts
+    assert "并行" in speed
+
+
+def test_speed_table_survives_a_run_without_stage_timings(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    fake = _fake_runner([])
+
+    def no_stages(cmd, check, capture_output, text):
+        fake(cmd, check, capture_output, text)
+        if cmd[0].endswith("vc_redact"):
+            stats = Path(cmd[cmd.index("--out") + 1]) / STEM / "stats.json"
+            stats.write_text(json.dumps({**json.loads(stats.read_text()), "stages": {}}))
+
+    run_all(_cfg(tmp_path), runner=no_stages)
+    speed = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 速度")[1].split("\n## ")[0]
+    assert _row(speed, "| seg | 5 |").split("|")[3:8] == [" — "] * 5
+    assert "估计最慢阶段" not in speed
 
 
 def test_consistency_runs_before_the_sweeps(tmp_path, monkeypatch):
