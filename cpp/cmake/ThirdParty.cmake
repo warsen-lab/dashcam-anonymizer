@@ -22,7 +22,11 @@ endif()
 add_library(vc_nlohmann_json INTERFACE)
 target_include_directories(vc_nlohmann_json SYSTEM INTERFACE "${VC_NLOHMANN_JSON_INCLUDE}")
 
-find_library(VC_ONNXRUNTIME_LIBRARY NAMES onnxruntime PATHS "${VC_ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH)
+# NO_CACHE: a cached result would keep pointing at the old package after VC_ONNXRUNTIME_ROOT changes.
+# The unset drops an entry that an older configure of this directory cached (find_library skips the
+# search while the variable is set).
+unset(VC_ONNXRUNTIME_LIBRARY CACHE)
+find_library(VC_ONNXRUNTIME_LIBRARY NAMES onnxruntime PATHS "${VC_ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH NO_CACHE)
 if(NOT VC_ONNXRUNTIME_LIBRARY OR NOT EXISTS "${VC_ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
   message(FATAL_ERROR
     "ONNX Runtime not found under VC_ONNXRUNTIME_ROOT=${VC_ONNXRUNTIME_ROOT} (see cpp/README.md)")

@@ -173,6 +173,32 @@ TEST(Mosaic, PixelatesAWideRectWithOddChromaBlocks) {
   expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 64, {0, 0, 203, 52}, 26, {0, 0, 102, 26}, 13, 13, 8);
 }
 
+TEST(Mosaic, PixelatesARectWhoseBlockSizeIsOdd) {
+  // 200 px long side: block ceil(200 / 8) = 25, chroma block ceil(25 / 2) = 13. The 8 luma blocks
+  // across fit exactly; the chroma row (100 px) is 7 blocks of 13 and a last one of 9 (more than half).
+  // Height 50 is two exact blocks; chroma height 25 is 13 + 12.
+  expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 64, {0, 0, 200, 50}, 25, {0, 0, 100, 25}, 13, 13, 16);
+  auto frame = test::makeNoiseFrame(208, 64, AV_PIX_FMT_NV12, 17);
+  const auto before = test::deepCopy(*frame);
+  applyMosaic(*frame, {PixelRect{0, 0, 200, 50}}, MosaicConfig{});
+  expectPixelated(*frame, *before, 0, 1, 0, {0, 0, 200, 50}, 25, 25, 208, 64);
+  expectPixelated(*frame, *before, 1, 2, 0, {0, 0, 100, 25}, 13, 13, 104, 32);
+  expectPixelated(*frame, *before, 1, 2, 1, {0, 0, 100, 25}, 13, 13, 104, 32);
+}
+
+// With an odd block of 25 the largest remainder that is merged is (25 - 1) / 2 = 12 (24 < 25); a
+// remainder of 13 is more than half a block and stays a block of its own. The chroma planes
+// (block 13, remainders 6 and 7) follow the same rule: 6 is merged, 7 stays.
+TEST(Mosaic, MergesARemainderOfExactlyHalfTheOddBlockSizeMinusOne) {
+  // 62 = 25 + 25 + 12 high: the last 12 rows join the second block (25 + 37). Chroma 31 = 13 + 13 + 5.
+  expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 64, {0, 0, 200, 62}, 25, {0, 0, 100, 31}, 13, 13, 18);
+  // 63 = 25 + 25 + 13 high: the last 13 rows are a block of their own. Chroma 32 = 13 + 13 + 6: merged.
+  expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 64, {0, 0, 200, 63}, 25, {0, 0, 100, 32}, 13, 13, 19);
+  // The same boundary along x: 200 px long side is block 25, so use a tall rect, 25 + 25 + 12 wide.
+  expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 208, {0, 0, 62, 200}, 25, {0, 0, 31, 100}, 13, 13, 20);
+  expectPlanarMosaic(AV_PIX_FMT_YUV420P, 208, 208, {0, 0, 63, 200}, 25, {0, 0, 32, 100}, 13, 13, 21);
+}
+
 TEST(Mosaic, PixelatesAnOddFrameSize) {
   // 97 x 63: chroma planes are 49 x 32. {48, 15, 97, 63} runs to the right and bottom edges:
   // 49 x 48 luma (last column merged), chroma {24, 7, 49, 32} is 25 x 25 (both last lines merged).

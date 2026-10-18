@@ -2,10 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "common/vc_error.h"
+#include "test_media.h"
 
 namespace vc {
 namespace {
@@ -51,6 +54,36 @@ TEST(ModelInfo, RejectsUnsupportedValues) {
     } catch (const VcError& e) {
       EXPECT_EQ(std::string(e.what()).rfind("model.json: ", 0), 0u) << e.what();
     }
+  }
+}
+
+TEST(ModelInfo, ReadsAModelJsonFile) {
+  const std::filesystem::path path = test::tmpDir() / "model_info_valid.json";
+  std::ofstream(path) << kValid;
+  const ModelInfo m = readModelInfo(path);
+  EXPECT_EQ(m.name, "m");
+  EXPECT_EQ(m.classes, (std::vector<std::string>{"face", "plate"}));
+  EXPECT_EQ(m.inputWidth, 1920);
+  EXPECT_EQ(m.inputHeight, 1088);
+}
+
+TEST(ModelInfo, NamesTheFileInItsErrors) {
+  const std::filesystem::path missing = test::tmpDir() / "model_info_missing.json";
+  std::filesystem::remove(missing);
+  try {
+    readModelInfo(missing);
+    ADD_FAILURE() << "no throw for a missing file";
+  } catch (const VcError& e) {
+    EXPECT_EQ(std::string(e.what()), "cannot read " + missing.string());
+  }
+
+  const std::filesystem::path broken = test::tmpDir() / "model_info_broken.json";
+  std::ofstream(broken) << replaced(kValid, R"("yolov8")", R"("yolov5")");
+  try {
+    readModelInfo(broken);
+    ADD_FAILURE() << "no throw for an unsupported file";
+  } catch (const VcError& e) {
+    EXPECT_EQ(std::string(e.what()).rfind(broken.string() + ": ", 0), 0u) << e.what();
   }
 }
 

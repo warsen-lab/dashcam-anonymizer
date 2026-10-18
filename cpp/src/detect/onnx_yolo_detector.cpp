@@ -81,6 +81,7 @@ struct OnnxYoloDetector::Impl {
   std::string backend = "CPU";
   int64_t anchors = 0;
   std::vector<float> input;
+  Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
   void checkShapes(const fs::path& onnx) {
     if (session.GetInputCount() != 1 || session.GetOutputCount() < 1) {
@@ -158,9 +159,8 @@ std::vector<Box> OnnxYoloDetector::detect(const VideoFrame& frame) {
   if (frame.av == nullptr) throw VcError("detector: frame has no pixels");
   s.filler->fill(*frame.av, s.input.data());
   try {
-    const Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     const std::array<int64_t, 4> shape{1, 3, s.info.inputHeight, s.info.inputWidth};
-    Ort::Value tensor = Ort::Value::CreateTensor<float>(memory, s.input.data(), s.input.size(),
+    Ort::Value tensor = Ort::Value::CreateTensor<float>(s.memory, s.input.data(), s.input.size(),
                                                         shape.data(), shape.size());
     const char* inputs[] = {s.inputName.c_str()};
     const char* outputs[] = {s.outputName.c_str()};

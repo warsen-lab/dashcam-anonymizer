@@ -41,7 +41,8 @@ add_library(vc_detect_lib STATIC
   src/detect/onnx_yolo_detector.cpp
   src/detect/yolo_decode.cpp
 )
-target_link_libraries(vc_detect_lib PUBLIC vc_core vc_nlohmann_json vc_onnxruntime)
+# Only the .cpp files of this library include nlohmann/json; its headers do not.
+target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime PRIVATE vc_nlohmann_json)
 
 add_library(vc_extract_lib STATIC
   apps/vc_extract/extract_cli.cpp
@@ -60,7 +61,8 @@ add_library(vc_redact_lib STATIC
   apps/vc_redact/redact_job.cpp
 )
 target_include_directories(vc_redact_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
-target_link_libraries(vc_redact_lib PUBLIC vc_detect_lib Threads::Threads)
+# redact_config.h includes nlohmann/json, so it is part of this library's interface.
+target_link_libraries(vc_redact_lib PUBLIC vc_detect_lib vc_nlohmann_json Threads::Threads)
 
 add_executable(vc_extract apps/vc_extract/main.cpp)
 target_link_libraries(vc_extract PRIVATE vc_extract_lib)

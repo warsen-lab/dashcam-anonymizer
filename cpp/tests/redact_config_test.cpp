@@ -97,6 +97,9 @@ TEST(RedactConfig, RejectsBadInput) {
       // The mosaic settings are JSON integers in [1, 4096]: no fractions, no overflow, no bounds missed.
       R"({"mosaic_min_block_px": 16.5})",           R"({"mosaic_min_block_px": 1e10})",
       R"({"mosaic_min_block_px": 10000000000})",    R"({"mosaic_min_block_px": 4097})",
+      // 2^32 + 1 would be 1 after a truncation to 32 bits.
+      R"({"mosaic_min_block_px": 4294967297})",     R"({"mosaic_blocks_per_long_side": 4294967297})",
+      R"({"mosaic_min_block_px": 18446744073709551617})",
       R"({"mosaic_min_block_px": -3})",             R"({"mosaic_min_block_px": 16.0})",
       R"({"mosaic_min_block_px": null})",           R"({"mosaic_min_block_px": true})",
       R"({"mosaic_blocks_per_long_side": 16.5})",   R"({"mosaic_blocks_per_long_side": 1e10})",
