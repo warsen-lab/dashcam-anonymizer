@@ -1,5 +1,7 @@
 # 数据、模型与中间产物（含个人信息，不进仓库）
 data/
+# 但 C++ 测试夹具（常量 YOLO 模型等）要进仓库
+!cpp/tests/data/
 
 # Python
 .venv/

@@ -35,9 +35,10 @@ target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)
 add_library(vc_detect_lib STATIC
   src/detect/fake_detector.cpp
   src/detect/model_info.cpp
+  src/detect/onnx_yolo_detector.cpp
   src/detect/yolo_decode.cpp
 )
-target_link_libraries(vc_detect_lib PUBLIC vc_core vc_nlohmann_json)
+target_link_libraries(vc_detect_lib PUBLIC vc_core vc_nlohmann_json vc_onnxruntime)
 
 add_library(vc_extract_lib STATIC
   apps/vc_extract/extract_cli.cpp

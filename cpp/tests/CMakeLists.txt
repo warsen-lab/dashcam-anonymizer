@@ -12,12 +12,14 @@ add_executable(vc_tests
   letterbox_test.cpp
   luma_thumb_test.cpp
   model_info_test.cpp
+  onnx_yolo_detector_test.cpp
   video_reader_test.cpp
   yolo_decode_test.cpp
 )
 target_link_libraries(vc_tests PRIVATE vc_extract_lib vc_detect_lib vc_core GTest::gtest_main)
 target_compile_definitions(vc_tests PRIVATE
   VC_FFMPEG="${VC_FFMPEG_EXECUTABLE}"
+  VC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
   VC_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp")
 
 include(GoogleTest)
