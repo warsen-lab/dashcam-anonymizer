@@ -1,0 +1,22 @@
+{
+  "retinaface_score": 0.3,
+  "yunet_score": 0.5,
+  "coco_score": 0.3,
+  "owlv2_score": 0.1,
+  "plate_search_min_vehicle_frac": 0.03,
+  "fuse_iou": 0.5,
+  "face_low_score": [
+    0.3,
+    0.5
+  ],
+  "plate_low_score": [
+    0.1,
+    0.3
+  ],
+  "min_person_height_frac": 0.12,
+  "face_region_frac": 0.35,
+  "min_vehicle_width_frac": 0.05,
+  "temporal_max_gap_ms": 500.0,
+  "temporal_match_iou": 0.3,
+  "temporal_present_iou": 0.1
+}
