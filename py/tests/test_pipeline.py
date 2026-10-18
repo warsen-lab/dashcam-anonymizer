@@ -263,3 +263,33 @@ def test_run_teach_rejects_a_corrupt_teacher_pin(tmp_path, content):
 
     with pytest.raises(ValueError, match="teach_config.json"):
         run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+
+
+class BlindInTheDark:
+    """A face teacher that finds nothing in a dark frame."""
+
+    def __init__(self, src: str) -> None:
+        self.src = src
+
+    def detect(self, bgr):
+        return [] if bgr.mean() < 100 else [Box("face", 100, 40, 120, 64, score=0.9, src=self.src)]
+
+
+def test_run_fuse_fills_a_face_the_teachers_missed_between_two_neighbouring_frames(tmp_path):
+    frames, labels, review = make_frames(tmp_path, 3), tmp_path / "labels", tmp_path / "review"  # frames 0, 12, 24 at 0, 200, 400 ms
+    cv2.imwrite(str(frames / "000012.jpg"), np.full((H, W, 3), 40, np.uint8))
+    blind = Teachers(faces=[BlindInTheDark("teacher_retinaface"), BlindInTheDark("teacher_yunet")], coco=FakeCoco(), plates=FakePlates())
+    run_teach(frames, labels, blind, CFG, log=lambda _: None)
+
+    summary, _, flags = run_fuse(frames, labels, CFG)
+
+    assert (summary.frames, summary.filled) == (3, 1)
+    assert [(f.frame, f.detail) for f in flags if f.rule == "temporal_fill"] == [(12, "between frames 0 and 24")]
+    yolo = (labels / "yolo" / "000012.txt").read_text().splitlines()
+    assert sorted(line.split()[0] for line in yolo) == ["0", "1"]  # the filled face and the plate the teachers did see
+    assert len((labels / "yolo" / "000000.txt").read_text().splitlines()) == 2
+
+    run_export_review(frames, labels, review, CFG)
+    doc = json.loads((review / "000012.json").read_text())
+    [face] = [s for s in doc["shapes"] if s["label"] == "face"]
+    assert "src=temporal_fill" in face["description"] and face["description"].endswith("temporal_fill")

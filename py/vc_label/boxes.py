@@ -59,10 +59,10 @@ def _weighted(members: list[Box]) -> Box:
 def fuse(boxes: list[Box], iou_threshold: float) -> list[Box]:
     """Weighted box fusion per class.
 
-    Boxes are visited by descending score; each joins the first cluster whose fused box overlaps it
-    by at least `iou_threshold`, otherwise it starts a new cluster. A fused box has score-weighted
-    coordinates, the maximum member score (recall first: no down-weighting of single-source boxes)
-    and the union of member sources joined with '+'.
+    Boxes are visited by descending score; each joins the cluster whose fused box overlaps it most,
+    if that IoU is at least `iou_threshold`, otherwise it starts a new cluster. A fused box has
+    score-weighted coordinates, the maximum member score (recall first: no down-weighting of
+    single-source boxes) and the union of member sources joined with '+'.
     """
     by_class: dict[str, list[Box]] = defaultdict(list)
     for b in boxes:

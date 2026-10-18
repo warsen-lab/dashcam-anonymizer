@@ -21,6 +21,27 @@ def test_ensure_outside_rejects_the_frames_dir_and_anything_below_it(tmp_path):
     ensure_outside(frames, tmp_path / "frames" / "trip2")
 
 
+def _filesystem_is_case_sensitive(directory: Path) -> bool:
+    probe = directory / "CaseProbe"
+    probe.mkdir()
+    try:
+        return not (directory / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_ensure_outside_sees_through_case_variants_of_the_frames_dir(tmp_path):
+    if _filesystem_is_case_sensitive(tmp_path):
+        pytest.skip("case-sensitive filesystem: a differently cased path is a different directory")
+    frames = tmp_path / "frames" / "trip"
+    frames.mkdir(parents=True)
+    with pytest.raises(ValueError, match="inside the frames directory"):
+        ensure_outside(frames, tmp_path / "frames" / "TRIP" / "labels")
+    with pytest.raises(ValueError, match="inside the frames directory"):
+        ensure_outside(frames, tmp_path / "FRAMES" / "Trip")
+    ensure_outside(frames, tmp_path / "FRAMES" / "trip2")
+
+
 def test_labelme_document_points_back_to_the_frame(tmp_path):
     frames, review = tmp_path / "frames" / "trip", tmp_path / "review" / "trip"
     ref = FrameRef("trip.mp4", 7, 116.7, frames / "000007.jpg")

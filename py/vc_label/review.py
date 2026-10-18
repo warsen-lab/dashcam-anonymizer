@@ -22,8 +22,15 @@ def ensure_outside(frames_dir: Path, path: Path) -> None:
     """Refuses any output inside the frames dir: vc_extract --overwrite deletes that whole dir."""
     frames = frames_dir.resolve()
     target = path.resolve()
+    message = f"{path} is inside the frames directory {frames_dir}; write labels elsewhere"
     if target == frames or frames in target.parents:
-        raise ValueError(f"{path} is inside the frames directory {frames_dir}; write labels elsewhere")
+        raise ValueError(message)
+    # resolve() keeps the spelling it is given, and APFS is case-insensitive: data/frames/TRIP/labels
+    # is inside data/frames/trip yet compares different. The filesystem knows whether two paths are one directory.
+    if frames_dir.exists():
+        for candidate in (target, *target.parents):
+            if candidate.exists() and os.path.samefile(candidate, frames_dir):
+                raise ValueError(message)
 
 
 def labelme_document(ref: FrameRef, boxes: list[Box], flags: list[Flag], review_dir: Path, width: int, height: int) -> dict:
