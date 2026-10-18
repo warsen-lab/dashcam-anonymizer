@@ -18,7 +18,7 @@
 - 权重固定在共享缓存 `~/.cache/video-compliance/models/yolov8n.pt`（sha256 `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36`）；文件缺失时报错，绝不让 ultralytics 去下载。
 - 导入 ultralytics 之前必须调用 `vc_train.offline.ultralytics_offline_env()`：`YOLO_OFFLINE=1`、`YOLO_AUTOINSTALL=false`、`YOLO_CONFIG_DIR=~/.cache/video-compliance/ultralytics-config`，所有代理变量指向本机黑洞 `http://127.0.0.1:9`；导入后关闭 ultralytics 设置同步（`sync=False`）。
 - **只跑指定的测试文件**，从仓库根目录执行：`.venv/bin/pytest -q py/tests/<file>.py`；不得运行不带路径的 `pytest`，不得运行与本计划无关的测试文件。
-- 推理几何（§4.1）：缩放比 `r = min(W_in / W, H_in / H)`；缩放后尺寸 `round(W·r) × round(H·r)`；图像放在**左上角**，其余像素填 114；通道顺序 RGB，像素除以 255；模型输出坐标除以 `r` 回到原图。
+- 推理几何（§4.1）：缩放比 `r = min(W_in / W, H_in / H)`；缩放后尺寸 `round(W·r) × round(H·r)`（四舍五入取半进位，与 C++ `std::lround` 一致；不用 Python 的银行家舍入）；图像放在**左上角**，其余像素填 114；通道顺序 RGB，像素除以 255；模型输出坐标除以 `r` 回到原图。
 - YOLOv8 ONNX 输出形状 `[1, 4 + nc, N]`：前 4 行为输入像素坐标下的 `cx, cy, w, h`，其后每类一行分数（已过 sigmoid）；每个锚点取分数最高的类别（不做多标签）。
 - 类别固定 `face=0`、`plate=1`（`vc_label.contracts.LABEL_CLASSES`）。
 - 裁块：裁窗 `w = min(W, round(1280 / s))`、`h = min(H, round(1280 / s))`，`s` 为推理缩放比；x 方向位置 `{0, W − w}`、y 方向 `{0, H − h}`（去重）；框裁到窗内后可见面积 < 30% 的丢弃。另加一张整帧样本。
@@ -131,7 +131,7 @@ def test_decode_maps_back_by_r_thresholds_and_suppresses_per_class():
     plates = [b for b in boxes if b.cls == "plate"]
     assert len(faces) == 1 and len(plates) == 1
     f = faces[0]
-    assert (f.x1, f.y1, f.x2, f.y2) == pytest.approx((56, 24, 72, 40))
+    assert (f.x1, f.y1, f.x2, f.y2) == pytest.approx((56, 28, 72, 36))
     assert f.score == pytest.approx(0.9) and f.src == "student"
 
 
@@ -165,6 +165,8 @@ canvas pixels; dividing by r maps them back to the frame.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
@@ -182,12 +184,14 @@ def letterbox(bgr: np.ndarray, in_width: int, in_height: int) -> tuple[np.ndarra
     """BGR uint8 image -> ([1, 3, in_height, in_width] float32 RGB in [0, 1], r)."""
     height, width = bgr.shape[:2]
     r = letterbox_scale(width, height, in_width, in_height)
-    new_w, new_h = round(width * r), round(height * r)
+    # half up, like C++ std::lround (Python's round() would round 360.5 to 360)
+    new_w = min(in_width, math.floor(width * r + 0.5))
+    new_h = min(in_height, math.floor(height * r + 0.5))
     resized = bgr if (new_w, new_h) == (width, height) else cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     canvas = np.full((in_height, in_width, 3), PAD_VALUE, np.uint8)
     canvas[:new_h, :new_w] = resized
     rgb = canvas[:, :, ::-1].transpose(2, 0, 1)
-    return (rgb[None].astype(np.float32) / 255.0), r
+    return np.ascontiguousarray(rgb[None], dtype=np.float32) / 255.0, r
 
 
 def decode_yolov8(
