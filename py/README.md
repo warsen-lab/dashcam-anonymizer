@@ -122,3 +122,35 @@ PYTHONPATH=py .venv/bin/python -m vc_label import-review --frames data/frames/<s
 ```
 
 带 `models` 标记的用例需要上面四个模型文件（RetinaFace、YuNet、COCO、OWLv2，以 `required_model_files()` 为准）和样例帧 `data/frames/sg_drive_600s/006005.jpg`，缺任何一个都整体跳过，从不触发下载。
+
+## vc_train：学生模型训练与导出
+
+依赖：在 `requirements.txt` 之外再装 `requirements-train.txt`，ultralytics 用 `--no-deps` 单独安装（它声明的 `opencv-python` 会与 `opencv-python-headless` 冲突）。权重 `~/.cache/video-compliance/models/yolov8n.pt` 来自 ultralytics/assets v8.4.0 发布页，sha256 `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36`。运行时不联网：导入 ultralytics 前设置 `YOLO_OFFLINE=1`、`YOLO_AUTOINSTALL=false` 并把代理指向本机黑洞 `127.0.0.1:9`。
+
+在仓库根目录运行。
+
+```bash
+# 1. 数据集：每张已标注帧 → 两个 1280×1080 原尺度裁块 + 一张整帧；每段最后 20 秒作验证集
+PYTHONPATH=py .venv/bin/python -m vc_train dataset --stem sg_drive_300s --stem sg_drive_600s \
+    --stem sg_drive_1500s --stem sg_drive_2700s --out data/datasets/r1
+```
+
+```bash
+# 2. 训练（MPS，30 分钟封顶）
+PYTHONPATH=py .venv/bin/python -m vc_train train --data data/datasets/r1/data.yaml --run data/models/r1
+```
+
+```bash
+# 3. 导出 ONNX（1×3×1088×1920，图内无 NMS）+ model.json，并与 PyTorch 比对 20 张留出帧
+PYTHONPATH=py .venv/bin/python -m vc_train export --run data/models/r1 --dataset data/datasets/r1 \
+    --check-frames data/frames/sg_drive_2100s
+```
+
+- 验证集是每段视频最后 20 秒（以该段已处理帧中最晚的时间为准；`dataset --val-tail-ms` 可改），其余为训练集。
+- `dataset` 拒绝非空的 `--out`，也拒绝落在抽帧目录里的输出；重跑请换一个新目录。
+- `export` 检查 ONNX 输入是静态的 `[1, 3, H, W]`、float32，且 H、W 都是 32 的倍数，不满足就报错。
+- `model.json` 里的 `metrics.val_map50` 取自被导出的 checkpoint 所在训练目录的 `results.csv`（最高的 `metrics/mAP50(B)`），不是命令行参数。
+- 退出码：0 成功；`export --check-frames` 的一致性检查不通过为 1；参数或输入错误为 2，错误信息写到 stderr，以 `vc_train:` 开头。
+
+测试：`.venv/bin/pytest -q py/tests/test_train_geometry.py py/tests/test_train_dataset.py py/tests/test_train_cli.py`；
+`.venv/bin/pytest -q py/tests/test_train_yolo.py`（在 CPU 上训一个 64px 小模型，约 1 分钟，缺权重时跳过）。
