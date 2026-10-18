@@ -217,7 +217,7 @@ PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <�
   - “参照分层”表按类给出合并后高置信 / 低置信两层必须遮住的目标各有多少、占多大比例（`summary.json` 的 `reference`），让你看到有多少参照被挡在 P1 / P2 之外；紧接着的“低置信参照”表同样先各段后合计，只报告。
   - 开头一行写明：覆盖率读的是 `masks.jsonl`（`vc_redact` 声明要打码的框），不是打码后视频的像素；马赛克有没有真的打上去，只由 C++ 单元测试和 P4 验证。
   - “细分”一节给候选频率（没有就是最小的频率）合并后的尺寸档表、时间补洞框、尽力遮挡和热力图的 命中/目标数 网格；`summary.json` 的每个覆盖率条目（`runs[].coverage`、`pooled[].coverage`）带完整的 4×6 热力图 `heatmap`（每类 4 行 × 6 列，每格同 `rate_json`）。
-  - 速度表每个阶段显示忙碌秒数和占该次运行各阶段忙碌秒数之和的比例；“检测（关键帧）”只统计做过检测的关键帧，不是每一帧；表后一行估计最慢的阶段（各阶段并行，只是粗略估计）。
+  - 速度表按 vc_redact 实际的三个并行线程（解码 / 主线程 / 编码）给出忙碌秒数和占该次总耗时的比例，最接近 100% 的是瓶颈；主线程里串行的检测 / 补框 / 打码给出占主线程的比例（“检测（关键帧）”只统计做过检测的关键帧）；另有准备时间（`setup_s`，加载模型、CoreML 编译）和吞吐（帧数 / 总耗时）。旧版 stats.json 没有 `stages.main` 时用三项相加。表后一行给出估计瓶颈。
   - 一致性一行把分数 ≥ 0.3 的配对最大坐标差（判定只看它）和所有配对的最大坐标差（含低分框，只报告）分开写。
   - `summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed`、`passed` 和 `misses`）；`runs[].misses` 是该段该频率下高置信 / 低置信 / 时间覆盖三种漏掉的个数。
 - 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、参照分层、低置信参照、细分、时间覆盖率、完整性、误打面积、速度（标题注明“本机”、段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。抽查页每一节的说明都按段写明“<段>：共 M 个，均匀抽取展示 N 个”（高置信漏掉、低置信漏掉、时间覆盖三节；M 也写进 `summary.json` 的 `spot_check`），所以你知道看到的是全部还是抽样。`--out` 和 `data/redacted` 都不能放在抽帧根目录 `data/frames/` 之下的任何位置（包括没有用 `--stems` 列出的段，那些目录会被 `vc_extract --overwrite` 整个删掉）；`--out` 也不能等于或包含 `data/frames`、`data/labels`、`data/videos`、`data/redacted`、模型目录、两个可执行文件和配置文件，也不能落在 `data/redacted/dense` 或 `data/redacted/fps<频率>` 里（`vc_redact` 写那里）。
