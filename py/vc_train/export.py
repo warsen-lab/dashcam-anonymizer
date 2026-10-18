@@ -12,7 +12,7 @@ import cv2
 
 from vc_label.boxes import iou
 from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox
-from vc_train.offline import load_yolo
+from vc_train.offline import load_yolo, ultralytics_offline_env
 
 MODEL_ONNX = "model.onnx"
 MODEL_JSON = "model.json"
@@ -60,6 +60,8 @@ def export_onnx(
 
     out_dir only receives files once the exported graph has been read back and has the expected static float shape.
     """
+    # first: reading the checkpoint unpickles ultralytics classes, and importing ultralytics already runs its network check
+    ultralytics_offline_env()
     check_input_size(in_width, in_height)
     map50 = _checkpoint_map50(Path(weights))
     model = load_yolo(weights)
@@ -106,6 +108,7 @@ def check_consistency(
     iou_threshold: float = 0.5,
 ) -> ConsistencyReport:
     """Runs the same preprocessed tensors through PyTorch (CPU) and onnxruntime and compares decoded boxes."""
+    ultralytics_offline_env()
     import onnxruntime as ort
     import torch
 

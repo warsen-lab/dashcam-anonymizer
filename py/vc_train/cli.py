@@ -8,6 +8,7 @@ from pathlib import Path
 
 from vc_label.contracts import read_frames_csv
 from vc_label.review import ensure_outside
+from vc_train.offline import ultralytics_offline_env
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -117,6 +118,9 @@ def _export(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # before any command can reach ultralytics, directly or by unpickling a checkpoint (defence in depth: train and
+    # export call it again where they load a model)
+    ultralytics_offline_env()
     args = _parser().parse_args(argv)
     try:
         return {"dataset": _dataset, "train": _train, "export": _export}[args.command](args)

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,18 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.skip(reason=f"missing {', '.join(str(p) for p in missing)}"))
         if "yolo" in item.keywords and not yolo_weights.exists():
             item.add_marker(pytest.mark.skip(reason=f"missing {yolo_weights}"))
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ_after_train_tests(request):
+    """vc_train.cli.main and ultralytics_offline_env() rewrite proxy and YOLO_* variables; keep that out of other tests."""
+    if not request.module.__name__.startswith("test_train_"):
+        yield
+        return
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 @pytest.fixture(scope="session")
