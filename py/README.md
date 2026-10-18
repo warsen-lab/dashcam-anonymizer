@@ -198,7 +198,11 @@ PYTHONPATH=py .venv/bin/python -m vc_train export --run data/models/r1 --dataset
 
 ### run：检测频率扫描
 
-在仓库根目录运行。前提：每段留出视频有 `data/videos/<stem>.mp4`、`data/frames/<stem>/`、`data/labels/<stem>/`（已跑过 `vc_label fuse`，`merged.jsonl` 和 `flags.csv` 都不能比 `processed.txt` 旧），`--model` 是含 `model.onnx` 和 `model.json` 的目录，`build/cpp-release/` 下有 `vc_redact` 和 `vc_detect`。
+在仓库根目录运行。前提：每段留出视频有 `data/videos/<stem>.mp4`、`data/frames/<stem>/`、`data/labels/<stem>/`（已跑过 `vc_label fuse`，`merged.jsonl` 和 `flags.csv` 都不能比 `processed.txt` 旧），`--model` 是含 `model.onnx` 和 `model.json` 的目录，`build/cpp-release/` 下有 `vc_redact` 和 `vc_detect`。速度表量的是 Release 构建，请先按下面的命令把 Release 版构建到这个目录（`--vc-redact` / `--vc-detect` 的默认值就指向这里）：
+
+```bash
+cmake -S cpp -B build/cpp-release -DCMAKE_BUILD_TYPE=Release -DVC_BUILD_TESTS=OFF && cmake --build build/cpp-release -j 4
+```
 
 ```bash
 PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <模型目录> --out data/reports/<run>
