@@ -11,10 +11,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 from vc_label.contracts import LABEL_CLASSES, read_frames_csv
-from vc_label.pipeline import MERGED
 from vc_label.review import ensure_outside
 from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
-from vc_eval.coverage import CoverageReport, evaluate_coverage
+from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
 from vc_eval.integrity import check_integrity, probe
 from vc_eval.metrics import HEATMAP_MIN_TARGETS, Rate
 from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
@@ -22,6 +21,7 @@ from vc_eval.temporal import TemporalReport, evaluate_temporal
 
 MAX_MISS_TILES = 60
 MAX_TEMPORAL_TILES = 30
+STDERR_TAIL_LINES = 20
 STAGES = ("decode", "detect", "track", "mosaic", "encode")
 DASH = "—"
 
@@ -60,9 +60,20 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
     for stem in cfg.stems:
         ensure_outside(cfg.frames_root / stem, cfg.out)
-        for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv", cfg.labels_root / stem / MERGED):
+        for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv"):
             if not needed.is_file():
                 raise ValueError(f"{needed} does not exist")
+
+
+def _check_inputs(cfg: RunConfig) -> None:
+    """The reference-side checks evaluate_coverage makes, for every stem, before the first vc_redact run."""
+    sizes = {}
+    for stem in cfg.stems:
+        labels = load_label_inputs(cfg.frames_root / stem, cfg.labels_root / stem)
+        sizes[stem] = (labels.width, labels.height)
+    if len(set(sizes.values())) > 1:
+        shown = ", ".join(f"{stem} {w}x{h}" for stem, (w, h) in sizes.items())
+        raise ValueError(f"the segments have different frame sizes ({shown}); their coverage cannot be pooled")
 
 
 def _fps_dir(cfg: RunConfig, fps: float) -> Path:
@@ -70,11 +81,15 @@ def _fps_dir(cfg: RunConfig, fps: float) -> Path:
 
 
 def _redact(cfg: RunConfig, stem: str, out: Path, extra: list[str], runner) -> None:
-    runner(
-        [str(cfg.vc_redact), "--input", str(cfg.videos / f"{stem}.mp4"), "--out", str(out), "--model", str(cfg.model),
-         "--config", str(cfg.config), *extra, "--overwrite"],
-        check=True, capture_output=True, text=True,
-    )
+    command = [
+        str(cfg.vc_redact), "--input", str(cfg.videos / f"{stem}.mp4"), "--out", str(out), "--model", str(cfg.model),
+        "--config", str(cfg.config), *extra, "--overwrite",
+    ]
+    try:
+        runner(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        tail = "\n".join((exc.stderr or "").strip().splitlines()[-STDERR_TAIL_LINES:])
+        raise ValueError(f"vc_redact failed on {stem} ({' '.join(extra)}, exit {exc.returncode}): {tail}") from exc
 
 
 def rate_json(rate: Rate) -> dict:
@@ -86,7 +101,7 @@ def coverage_json(c: CoverageReport) -> dict:
     out = {cls: rate_json(c.classes[cls].rate) for cls in LABEL_CLASSES}
     weakest = c.weakest_cell()
     out["weakest_cell"] = None if weakest is None else {"cls": weakest[0], "row": weakest[1], "col": weakest[2], **rate_json(weakest[3])}
-    # P2 cannot be judged when no heatmap cell holds enough targets; that is not a pass
+    # with no heatmap cell holding enough targets P2 is vacuously satisfied ("n/a"); only the user's spot check guards that
     out["p2"] = "n/a" if weakest is None else ("pass" if c.heatmap_passed() else "fail")
     out["temporal_fill"] = {cls: rate_json(c.classes[cls].temporal_fill) for cls in LABEL_CLASSES}
     out["best_effort"] = {cls: rate_json(c.classes[cls].best_effort) for cls in LABEL_CLASSES}
@@ -130,12 +145,24 @@ def _consistency(cfg: RunConfig, runner) -> dict:
     return {**asdict(report), "passed": report.passed()}
 
 
-def _choose(runs: list[dict], fps_values: list[float]) -> float | None:
-    for fps in sorted(fps_values):
-        mine = [r for r in runs if r["fps"] == fps]
-        if mine and all(r["coverage"]["passed"] and r["integrity"]["passed"] for r in mine):
-            return fps
-    return None
+def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]]) -> dict:
+    """P1 / P2 on the coverage of all segments together (one final recall per class); P3 must hold for every segment."""
+    pooled = pool([reports[(stem, fps)][0] for stem in stems])
+    coverage = coverage_json(pooled)
+    integrity_passed = all(r["integrity"]["passed"] for r in runs if r["fps"] == fps)
+    return {
+        "fps": fps,
+        "stems": list(stems),
+        "coverage": coverage,
+        "stray": {"max": pooled.stray_max, "mean": pooled.stray_mean, "p95": pooled.stray_p95},
+        "integrity_passed": integrity_passed,
+        "passed": coverage["passed"] and integrity_passed,
+    }
+
+
+def _choose(pooled: list[dict]) -> float | None:
+    """The smallest detection rate whose pooled coverage passes while every segment's integrity does."""
+    return min((entry["fps"] for entry in pooled if entry["passed"]), default=None)
 
 
 def _href(path: str | Path) -> str:
@@ -193,20 +220,31 @@ def _number(value, fmt: str) -> str:
 
 
 def _failed_details(integrity: dict) -> str:
-    failed = [integrity["details"].get(name, name) for name, ok in integrity["checks"].items() if not ok]
+    failed = [f"{name}: {integrity['details'].get(name, 'failed')}" for name, ok in integrity["checks"].items() if not ok]
     return "；".join(failed).replace("|", "/")
+
+
+def _segment_text(segments: list[dict]) -> str:
+    """Frame size and source codec of the segments, once if they agree, per segment otherwise."""
+    kinds = {(s["width"], s["height"], s["codec"]) for s in segments}
+    text = lambda s: f"{s['width']}×{s['height']}，源视频 {s['codec']}"  # noqa: E731
+    if len(kinds) == 1:
+        return text(segments[0])
+    return "；".join(f"{s['stem']} {text(s)}" for s in segments)
 
 
 def _summary_md(summary: dict) -> str:
     runs = summary["runs"]
+    pooled = summary["pooled"]
     first = runs[0] if runs else {}
     chosen = summary["chosen_fps"]
     mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
     if chosen is None:
         chosen_line = "- 选定检测频率：无满足 P1–P3 的频率"
     else:
-        unjudged = any(r["fps"] == chosen and r["coverage"]["p2"] == "n/a" for r in runs)
-        chosen_line = f"- 选定检测频率：{chosen:g} fps" + ("（P2 无法判定：热力格样本不足）" if unjudged else "")
+        unjudged = any(p["fps"] == chosen and p["coverage"]["p2"] == "n/a" for p in pooled)
+        note = f"（没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 空洞满足；空间上的薄弱点只能靠 P4 抽查把关）"
+        chosen_line = f"- 选定检测频率：{chosen:g} fps" + (note if unjudged else "")
     lines = [
         "# 代理验证结果",
         "",
@@ -219,11 +257,19 @@ def _summary_md(summary: dict) -> str:
         "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） | 最弱热力格 | 通过 |",
         "|---|---|---|---|---|---|",
     ]
-    for r in runs:
-        c = r["coverage"]
-        lines.append(f"| {r['stem']} | {r['fps']:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
-    if any(r["coverage"]["p2"] == "n/a" for r in runs):
-        lines += ["", f"n/a：没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 无法判定、不算通过；此时“通过”一栏只反映 P1。"]
+    for fps in sorted({r["fps"] for r in runs}):
+        for r in (r for r in runs if r["fps"] == fps):
+            c = r["coverage"]
+            lines.append(f"| {r['stem']} | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | — |")
+        p = next(p for p in pooled if p["fps"] == fps)
+        c = p["coverage"]
+        lines.append(f"| 合计 | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
+    lines += ["", "合计行是各段目标数相加后的覆盖率，P1 / P2 以它为准，“通过”一栏只在合计行；各段行仅供参考。"]
+    if any(r["coverage"]["p2"] == "n/a" for r in runs) or any(p["coverage"]["p2"] == "n/a" for p in pooled):
+        lines += [
+            "",
+            f"n/a：没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，所以 P2 空洞满足（不阻止选定）；空间上的薄弱点只能靠用户的抽查（P4）把关。",
+        ]
     lines += ["", "## 时间覆盖率", "", "| 段 | fps | 人脸 | 车牌 |", "|---|---|---|---|"]
     lines += [f"| {r['stem']} | {r['fps']:g} | {_pct(r['temporal']['face'])} | {_pct(r['temporal']['plate'])} |" for r in runs]
     lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|"]
@@ -235,7 +281,7 @@ def _summary_md(summary: dict) -> str:
     lines += ["", "## 误打面积（只报告）", "", "| 段 | fps | 最大 | 均值 | 95 分位 |", "|---|---|---|---|---|"]
     lines += [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
     lines += [
-        "", "## 速度（本机）", "",
+        "", f"## 速度（本机，{_segment_text(summary['segments'])}）", "",
         "各阶段为吞吐（帧/秒），总耗时为整段秒数；后端见开头的检测后端与编码器。", "",
         "| 段 | fps | 解码 | 检测 | 补框 | 打码 | 编码 | 总耗时 |", "|---|---|---|---|---|---|---|---|",
     ]
@@ -256,8 +302,11 @@ def _summary_md(summary: dict) -> str:
 
 def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
     _validate(cfg)
+    _check_inputs(cfg)
     cfg.out.mkdir(parents=True, exist_ok=True)
+    consistency = _consistency(cfg, runner)  # a missing vc_detect or a bad model fails here, not after minutes of sweeps
     runs: list[dict] = []
+    segments: list[dict] = []
     reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]] = {}
     for stem in cfg.stems:
         _redact(cfg, stem, cfg.redacted_root / "dense", ["--detect-every-frame"], runner)
@@ -267,8 +316,12 @@ def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
             entry, coverage, temporal = _evaluate(cfg, stem, fps)
             runs.append(entry)
             reports[(stem, fps)] = (coverage, temporal)
-    chosen = _choose(runs, cfg.fps_values)
-    summary = {"model": str(cfg.model), "chosen_fps": chosen, "runs": runs, "consistency": _consistency(cfg, runner)}
+        coverage = reports[(stem, cfg.fps_values[0])][0]
+        codec = probe(cfg.videos / f"{stem}.mp4").video.codec
+        segments.append({"stem": stem, "width": coverage.width, "height": coverage.height, "codec": codec})
+    pooled = [_pooled_entry(cfg.stems, fps, runs, reports) for fps in sorted(cfg.fps_values)]
+    chosen = _choose(pooled)
+    summary = {"model": str(cfg.model), "chosen_fps": chosen, "segments": segments, "runs": runs, "pooled": pooled, "consistency": consistency}
     # the numbers first: a failure while building the page must not lose them
     (cfg.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (cfg.out / "summary.md").write_text(_summary_md(summary), encoding="utf-8")

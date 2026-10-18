@@ -63,7 +63,7 @@ def _coverage(args) -> int:
     r = evaluate_coverage(args.frames, args.labels, args.masks)
     weakest = r.weakest_cell()
     cell = (
-        f"P2 n/a (no heatmap cell has {HEATMAP_MIN_TARGETS} targets)"
+        f"P2 n/a (no heatmap cell has {HEATMAP_MIN_TARGETS} targets, so P2 is vacuously satisfied)"
         if weakest is None
         else f"weakest {weakest[0]} r{weakest[1]}c{weakest[2]} {_rate_text(weakest[3])}"
     )

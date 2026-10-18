@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from vc_label.contracts import LABEL_CLASSES, Box, read_frames_csv
+from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, read_frames_csv
 from vc_label.pipeline import MERGED, PROCESSED, check_labels_match_frames, read_processed
 from vc_label.review import image_size
 from vc_label.rules import TEMPORAL_SOURCE
@@ -99,9 +99,28 @@ def _fused_labels(labels_dir: Path) -> Path:
     return merged
 
 
-def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
+@dataclass(frozen=True)
+class LabelInputs:
+    """The checked reference side of a coverage evaluation: labelled frames, their video and size, the fused targets."""
+
+    used: list[FrameRef]
+    video: str
+    width: int
+    height: int
+    targets: dict[int, list[Box]]
+
+
+def load_label_inputs(frames_dir: Path, labels_dir: Path) -> LabelInputs:
+    """Reads and checks everything evaluate_coverage needs from the reference side.
+
+    Raises ValueError for labels taught on other frames, a missing processed.txt, no labelled frames, a missing or
+    stale merged.jsonl, or merged labels of another video; OSError if frames.csv or a frame image cannot be read.
+    The sweep calls this for every segment before its first vc_redact run, which takes minutes.
+    """
     refs = read_frames_csv(frames_dir)
     check_labels_match_frames(frames_dir, labels_dir, refs)
+    if not (labels_dir / PROCESSED).is_file():
+        raise ValueError(f"{labels_dir / PROCESSED} does not exist; run vc_label teach and fuse on {labels_dir} first")
     done = read_processed(labels_dir)
     used = [r for r in refs if r.frame in done]
     if not used:
@@ -111,13 +130,19 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
     merged_videos, targets = detections_by_frame(merged)
     if merged_videos - {video}:
         raise ValueError(f"{merged} holds labels for {', '.join(sorted(merged_videos - {video}))}, not {video}")
+    width, height = image_size(used[0].image)
+    return LabelInputs(used, video, width, height, targets)
+
+
+def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
+    labels = load_label_inputs(frames_dir, labels_dir)
+    video, width, height, targets = labels.video, labels.width, labels.height, labels.targets
     mask_videos, masks = read_masks(masks_path)
     if mask_videos - {video}:
         raise ValueError(f"{masks_path} is for {', '.join(sorted(mask_videos))}, not {video}")
-    width, height = image_size(used[0].image)
-    report = CoverageReport(video, len(used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES})
+    report = CoverageReport(video, len(labels.used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES})
     stray = []
-    for ref in used:
+    for ref in labels.used:
         if ref.frame not in masks:
             raise ValueError(f"{masks_path} has no line for frame {ref.frame}")
         frame_targets = [b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES]
@@ -143,3 +168,45 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
     report.stray_mean = float(np.mean(stray))
     report.stray_p95 = float(np.percentile(stray, 95))
     return report
+
+
+def _sum(rates: list[Rate]) -> Rate:
+    return Rate(sum(r.hits for r in rates), sum(r.total for r in rates))
+
+
+def pool(reports: list[CoverageReport]) -> CoverageReport:
+    """One report over all segments: the rates are summed, so P1 and P2 are judged on the pooled counts.
+
+    Misses are concatenated (their frame numbers belong to their own segment), `stray_max` and `stray_p95` are the
+    worst of the segments, `stray_mean` is weighted by the number of labelled frames, `video` joins the names with
+    commas. Reports of different frame sizes are refused: their size bins and heatmap cells do not line up.
+    """
+    if not reports:
+        raise ValueError("no coverage reports to pool")
+    sizes = {(r.width, r.height) for r in reports}
+    if len(sizes) > 1:
+        shown = ", ".join(f"{r.video} {r.width}x{r.height}" for r in reports)
+        raise ValueError(f"cannot pool coverage of different frame sizes ({shown})")
+    first = reports[0]
+    classes = {}
+    for cls in LABEL_CLASSES:
+        parts = [r.classes[cls] for r in reports]
+        classes[cls] = ClassCoverage(
+            rate=_sum([c.rate for c in parts]),
+            bins={label: _sum([c.bins[label] for c in parts]) for label in first.classes[cls].bins},
+            heatmap=[[_sum([c.heatmap[row][col] for c in parts]) for col in range(GRID_COLS)] for row in range(GRID_ROWS)],
+            temporal_fill=_sum([c.temporal_fill for c in parts]),
+            best_effort=_sum([c.best_effort for c in parts]),
+        )
+    frames = sum(r.frames for r in reports)
+    return CoverageReport(
+        video=",".join(r.video for r in reports),
+        frames=frames,
+        width=first.width,
+        height=first.height,
+        classes=classes,
+        misses=[m for r in reports for m in r.misses],
+        stray_max=max(r.stray_max for r in reports),
+        stray_mean=sum(r.stray_mean * r.frames for r in reports) / frames if frames else 0.0,
+        stray_p95=max(r.stray_p95 for r in reports),
+    )

@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 from vc_label.contracts import Box, Detection, write_jsonl
-from vc_eval.coverage import evaluate_coverage
+from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, pool
+from vc_eval.metrics import Rate
 from vc_eval.records import detections_by_frame, read_masks
 from vc_eval.temporal import evaluate_temporal
 
@@ -272,3 +273,100 @@ def test_temporal_refuses_an_empty_masks_file(tmp_path):
     sparse.write_text("")
     with pytest.raises(ValueError, match="no frames"):
         evaluate_temporal(dense, sparse, 1080)
+
+
+def test_coverage_refuses_a_missing_processed_file(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [Box("face", 100, 100, 130, 140)]})
+    (labels / "processed.txt").unlink()
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0])
+    with pytest.raises(ValueError, match="processed.txt does not exist"):
+        evaluate_coverage(frames, labels, masks)
+
+
+def _pool_inputs(tmp_path):
+    """Two segments sharing one face position: `a` (2 frames: face and tiny face covered, plate and filled face missed)
+    and `b` (1 frame: face covered, plate and filled face missed, plus a 50 x 50 px stray mask)."""
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    plate = Box("plate", 300, 300, 340, 310, src="teacher_owlv2")
+    tiny = Box("face", 500, 500, 505, 508, src="teacher_yunet")  # best effort
+    filled = Box("face", 900, 500, 920, 530, src="temporal_fill")
+    frames_a = _frames(tmp_path, "a", [0, 10])
+    labels_a = _labels(tmp_path, "a", {0: [face, plate, tiny], 10: [filled]})
+    masks_a = _masks(tmp_path / "ma.jsonl", "a.mp4", {0: [Box("face", 90, 90, 140, 150), Box("face", 495, 495, 510, 512)]}, [0, 10])
+    frames_b = _frames(tmp_path, "b", [0])
+    labels_b = _labels(tmp_path, "b", {0: [face, plate, Box("face", 700, 100, 740, 150, src="temporal_fill")]})
+    masks_b = _masks(tmp_path / "mb.jsonl", "b.mp4", {0: [Box("face", 90, 90, 140, 150), Box("face", 0, 0, 50, 50)]}, [0])
+    return (
+        evaluate_coverage(frames_a, labels_a, masks_a),
+        evaluate_coverage(frames_b, labels_b, masks_b),
+    )
+
+
+def test_pool_adds_every_rate_and_concatenates_misses(tmp_path):
+    a, b = _pool_inputs(tmp_path)
+    p = pool([a, b])
+    assert (p.video, p.frames, p.width, p.height) == ("a.mp4,b.mp4", 3, W, H)
+    for cls in ("face", "plate"):
+        for name in ("rate", "temporal_fill", "best_effort"):
+            x, y, z = getattr(a.classes[cls], name), getattr(b.classes[cls], name), getattr(p.classes[cls], name)
+            assert (z.hits, z.total) == (x.hits + y.hits, x.total + y.total), (cls, name)
+        for label, rate in p.classes[cls].bins.items():
+            assert (rate.hits, rate.total) == (
+                a.classes[cls].bins[label].hits + b.classes[cls].bins[label].hits,
+                a.classes[cls].bins[label].total + b.classes[cls].bins[label].total,
+            )
+        for r in range(len(p.classes[cls].heatmap)):
+            for c, rate in enumerate(p.classes[cls].heatmap[r]):
+                assert (rate.hits, rate.total) == (
+                    a.classes[cls].heatmap[r][c].hits + b.classes[cls].heatmap[r][c].hits,
+                    a.classes[cls].heatmap[r][c].total + b.classes[cls].heatmap[r][c].total,
+                )
+    # the same face (100,100) sits in the same heatmap cell of both segments: the cell adds up
+    assert (a.classes["face"].heatmap[0][0].total, b.classes["face"].heatmap[0][0].total, p.classes["face"].heatmap[0][0].total) == (1, 1, 2)
+    assert (p.classes["face"].rate.hits, p.classes["face"].rate.total) == (2, 4)  # a face and a filled face in each segment
+    assert [(m.frame, m.box.cls) for m in p.misses] == [(0, "plate"), (10, "face"), (0, "plate"), (0, "face")]
+    assert p.misses[:2] == a.misses and p.misses[2:] == b.misses
+    # the originals are not touched
+    assert (a.classes["face"].rate.total, b.classes["face"].rate.total) == (2, 2)
+
+
+def test_pool_takes_the_worst_stray_and_weights_the_mean_by_frames(tmp_path):
+    a, b = _pool_inputs(tmp_path)
+    p = pool([a, b])
+    assert p.stray_max == max(a.stray_max, b.stray_max)
+    assert p.stray_p95 == max(a.stray_p95, b.stray_p95)
+    assert p.stray_mean == pytest.approx((a.stray_mean * a.frames + b.stray_mean * b.frames) / (a.frames + b.frames))
+    assert p.stray_mean != pytest.approx((a.stray_mean + b.stray_mean) / 2)  # 2 frames against 1: not a plain average
+
+
+def test_pool_judges_the_summed_counts_not_each_segment(tmp_path):
+    # 100 faces and 100 plates per segment; b misses 2 faces: b alone is at 98 %, the two together at exactly 99 %
+    def report(video, missed):
+        r = CoverageReport(video, 10, W, H, {c: _empty_class(H) for c in ("face", "plate")})
+        for cls in ("face", "plate"):
+            hits = 100 - (missed if cls == "face" else 0)
+            r.classes[cls].rate = Rate(hits, 100)
+        return r
+
+    a, b = report("a.mp4", 0), report("b.mp4", 2)
+    assert a.class_passed("face") and not b.class_passed("face")
+    assert pool([a, b]).class_passed("face") and pool([a, b]).passed()
+    assert not pool([a, report("b.mp4", 3)]).class_passed("face")  # 197 / 200
+
+
+def test_pool_of_one_report_is_that_report_and_pooling_nothing_is_refused(tmp_path):
+    a, _ = _pool_inputs(tmp_path)
+    p = pool([a])
+    assert (p.video, p.frames, p.stray_max, p.stray_p95) == (a.video, a.frames, a.stray_max, a.stray_p95)
+    assert p.stray_mean == pytest.approx(a.stray_mean)
+    assert p.classes["face"].rate == a.classes["face"].rate and p.misses == a.misses
+    with pytest.raises(ValueError, match="no coverage reports"):
+        pool([])
+
+
+def test_pool_refuses_reports_of_different_frame_sizes(tmp_path):
+    a, _ = _pool_inputs(tmp_path)
+    small = CoverageReport("c.mp4", 1, 640, 360, {c: _empty_class(360) for c in ("face", "plate")})
+    with pytest.raises(ValueError, match="frame size"):
+        pool([a, small])
