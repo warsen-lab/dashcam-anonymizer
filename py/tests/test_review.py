@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -73,10 +74,10 @@ def test_review_queue_lists_most_flagged_frames_first(tmp_path):
     assert rows[2][:2] == ["v.mp4", "5"]
 
 
-def _frames_dir(tmp_path: Path, frames_numbers=(7,)) -> Path:
-    frames = tmp_path / "frames" / "trip"
+def _frames_dir(tmp_path: Path, frames_numbers=(7,), name: str = "trip") -> Path:
+    frames = tmp_path / "frames" / name
     frames.mkdir(parents=True)
-    rows = ["video,frame,pts_ms,reason,motion_score"] + [f"trip.mp4,{n},{n * 16.7:.1f},base,0" for n in frames_numbers]
+    rows = ["video,frame,pts_ms,reason,motion_score"] + [f"{name}.mp4,{n},{n * 16.7:.1f},base,0" for n in frames_numbers]
     (frames / "frames.csv").write_text("\n".join(rows) + "\n")
     for n in frames_numbers:
         Image.new("RGB", (200, 100)).save(frames / f"{n:06d}.jpg")
@@ -84,14 +85,23 @@ def _frames_dir(tmp_path: Path, frames_numbers=(7,)) -> Path:
 
 
 def _review_json(
-    review: Path, shapes: list[dict], flags: dict, frame: int = 7, reviewed: bool = True, size: tuple[int, int] = (200, 100)
+    review: Path,
+    shapes: list[dict],
+    flags: dict,
+    frame: int = 7,
+    reviewed: bool = True,
+    size: tuple[int, int] = (200, 100),
+    image_path: str | None = None,
 ) -> None:
+    """A LabelMe file as X-AnyLabeling saves it; imagePath defaults to the frame of `_frames_dir(review.parent)`."""
     review.mkdir(parents=True, exist_ok=True)
+    if image_path is None:
+        image_path = os.path.relpath(review.parent / "frames" / "trip" / f"{frame:06d}.jpg", review)
     doc = {
         "version": "5.4.1",
         "flags": {REVIEWED_FLAG: reviewed, **flags},
         "shapes": shapes,
-        "imagePath": "x.jpg",
+        "imagePath": image_path,
         "imageData": None,
         "imageHeight": size[1],
         "imageWidth": size[0],
@@ -343,3 +353,73 @@ def test_import_review_refuses_a_missing_or_empty_review_dir_and_leaves_gold_alo
         import_review(not_a_dir, read_frames_csv(frames), gold)
 
     assert _snapshot(gold) == before
+
+
+def test_import_review_rejects_a_review_dir_exported_from_another_video(tmp_path):
+    frames_a, frames_b = _frames_dir(tmp_path), _frames_dir(tmp_path, name="other")  # same frame number, same resolution
+    review, gold = tmp_path / "review", tmp_path / "gold"
+    ref_b = read_frames_csv(frames_b)[0]
+    review.mkdir()
+    doc = labelme_document(ref_b, [Box("face", 10, 20, 30, 50)], [], review, 200, 100)
+    doc["flags"][REVIEWED_FLAG] = True
+    (review / "000007.json").write_text(json.dumps(doc), encoding="utf-8")
+    assert doc["imagePath"] == "../frames/other/000007.jpg"
+
+    with pytest.raises(ValueError) as excinfo:
+        import_review(review, read_frames_csv(frames_a), gold)
+
+    message = str(excinfo.value)
+    assert "000007.json" in message and "../frames/other/000007.jpg" in message
+    assert str(frames_a / "000007.jpg") in message  # the frame image the importer expected
+    assert not gold.exists()
+    # The same file imported against the right frames dir is fine.
+    assert import_review(review, read_frames_csv(frames_b), gold) == 1
+
+
+def test_import_review_foreign_video_leaves_an_existing_gold_dir_alone(tmp_path):
+    frames, review, gold = _imported_gold(tmp_path)
+    other = _frames_dir(tmp_path, name="other")
+    before = _snapshot(gold)
+    _review_json(review, [], {"night": True}, image_path=os.path.relpath(other / "000007.jpg", review))
+
+    with pytest.raises(ValueError, match=r"000007\.json.*other"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert _snapshot(gold) == before
+
+
+def test_import_review_accepts_any_spelling_of_the_frame_image_path(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    image = frames / "000007.jpg"
+    for spelled in (str(image), str(image.parent / ".." / "trip" / image.name), os.path.relpath(image, review)):
+        _review_json(review, [_FACE], {}, image_path=spelled)
+        assert import_review(review, read_frames_csv(frames), gold) == 1
+
+
+def test_import_review_falls_back_to_the_file_name_when_image_path_does_not_resolve(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    # A review dir copied to another machine: the relative path leads nowhere, the frame image name still tells.
+    _review_json(review, [], {}, frame=7, image_path="/elsewhere/trip/000007.jpg")
+    _review_json(review, [], {}, frame=8, image_path="C:\\frames\\trip\\000008.jpg")
+    assert import_review(review, read_frames_csv(frames), gold) == 2
+
+    _review_json(review, [], {}, frame=8, image_path="/elsewhere/trip/000009.jpg")
+    before = _snapshot(gold)
+    with pytest.raises(ValueError, match=r"000008\.json.*000009\.jpg.*000008\.jpg"):
+        import_review(review, read_frames_csv(frames), gold)
+    assert _snapshot(gold) == before
+
+
+@pytest.mark.parametrize("image_path", [None, 7, ""])
+def test_import_review_rejects_a_json_without_a_usable_image_path(tmp_path, image_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [], {})
+    path = review / "000007.json"
+    doc = json.loads(path.read_text())
+    doc["imagePath"] = image_path
+    path.write_text(json.dumps(doc))
+
+    with pytest.raises(ValueError, match=r"000007\.json.*imagePath"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert not gold.exists()

@@ -6,7 +6,7 @@ import csv
 import json
 import os
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
@@ -82,7 +82,18 @@ def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], bool, int, int
     `reviewed` is the human's "this frame is done" checkbox and is never part of the scene tags.
     Non-rectangles, unknown labels, empty boxes and unknown true image-level flags are errors.
     """
+    return boxes_from_labelme(path, load_labelme(path))
+
+
+def load_labelme(path: Path) -> dict:
     doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path}: a LabelMe file must be a JSON object, got {type(doc).__name__}")
+    return doc
+
+
+def boxes_from_labelme(path: Path, doc: dict) -> tuple[list[Box], list[str], bool, int, int]:
+    """read_labelme_boxes for a document that load_labelme already parsed (`path` only names errors)."""
     width, height = int(doc["imageWidth"]), int(doc["imageHeight"])
     boxes = []
     for i, shape in enumerate(doc.get("shapes", [])):
@@ -113,6 +124,30 @@ def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], bool, int, int
 MAX_LISTED_FRAMES = 20
 
 
+def check_image_path(path: Path, doc: dict, ref: FrameRef) -> None:
+    """The JSON must describe the frame its file name says: frame numbers repeat across videos.
+
+    `imagePath` is resolved against the JSON's directory; if that file exists it must be the frame
+    image itself, otherwise (a review dir moved to another machine) the file names must agree.
+    """
+    image_path = doc.get("imagePath")
+    if not isinstance(image_path, str) or not image_path:
+        raise ValueError(f"{path}: no imagePath, so it cannot be tied to the frame image {ref.image}")
+    spelled = image_path.replace("\\", "/")  # saved by X-AnyLabeling on Windows
+    target = path.parent / spelled
+    if target.exists():
+        if not os.path.samefile(target, ref.image):
+            raise ValueError(
+                f"{path}: imagePath {image_path!r} is {target}, not the frame image {ref.image}; "
+                f"this review dir was exported from another video or frames dir"
+            )
+    elif PurePosixPath(spelled).name != ref.image.name:
+        raise ValueError(
+            f"{path}: imagePath {image_path!r} names {PurePosixPath(spelled).name}, not {ref.image.name} "
+            f"(the frame image is {ref.image}); this review dir was exported from another video or frames dir"
+        )
+
+
 def image_size(path: Path) -> tuple[int, int]:
     with Image.open(path) as img:  # header read only
         return img.size
@@ -140,7 +175,9 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
         ref = by_name.get(path.stem)
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")
-        boxes, tags, reviewed, width, height = read_labelme_boxes(path)
+        doc = load_labelme(path)
+        check_image_path(path, doc, ref)
+        boxes, tags, reviewed, width, height = boxes_from_labelme(path, doc)
         actual = image_size(ref.image)
         if (width, height) != actual:
             raise ValueError(f"{path}: imageWidth x imageHeight is {width}x{height} but {ref.image} is {actual[0]}x{actual[1]}")
