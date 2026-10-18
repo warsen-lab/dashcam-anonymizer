@@ -75,3 +75,24 @@ def test_temporal_fill_skips_present_boxes_long_gaps_and_unmatched_boxes():
     for sequence in (present, long_gap, unmatched):
         _, flags = temporal_fill(sequence, CFG)
         assert flags == []
+
+
+def test_temporal_fill_ignores_backward_or_equal_timestamps():
+    p = Box("plate", 100, 100, 160, 120, score=0.6, src="teacher_owlv2")
+    n = Box("plate", 110, 100, 170, 120, score=0.5, src="teacher_owlv2")
+    equal = [(ref(0, 400.0), [p]), (ref(12, 100.0), []), (ref(24, 400.0), [n])]
+    backward = [(ref(0, 400.0), [p]), (ref(12, 100.0), []), (ref(24, 300.0), [n])]
+    for sequence in (equal, backward):
+        filled, flags = temporal_fill(sequence, CFG)
+        assert flags == []
+        assert filled[1] == []
+
+
+def test_filled_boxes_do_not_satisfy_or_trigger_other_rules():
+    person = Box("person", 200, 500, 300, 900, src="teacher_coco:person")
+    filled_face = Box("face", 240, 510, 260, 540, score=0.4, src="temporal_fill")
+    assert rules([filled_face], [person]) == ["person_without_face"]
+
+    car = Box("vehicle", 1000, 600, 1300, 800, score=0.99, src="teacher_coco:car")
+    filled_plate = Box("plate", 1100, 750, 1160, 765, score=0.2, src="temporal_fill")
+    assert rules([filled_plate], [car]) == ["vehicle_without_plate"]

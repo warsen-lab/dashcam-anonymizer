@@ -35,17 +35,17 @@ def flag_frame(
         low, high = cfg.low_score_band(b.cls)
         if low <= b.score < high:
             flags.append(Flag(ref.video, ref.frame, "low_score", b, f"score {b.score:.2f}"))
-    faces = [b for b in merged if b.cls == "face"]
-    plates = [b for b in merged if b.cls == "plate"]
+    faces = [b for b in merged if b.cls == "face" and b.src != TEMPORAL_SOURCE]
+    plates = [b for b in merged if b.cls == "plate" and b.src != TEMPORAL_SOURCE]
     # COCO often reports one vehicle as both car and truck; flag it once.
-    aux = nms(aux, AUX_DEDUP_IOU)
-    for person in (a for a in aux if a.cls == "person"):
+    deduped = nms(aux, AUX_DEDUP_IOU)
+    for person in (a for a in deduped if a.cls == "person"):
         if person.height < cfg.min_person_height_frac * height:
             continue
         region = Box("person", person.x1, person.y1, person.x2, person.y1 + cfg.face_region_frac * person.height)
         if not any(contains_point(region, *f.center) for f in faces):
             flags.append(Flag(ref.video, ref.frame, "person_without_face", person))
-    for vehicle in (a for a in aux if a.cls == "vehicle"):
+    for vehicle in (a for a in deduped if a.cls == "vehicle"):
         if vehicle.width < cfg.min_vehicle_width_frac * width:
             continue
         if not any(contains_point(vehicle, *p.center) for p in plates):
@@ -62,7 +62,8 @@ def temporal_fill(
 ) -> tuple[list[list[Box]], list[Flag]]:
     """Adds a box at frame t when a matching box exists at t-1 and t+1 but nothing similar at t.
 
-    `sequence` is ordered by time. Neighbours more than `temporal_max_gap_ms` apart are not used.
+    `sequence` is ordered by time. Neighbours are used only when timestamps strictly increase across the
+    three frames and each step is at most `temporal_max_gap_ms` apart.
     A match pairs boxes of the same class with IoU >= `temporal_match_iou`; the filled box is the
     linear interpolation at t's timestamp, scored min(prev, next) with src "temporal_fill".
     Returns the per-frame box lists (originals plus fills) and one flag per fill.
@@ -72,7 +73,7 @@ def temporal_fill(
     for i in range(1, len(sequence) - 1):
         (prev_ref, prev), (ref, _), (next_ref, nxt) = sequence[i - 1], sequence[i], sequence[i + 1]
         gap = cfg.temporal_max_gap_ms
-        if ref.pts_ms - prev_ref.pts_ms > gap or next_ref.pts_ms - ref.pts_ms > gap:
+        if not (0 < ref.pts_ms - prev_ref.pts_ms <= gap and 0 < next_ref.pts_ms - ref.pts_ms <= gap):
             continue
         t = (ref.pts_ms - prev_ref.pts_ms) / (next_ref.pts_ms - prev_ref.pts_ms)
         for p in (b for b in prev if b.src != TEMPORAL_SOURCE):
@@ -87,5 +88,13 @@ def temporal_fill(
             if any(c.cls == p.cls and iou(c, filled) >= cfg.temporal_present_iou for c in out[i]):
                 continue
             out[i].append(filled)
-            flags.append(Flag(ref.video, ref.frame, "temporal_fill", filled, f"between frames {prev_ref.frame} and {next_ref.frame}"))
+            flags.append(
+                Flag(
+                    ref.video,
+                    ref.frame,
+                    "temporal_fill",
+                    filled,
+                    f"between frames {prev_ref.frame} and {next_ref.frame}",
+                )
+            )
     return out, flags
