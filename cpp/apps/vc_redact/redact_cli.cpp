@@ -113,7 +113,8 @@ Options:
   --ep <provider>           coreml | cpu (default coreml, falls back to cpu)
   --hwaccel <mode>          decoder: none | auto | videotoolbox (default none)
   --encoder <mode>          auto (VideoToolbox, then software) | software (default auto)
-  --overwrite               replace the output directory of a previous vc_redact run
+  --overwrite               replace the output directory of a previous vc_redact run (it is removed
+                            once the checks pass, before processing starts)
   -h, --help                show this help
 
 Exit codes: 0 ok, 1 processing error, 2 invalid arguments, 3 output exists.

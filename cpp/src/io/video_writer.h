@@ -61,6 +61,14 @@ struct AudioStreamInfo {
 AudioStreamInfo snapshotAudioStream(const AVStream& stream);
 std::vector<AudioStreamInfo> snapshotAudioStreams(const std::vector<const AVStream*>& streams);
 
+// Throws VcError naming the first audio codec that an MP4 file cannot store (VideoWriter would
+// refuse it); call it before creating anything for a run.
+void requireMp4Audio(const std::vector<AudioStreamInfo>& audio);
+
+// Throws VcError unless the encoder returned exactly one packet per frame it was sent: a dropped or
+// extra frame would put the output out of step with the source and masks.jsonl.
+void checkEncodedPackets(int64_t frames, int64_t packets);
+
 // Encodes frames and stream-copies audio into an MP4 file.
 //
 // Not thread-safe, and not tied to one thread by construction either: create it, call every method
@@ -68,9 +76,10 @@ std::vector<AudioStreamInfo> snapshotAudioStreams(const std::vector<const AVStre
 // builds it on its encode thread and uses it only there.
 class VideoWriter {
  public:
-  // Opens the first encoder that works and writes the MP4 header; `audio` streams are copied with
-  // their codec parameters and time base. Throws VcError, also when an audio codec cannot be stored
-  // in MP4 (checked before the file is created).
+  // Opens the first encoder that works (one line on stderr naming each encoder that could not be
+  // opened and why, when a later one is used instead) and writes the MP4 header; `audio` streams are
+  // copied with their codec parameters and time base. Throws VcError, also when an audio codec cannot
+  // be stored in MP4 (checked before the file is created).
   VideoWriter(const WriterConfig& config, const std::vector<AudioStreamInfo>& audio);
   ~VideoWriter();  // closes the file; without finish() it is incomplete
   VideoWriter(const VideoWriter&) = delete;
@@ -85,9 +94,11 @@ class VideoWriter {
   // Copies one packet of the audio stream at position `ordinal` of the constructor's `audio`; its
   // timestamps are in that stream's time base. Throws VcError, also after finish().
   void writeAudio(const AVPacket& packet, size_t ordinal);
-  // Flushes the encoder and writes the trailer. Throws VcError.
+  // Flushes the encoder and writes the trailer. Throws VcError, also when the encoder returned more
+  // or fewer packets than frames it was sent (checkEncodedPackets).
   void finish();
-  int64_t videoFrames() const;
+  int64_t videoFrames() const;   // frames sent to the encoder
+  int64_t videoPackets() const;  // encoded video packets written
 
  private:
   struct Impl;

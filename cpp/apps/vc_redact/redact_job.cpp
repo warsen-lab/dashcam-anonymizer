@@ -377,9 +377,11 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
   return c;
 }
 
-// `started`: the start of the run, for stats.setupSec.
-void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector, const fs::path& partial,
-                 Clock::time_point started, RedactStats& stats) {
+// `audio`: the reader's audio streams, snapshotted on the main thread. `started`: the start of the
+// run, for stats.setupSec.
+void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector,
+                 const std::vector<AudioStreamInfo>& audio, const fs::path& partial, Clock::time_point started,
+                 RedactStats& stats) {
   const fs::path dir = partial.parent_path();
   std::ofstream detections(dir / kDetectionsFile);
   std::ofstream masks(dir / kMasksFile);
@@ -408,11 +410,10 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   };
 
   // Everything that can fail before a thread exists is set up first, so the threads never see a
-  // half-built pipeline; the reader's info, the video stream's metadata and the audio streams'
-  // codec parameters and time bases are copied because the decode thread owns the reader.
+  // half-built pipeline; the reader's info and the video stream's metadata are copied (like the
+  // audio streams' codec parameters and time bases) because the decode thread owns the reader.
   const VideoInfo info = reader.info();
   const WriterConfig config = writerConfig(reader, partial, options.preferHardwareEncoder);
-  const std::vector<AudioStreamInfo> audio = snapshotAudioStreams(reader.audioStreams());
   Processor processor(options, detector, info, options.input.filename().string(), detections, masks, processed,
                       stats);
   StageStat decodeStat;
@@ -539,13 +540,18 @@ std::string redactSummary(const RedactStats& s) {
 RedactStats runRedact(const RedactOptions& options) {
   const Clock::time_point started = Clock::now();
   checkOptions(options);
-  VideoReader reader(options.input.string(), options.hwAccel);
-  const std::unique_ptr<Detector> detector = makeDetector(options, reader.info().width, reader.info().height);
   const std::string stem = stemOf(options.input);
-
   RedactStats stats;
   stats.outputDir = options.outRoot / stem;
+  // Cheap checks first: a refused run must not pay for loading the model (CoreML compiles it).
   checkOutputDir(options.input, stats.outputDir, options.overwrite);
+  VideoReader reader(options.input.string(), options.hwAccel);
+  // Copied here because the decode thread will own the reader; audio MP4 cannot store is refused
+  // now, before the previous output is removed, not on the encode thread.
+  const std::vector<AudioStreamInfo> audio = snapshotAudioStreams(reader.audioStreams());
+  requireMp4Audio(audio);
+  const std::unique_ptr<Detector> detector = makeDetector(options, reader.info().width, reader.info().height);
+
   // The directories this run is about to create (outRoot and parents that do not exist yet), deepest
   // first: a failed run removes the ones that are still empty, so that it leaves nothing behind.
   std::vector<fs::path> createdRoots;
@@ -559,7 +565,7 @@ RedactStats runRedact(const RedactOptions& options) {
   try {
     fs::remove_all(stats.outputDir);
     fs::create_directories(stats.outputDir);
-    runPipeline(options, reader, *detector, partial, started, stats);
+    runPipeline(options, reader, *detector, audio, partial, started, stats);
     fs::rename(partial, stats.video);
     stats.frames = stats.decode.items;
     stats.track.items = stats.frames;

@@ -122,6 +122,63 @@ TEST(VideoWriter, PrefersVideoToolboxWhenAvailable) {
   EXPECT_EQ(framePts(out).size(), 60u);
 }
 
+// VideoToolbox's H.264 encoder takes at most 4096 px per side: the writer falls back to libx264 and
+// says so on stderr, naming the encoder and the reason.
+TEST(VideoWriter, SaysWhyItFallsBackToTheSoftwareEncoder) {
+  WriterConfig config;
+  config.path = test::tmpDir() / "writer_fallback.mp4";
+  config.width = 5000;
+  config.height = 200;
+  config.timeBase = AVRational{1, 30};
+  config.frameRate = AVRational{30, 1};
+  config.preferHardware = true;
+  testing::internal::CaptureStderr();
+  std::string encoder;
+  {
+    VideoWriter writer(config, {});
+    encoder = writer.encoderName();
+  }
+  const std::string err = testing::internal::GetCapturedStderr();
+  ASSERT_EQ(encoder, "libx264");
+  EXPECT_NE(err.find("vc: video encoder h264_videotoolbox"), std::string::npos) << err;
+  EXPECT_NE(err.find("using libx264"), std::string::npos) << err;
+  // FFmpeg's own messages aside, the writer prints exactly one line.
+  size_t ours = 0;
+  for (size_t at = err.find("vc: "); at != std::string::npos; at = err.find("vc: ", at + 1)) ++ours;
+  EXPECT_EQ(ours, 1u) << err;
+
+  // No line when the first choice opens.
+  config.preferHardware = false;
+  config.width = 640;
+  testing::internal::CaptureStderr();
+  { VideoWriter writer(config, {}); }
+  EXPECT_EQ(testing::internal::GetCapturedStderr().find("vc: "), std::string::npos);
+}
+
+// Every frame sent comes out as exactly one packet; anything else fails finish().
+TEST(VideoWriter, CountsOnePacketPerFrame) {
+  for (const bool hardware : {false, true}) {
+    VideoReader reader(test::basicVideo().string(), HwAccel::None);
+    WriterConfig config = configFor(reader, test::tmpDir() / "writer_packets.mp4", hardware);
+    std::unique_ptr<VideoWriter> writer;
+    while (const VideoFrame* frame = reader.next()) {
+      if (!writer) {
+        config.pixelFormat = static_cast<AVPixelFormat>(frame->av->format);
+        writer = std::make_unique<VideoWriter>(config, std::vector<AudioStreamInfo>{});
+      }
+      av::FramePtr clone(av_frame_clone(frame->av));
+      clone->pts = clone->best_effort_timestamp;
+      writer->writeVideo(*clone);
+    }
+    writer->finish();
+    EXPECT_EQ(writer->videoFrames(), 60) << writer->encoderName();
+    EXPECT_EQ(writer->videoPackets(), 60) << writer->encoderName();
+  }
+  EXPECT_NO_THROW(checkEncodedPackets(60, 60));
+  EXPECT_THROW(checkEncodedPackets(60, 59), VcError);
+  EXPECT_THROW(checkEncodedPackets(60, 61), VcError);
+}
+
 TEST(VideoWriter, KeepsHevcAsHevc) {
   const fs::path out = test::tmpDir() / "writer_x265.mp4";
   EXPECT_EQ(reencode(test::tenBitVideo(), out, false), "libx265");

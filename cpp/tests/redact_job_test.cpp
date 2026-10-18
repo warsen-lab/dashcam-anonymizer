@@ -427,15 +427,42 @@ TEST(RedactJob, ADecodeThreadFailureFailsTheRunAndLeavesNothing) {
 
 TEST(RedactJob, AnEncodeThreadFailureFailsTheRunAndLeavesNothing) {
   RedactOptions o = baseOptions("redact_encode_fail");
-  o.input = test::videoWithMulawAudio();  // the MP4 writer refuses this audio codec
+  o.input = test::resolutionChangeVideo();  // the writer refuses the first frame of the new size
+  try {
+    runRedact(o);
+    FAIL() << "expected VcError";
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find("frame is 160x120, the writer was set up for 320x240"), std::string::npos)
+        << e.what();
+  }
+  EXPECT_FALSE(fs::exists(o.outRoot / "size_change"));
+  EXPECT_FALSE(fs::exists(o.outRoot));
+}
+
+// Audio that MP4 cannot store is refused before the output is touched: a previous output that
+// --overwrite would replace is still there afterwards.
+TEST(RedactJob, RefusesAnAudioCodecThatMp4CannotStoreBeforeTouchingTheOutput) {
+  RedactOptions o = baseOptions("redact_mulaw");
+  o.input = test::videoWithMulawAudio();
+  const fs::path previous = o.outRoot / "video_mulaw";
+  fs::create_directories(previous);
+  std::ofstream(previous / "masks.jsonl") << "{}\n";
+  o.overwrite = true;
   try {
     runRedact(o);
     FAIL() << "expected VcError";
   } catch (const VcError& e) {
     EXPECT_NE(std::string(e.what()).find("audio codec pcm_mulaw cannot be stored in MP4"), std::string::npos) << e.what();
   }
-  EXPECT_FALSE(fs::exists(o.outRoot / "video_mulaw"));
-  EXPECT_FALSE(fs::exists(o.outRoot));
+  EXPECT_TRUE(fs::exists(previous / "masks.jsonl"));
+}
+
+// The output directory is checked before the detector is opened (loading a model can take long).
+TEST(RedactJob, ChecksTheOutputDirectoryBeforeOpeningTheDetector) {
+  RedactOptions o = baseOptions("redact_exists_first");
+  fs::create_directories(o.outRoot / kStem);
+  o.fakeDetections = test::tmpDir() / "redact_exists_first_missing.jsonl";  // would fail to open
+  EXPECT_THROW(runRedact(o), OutputExistsError);
 }
 
 fs::path failingDetections(const std::string& name) {

@@ -52,6 +52,8 @@ std::filesystem::path bt709Video();
 std::filesystem::path bt601FullRangeVideo();
 // 1 s, 320x240 @ 30 fps H.264 with PCM mu-law audio in a MOV: that audio cannot be stored in MP4.
 std::filesystem::path videoWithMulawAudio();
+// MPEG-TS: 0.5 s of 320x240 H.264, then 0.5 s of 160x120 (the frame size changes mid-stream).
+std::filesystem::path resolutionChangeVideo();
 // 1 s, 320x240 H.264 as a raw elementary stream (.h264): frames carry no timestamps.
 std::filesystem::path rawH264Stream();
 

@@ -1,8 +1,10 @@
 #include "io/video_writer.h"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
@@ -84,6 +86,24 @@ std::vector<AudioStreamInfo> snapshotAudioStreams(const std::vector<const AVStre
   return out;
 }
 
+void requireMp4Audio(const std::vector<AudioStreamInfo>& audio) {
+  const AVOutputFormat* mp4 = av_guess_format("mp4", nullptr, nullptr);
+  if (mp4 == nullptr) throw VcError("the MP4 muxer is not available");
+  for (const AudioStreamInfo& in : audio) {
+    const AVCodecID id = in.parameters->codec_id;
+    if (avformat_query_codec(mp4, id, FF_COMPLIANCE_NORMAL) == 0) {
+      throw VcError(std::string("audio codec ") + avcodec_get_name(id) + " cannot be stored in MP4");
+    }
+  }
+}
+
+void checkEncodedPackets(int64_t frames, int64_t packets) {
+  if (packets != frames) {
+    throw VcError("the video encoder returned " + std::to_string(packets) + " packets for " + std::to_string(frames) +
+                  " frames");
+  }
+}
+
 struct VideoWriter::Impl {
   WriterConfig config;
   std::unique_ptr<AVFormatContext, OutputDeleter> output;
@@ -96,15 +116,16 @@ struct VideoWriter::Impl {
   av::SwsPtr sws;                              // only when the encoder needs another pixel format
   av::FramePtr converted = av::allocFrame();
   int64_t frames = 0;
+  int64_t packets = 0;
   bool finished = false;
 
   void openEncoder() {
     const AVRational rate = config.frameRate.num > 0 && config.frameRate.den > 0 ? config.frameRate : AVRational{30, 1};
-    std::string errors;
+    std::vector<std::pair<std::string, std::string>> failed;  // encoder, reason
     for (const std::string& name : encoderCandidates(config)) {
       const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
       if (codec == nullptr) {
-        errors += name + ": not available; ";
+        failed.emplace_back(name, "not available");
         continue;
       }
       av::CodecContextPtr ctx(avcodec_alloc_context3(codec));
@@ -125,13 +146,19 @@ struct VideoWriter::Impl {
       if ((output->oformat->flags & AVFMT_GLOBALHEADER) != 0) ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
       const int ret = avcodec_open2(ctx.get(), codec, nullptr);
       if (ret < 0) {
-        errors += name + ": " + avErrorText(ret) + "; ";
+        failed.emplace_back(name, avErrorText(ret));
         continue;
       }
       encoder = std::move(ctx);
       encoderName = name;
+      for (const auto& [other, reason] : failed) {
+        std::fprintf(stderr, "vc: video encoder %s could not be opened (%s); using %s\n", other.c_str(),
+                     reason.c_str(), name.c_str());
+      }
       return;
     }
+    std::string errors;
+    for (const auto& [other, reason] : failed) errors += other + ": " + reason + "; ";
     throw VcError("no usable video encoder (" + errors + ")");
   }
 
@@ -143,6 +170,7 @@ struct VideoWriter::Impl {
       av_packet_rescale_ts(packet.get(), encoder->time_base, videoStream->time_base);
       packet->stream_index = videoStream->index;
       checkAv(av_interleaved_write_frame(output.get(), packet.get()), "write video packet");
+      ++packets;
     }
   }
 };
@@ -157,12 +185,7 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<AudioStre
   checkAv(avformat_alloc_output_context2(&raw, nullptr, "mp4", path.c_str()), "create MP4 muxer");
   s.output.reset(raw);
   // Before anything is opened or created: a codec MP4 cannot hold would only fail at the header.
-  for (const AudioStreamInfo& in : audio) {
-    const AVCodecID id = in.parameters->codec_id;
-    if (avformat_query_codec(s.output->oformat, id, FF_COMPLIANCE_NORMAL) == 0) {
-      throw VcError(std::string("audio codec ") + avcodec_get_name(id) + " cannot be stored in MP4");
-    }
-  }
+  requireMp4Audio(audio);
   s.openEncoder();
 
   s.videoStream = avformat_new_stream(s.output.get(), nullptr);
@@ -199,6 +222,8 @@ VideoWriter::~VideoWriter() = default;
 const std::string& VideoWriter::encoderName() const { return impl_->encoderName; }
 
 int64_t VideoWriter::videoFrames() const { return impl_->frames; }
+
+int64_t VideoWriter::videoPackets() const { return impl_->packets; }
 
 void VideoWriter::writeVideo(AVFrame& frame) {
   Impl& s = *impl_;
@@ -249,6 +274,7 @@ void VideoWriter::finish() {
   if (s.finished) return;
   checkAv(avcodec_send_frame(s.encoder.get(), nullptr), "flush encoder");
   s.drain();
+  checkEncodedPackets(s.frames, s.packets);
   checkAv(av_write_trailer(s.output.get()), "write MP4 trailer");
   checkAv(avio_closep(&s.output->pb), "close output");
   s.finished = true;

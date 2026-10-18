@@ -78,8 +78,9 @@ std::string redactSummary(const RedactStats& stats);
 
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
 // renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json.
-// The options, the input, the detector and the output directory are all checked before anything is
-// created; any later failure removes this run's files (and the output root and its new parent
+// The options, the output directory, the input (including whether MP4 can store its audio) and the
+// detector are checked, in that order, before anything is created or removed (with overwrite, the
+// previous output is removed once they pass); any later failure removes this run's files (and the output root and its new parent
 // directories when this run created them and they are empty) and rethrows. Decoding, detection plus
 // masking, and encoding run on three threads; the first error stops all of them.
 //

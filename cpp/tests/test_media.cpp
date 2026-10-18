@@ -123,6 +123,13 @@ fs::path videoWithMulawAudio() {
                    "-c:v libx264 -pix_fmt yuv420p -c:a pcm_mulaw -ar 8000 -shortest");
 }
 
+fs::path resolutionChangeVideo() {
+  const fs::path large = makeMedia("size_320.ts", "-f lavfi -i testsrc2=s=320x240:r=30:d=0.5 -c:v libx264 -pix_fmt yuv420p");
+  const fs::path small = makeMedia("size_160.ts", "-f lavfi -i testsrc2=s=160x120:r=30:d=0.5 -c:v libx264 "
+                                                  "-pix_fmt yuv420p -output_ts_offset 0.6");
+  return makeMedia("size_change.ts", "-i \"concat:" + large.string() + "|" + small.string() + "\" -c copy");
+}
+
 fs::path rawH264Stream() {
   return makeMedia("raw.h264",
                    "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -c:v libx264 -pix_fmt yuv420p -f h264");
