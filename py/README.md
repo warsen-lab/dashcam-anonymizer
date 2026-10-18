@@ -1,4 +1,4 @@
-# Python 模块：老师预标注与人工复核（vc_label）
+# Python 模块：老师预标注与人工复核（vc_label），学生模型训练与导出（vc_train）
 
 设计见 `docs/superpowers/specs/2026-10-17-dashcam-redaction-mvp-design.md` §5，标注规范与复核流程见 `docs/labeling-guide.md`。
 
@@ -125,7 +125,14 @@ PYTHONPATH=py .venv/bin/python -m vc_label import-review --frames data/frames/<s
 
 ## vc_train：学生模型训练与导出
 
-依赖：在 `requirements.txt` 之外再装 `requirements-train.txt`，ultralytics 用 `--no-deps` 单独安装（它声明的 `opencv-python` 会与 `opencv-python-headless` 冲突）。权重 `~/.cache/video-compliance/models/yolov8n.pt` 来自 ultralytics/assets v8.4.0 发布页，sha256 `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36`。运行时不联网：导入 ultralytics 前设置 `YOLO_OFFLINE=1`、`YOLO_AUTOINSTALL=false` 并把代理指向本机黑洞 `127.0.0.1:9`。
+依赖：训练依赖列在 `py/requirements-train.txt`，ultralytics 用 `--no-deps` 单独安装（它声明的 `opencv-python` 会与 `opencv-python-headless` 冲突）：
+
+```bash
+.venv/bin/pip install -r py/requirements-train.txt
+.venv/bin/pip install --no-deps ultralytics==8.4.172
+```
+
+安装会联网下载包（计费流量），**执行前需先获得你的确认**。权重 `~/.cache/video-compliance/models/yolov8n.pt` 来自 ultralytics/assets v8.4.0 发布页，sha256 `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36`。运行时不联网：导入 ultralytics 前设置 `YOLO_OFFLINE=1`、`YOLO_AUTOINSTALL=false` 并把代理指向本机黑洞 `127.0.0.1:9`。
 
 在仓库根目录运行。
 
@@ -147,9 +154,9 @@ PYTHONPATH=py .venv/bin/python -m vc_train export --run data/models/r1 --dataset
 ```
 
 - 验证集是每段视频最后 20 秒（以该段已处理帧中最晚的时间为准；`dataset --val-tail-ms` 可改），其余为训练集。
-- `dataset` 拒绝非空的 `--out`，也拒绝落在抽帧目录里的输出；重跑请换一个新目录。
+- `dataset` 拒绝非空的 `--out`；`--out` 位于 `--frames-root`（抽帧根目录）之下的任何位置都会被拒绝，包括没有用 `--stem` 列出的段。`export --check-frames` 同样拒绝把 `--run` 放在那段抽帧目录里。labels、数据集和模型都不能写进抽帧目录，因为 `vc_extract --overwrite` 会删掉整个目录。重跑请换一个新目录。
 - `export` 检查 ONNX 输入是静态的 `[1, 3, H, W]`、float32，且 H、W 都是 32 的倍数，不满足就报错。
-- `model.json` 里的 `metrics.val_map50` 取自被导出的 checkpoint 所在训练目录的 `results.csv`（最高的 `metrics/mAP50(B)`），不是命令行参数。
+- `model.json` 里的 `metrics.val_map50` 是被导出 checkpoint 里保存的 `train_metrics["metrics/mAP50(B)"]`，不读取 `results.csv`，也不是命令行参数。checkpoint 里缺少这个字段时，export 在写出任何文件之前抛出 `ValueError`。
 - 退出码：0 成功；`export --check-frames` 的一致性检查不通过为 1；参数或输入错误为 2，错误信息写到 stderr，以 `vc_train:` 开头。
 
 测试：`.venv/bin/pytest -q py/tests/test_train_geometry.py py/tests/test_train_dataset.py py/tests/test_train_cli.py`；

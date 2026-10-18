@@ -59,6 +59,9 @@ def decode_yolov8(
     cls_ids = scores.argmax(axis=0)
     conf = scores.max(axis=0)
     keep = np.nonzero(conf >= score_threshold)[0]
+    if not np.isfinite(p[:4, keep]).all():
+        # a broken model must stop the run, never turn into masks; the C++ decoder does the same
+        raise ValueError("model output has non-finite box coordinates")
     cx, cy, w, h = (p[i, keep] for i in range(4))
     x1 = np.clip((cx - w / 2) / r, 0, frame_width)
     y1 = np.clip((cy - h / 2) / r, 0, frame_height)

@@ -102,3 +102,25 @@ def test_decode_keeps_a_score_exactly_at_the_threshold():
     pred = _pred([(32, 16, 8, 4, 0.15, 0.0)])
     boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
     assert len(boxes) == 1 and boxes[0].cls == "face"
+
+
+@pytest.mark.parametrize(
+    "cx, cy, w, h",
+    [(np.nan, 16, 8, 4), (32, np.inf, 8, 4), (32, 16, np.nan, 4), (32, 16, 8, -np.inf)],
+)
+def test_decode_stops_on_a_non_finite_box_that_passes_the_threshold(cx, cy, w, h):
+    pred = _pred([(32, 16, 8, 4, 0.9, 0.0), (cx, cy, w, h, 0.5, 0.0)])
+    with pytest.raises(ValueError, match="non-finite box coordinates"):
+        decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
+
+
+def test_decode_ignores_non_finite_boxes_below_the_threshold_and_nan_scores():
+    pred = _pred(
+        [
+            (32, 16, 8, 4, 0.9, 0.0),  # kept
+            (np.nan, np.inf, np.nan, 4, 0.05, 0.0),  # below the threshold: never read
+            (32, 16, 8, 4, np.nan, 0.5),  # NaN face score: numpy max is NaN, so the anchor is dropped
+        ]
+    )
+    boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
+    assert [b.cls for b in boxes] == ["face"]

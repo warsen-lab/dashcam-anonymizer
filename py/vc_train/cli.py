@@ -40,13 +40,29 @@ def _parser() -> argparse.ArgumentParser:
     e.add_argument("--width", type=int, default=1920)
     e.add_argument("--height", type=int, default=1088)
     e.add_argument("--check-frames", type=Path, default=None, help="frames dir (frames.csv) for the consistency check")
-    e.add_argument("--check-count", type=int, default=20)
+    e.add_argument("--check-count", type=int, default=20, help="check frames, spread evenly over frames.csv (>= 1)")
     return p
+
+
+def _check_indices(total: int, count: int) -> list[int]:
+    """Frame indices spread evenly over the whole list, both ends included, in order.
+
+    For count >= 2 this is round(i * (total - 1) / (count - 1)) with halves rounded up, done in integers
+    so a tie like 24.5 goes to 25 whatever the float error. count == 1 takes the middle frame.
+    """
+    if total <= count:
+        return list(range(total))
+    if count == 1:
+        return [(total - 1) // 2]
+    span = 2 * (count - 1)
+    return list(dict.fromkeys((2 * i * (total - 1) + (count - 1)) // span for i in range(count)))
 
 
 def _dataset(args) -> int:
     from vc_train.dataset import build_dataset
 
+    # the whole frames root is off limits, including segments that are not listed with --stem
+    ensure_outside(args.frames_root, args.out)
     segments = []
     for stem in args.stem:
         frames_dir = args.frames_root / stem
@@ -73,19 +89,28 @@ def _train(args) -> int:
 
 
 def _export(args) -> int:
+    # everything is validated before anything is written
+    if args.check_count < 1:
+        raise ValueError(f"--check-count must be at least 1, got {args.check_count}")
+    if args.check_frames is not None:
+        # the model must not land inside a frames dir: vc_extract --overwrite deletes that whole dir
+        ensure_outside(args.check_frames, args.run)
     weights = args.weights or args.run / "train" / "weights" / "best.pt"
     if not weights.is_file():
         raise FileNotFoundError(f"{weights} does not exist; train first or pass --weights")
+    images = None
+    if args.check_frames is not None:
+        refs = read_frames_csv(args.check_frames)
+        if not refs:
+            raise ValueError(f"{args.check_frames}/frames.csv lists no frames to check")
+        images = [refs[i].image for i in _check_indices(len(refs), args.check_count)]
     from vc_train.export import check_consistency, export_onnx
 
     manifest = args.dataset / "manifest.csv" if args.dataset else None
     onnx_path = export_onnx(weights, args.run, args.width, args.height, manifest=manifest, name=args.run.name)
     print(f"export: {onnx_path}")
-    if args.check_frames is None:
+    if images is None:
         return 0
-    refs = read_frames_csv(args.check_frames)
-    step = max(1, len(refs) // max(1, args.check_count))
-    images = [r.image for r in refs[::step][: args.check_count]]
     report = check_consistency(weights, onnx_path, images)
     print(f"check: {report.images} images, {report.boxes} boxes, max diff {report.max_diff_px:.3f} px, {report.unmatched} unmatched")
     return 0 if report.passed() else 1

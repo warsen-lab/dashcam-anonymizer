@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from vc_label.contracts import Box, to_yolo_lines
 from vc_train import export as export_mod
@@ -75,6 +76,21 @@ def test_dataset_output_inside_a_frames_dir_is_refused(tmp_path, capsys):
         "--out", str(tmp_path / "frames" / "a" / "ds"),
     ])
     assert code == 2
+    assert not (tmp_path / "frames" / "a" / "ds").exists()
+
+
+def test_dataset_refuses_out_under_the_frames_root_even_for_unlisted_segments(tmp_path, capsys):
+    _segment(tmp_path, "a")
+    (tmp_path / "frames" / "b").mkdir()  # a segment that is not listed with --stem
+    out = tmp_path / "frames" / "b" / "ds"
+    code = main([
+        "dataset", "--stem", "a",
+        "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
+        "--out", str(out),
+    ])
+    assert code == 2
+    assert "frames directory" in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_dataset_refuses_a_non_empty_out_dir(tmp_path, capsys):
@@ -144,8 +160,8 @@ def test_export_writes_onnx_and_passes_consistency_check(tmp_path, capsys, monke
     assert (seen["width"], seen["height"]) == (1920, 1088)
     assert seen["manifest"] == dataset / "manifest.csv"
     assert seen["name"] == "run"
-    # 50 frames, 5 checks: every 10th frame
-    assert [p.name for p in seen["images"]] == ["000000.jpg", "000010.jpg", "000020.jpg", "000030.jpg", "000040.jpg"]
+    # 50 frames, 5 checks: round(i * 49 / 4). i = 2 gives 24.5, which rounds half up to 25 (Python round() would give 24)
+    assert [p.name for p in seen["images"]] == ["000000.jpg", "000012.jpg", "000025.jpg", "000037.jpg", "000049.jpg"]
     assert "export: " in out
     assert "check: 5 images, 7 boxes, max diff 0.250 px, 0 unmatched" in out
 
@@ -161,6 +177,79 @@ def test_export_exits_1_when_the_consistency_check_fails(tmp_path, capsys, monke
     code = main(["export", "--run", str(tmp_path / "run"), "--check-frames", str(tmp_path / "frames")])
     assert code == 1
     assert "2 unmatched" in capsys.readouterr().out
+
+
+def _sampled_check_images(tmp_path, monkeypatch, frame_count, check_count):
+    _trained_run(tmp_path)
+    _frames_csv(tmp_path / "frames", frame_count)
+    seen = {}
+
+    def fake_export(weights, out_dir, *args, **kwargs):
+        onnx = out_dir / "model.onnx"
+        onnx.write_bytes(b"onnx")
+        return onnx
+
+    def fake_check(weights, onnx_path, images, **kwargs):
+        seen["images"] = [p.name for p in images]
+        return ConsistencyReport(images=len(images), boxes=0, max_diff_px=0.0, unmatched=0)
+
+    monkeypatch.setattr(export_mod, "export_onnx", fake_export)
+    monkeypatch.setattr(export_mod, "check_consistency", fake_check)
+    code = main([
+        "export", "--run", str(tmp_path / "run"),
+        "--check-frames", str(tmp_path / "frames"), "--check-count", str(check_count),
+    ])
+    assert code == 0
+    return seen["images"]
+
+
+@pytest.mark.parametrize(
+    "frame_count, check_count, expected",
+    [
+        (1, 1, [0]),
+        (50, 1, [24]),  # the middle frame, (n - 1) // 2
+        (3, 3, [0, 1, 2]),
+        (4, 20, [0, 1, 2, 3]),  # n <= count: every frame
+        (50, 5, [0, 12, 25, 37, 49]),
+        (50, 20, [0, 3, 5, 8, 10, 13, 15, 18, 21, 23, 26, 28, 31, 34, 36, 39, 41, 44, 46, 49]),
+    ],
+)
+def test_export_spreads_check_frames_evenly_over_the_whole_list(tmp_path, monkeypatch, frame_count, check_count, expected):
+    names = _sampled_check_images(tmp_path, monkeypatch, frame_count, check_count)
+    assert names == [f"{i:06d}.jpg" for i in expected]
+
+
+@pytest.mark.parametrize("check_count", [0, -3])
+def test_export_rejects_a_check_count_below_one_before_writing(tmp_path, capsys, monkeypatch, check_count):
+    _frames_csv(tmp_path / "frames", 4)
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    code = main([
+        "export", "--run", str(tmp_path / "run"),
+        "--check-frames", str(tmp_path / "frames"), "--check-count", str(check_count),
+    ])
+    assert code == 2
+    assert "--check-count" in capsys.readouterr().err
+    assert not (tmp_path / "run").exists()
+
+
+def test_export_refuses_an_empty_check_set_instead_of_passing(tmp_path, capsys, monkeypatch):
+    _trained_run(tmp_path)
+    _frames_csv(tmp_path / "frames", 0)
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    code = main(["export", "--run", str(tmp_path / "run"), "--check-frames", str(tmp_path / "frames")])
+    assert code == 2
+    assert "no frames" in capsys.readouterr().err
+
+
+def test_export_refuses_a_run_dir_inside_the_check_frames_dir(tmp_path, capsys, monkeypatch):
+    frames = tmp_path / "frames" / "clip"
+    _frames_csv(frames, 3)
+    run = frames / "run"
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    code = main(["export", "--run", str(run), "--check-frames", str(frames)])
+    assert code == 2
+    assert "frames directory" in capsys.readouterr().err
+    assert not run.exists()
 
 
 def test_python_dash_m_runs_the_cli(tmp_path):
