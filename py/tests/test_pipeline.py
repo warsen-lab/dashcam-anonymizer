@@ -309,3 +309,51 @@ def test_run_fuse_ignores_a_torn_last_line_like_a_resumed_teach_does(tmp_path, n
     assert summary == expected
     assert sequence == expected_sequence
     assert (labels / name).read_bytes() == torn  # fuse only reads; the resumed teach does the repair
+
+
+@pytest.mark.parametrize(
+    "taught, message",
+    [
+        # Each teach config is valid on its own; the default fuse config's band starts higher than the pinned threshold.
+        ({"owlv2_score": 0.05, "plate_low_score": (0.05, 0.3)}, r"plate_low_score lower edge 0\.1 is above .*owlv2_score 0\.05"),
+        ({"retinaface_score": 0.2, "face_low_score": (0.2, 0.5)}, r"face_low_score lower edge 0\.3 is above .*retinaface_score 0\.2"),
+        ({"yunet_score": 0.25, "face_low_score": (0.25, 0.5)}, r"face_low_score lower edge 0\.3 is above .*yunet_score 0\.25"),
+    ],
+)
+def test_run_fuse_rejects_a_low_score_band_above_the_pinned_teacher_thresholds(tmp_path, taught, message):
+    frames, labels, review = make_frames(tmp_path, 2), tmp_path / "labels", tmp_path / "review"
+    run_teach(frames, labels, teachers(), replace(CFG, **taught), log=lambda _: None)
+
+    with pytest.raises(ValueError, match=rf"teach_config\.json.*{message}.*without being flagged"):
+        run_fuse(frames, labels, CFG)
+    with pytest.raises(ValueError, match="without being flagged"):
+        run_export_review(frames, labels, review, CFG)
+
+    assert not (labels / "merged.jsonl").exists() and not (labels / "yolo").exists()
+    assert not review.exists()
+
+
+def test_run_fuse_accepts_a_low_score_band_at_or_below_the_pinned_teacher_thresholds(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)  # pins retinaface 0.3, yunet 0.5, owlv2 0.1
+
+    for band in ({"face_low_score": (0.3, 0.6), "plate_low_score": (0.1, 0.4)}, {"face_low_score": (0.1, 0.5), "plate_low_score": (0.05, 0.3)}):
+        assert run_fuse(frames, labels, replace(CFG, **band))[0].frames == 2
+
+
+def test_run_fuse_without_a_teacher_pin_cannot_check_the_band(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    (labels / "teach_config.json").unlink()  # a labels dir taught before thresholds were pinned
+
+    assert run_fuse(frames, labels, CFG)[0].frames == 2
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]", '{"retinaface_score": 0.3}', '{"retinaface_score": "0.3", "yunet_score": 0.5, "owlv2_score": 0.1}'])
+def test_run_fuse_rejects_a_corrupt_teacher_pin(tmp_path, content):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    (labels / "teach_config.json").write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="teach_config.json"):
+        run_fuse(frames, labels, CFG)

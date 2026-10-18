@@ -126,6 +126,50 @@ def _drop_unfinished(labels_dir: Path, done: set[int]) -> None:
         os.replace(tmp, path)
 
 
+def _read_pin(path: Path) -> dict:
+    try:
+        pinned = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path}: not valid JSON ({e})") from e
+    if not isinstance(pinned, dict):
+        raise ValueError(f"{path}: expected a JSON object of teacher thresholds, got {type(pinned).__name__}")
+    return pinned
+
+
+def _pinned_threshold(pinned: dict, path: Path, name: str) -> float:
+    value = pinned.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path}: {name} must be a number, got {value!r}")
+    return value
+
+
+def check_bands_against_pin(labels_dir: Path, cfg: LabelingConfig) -> None:
+    """Refuses low-score bands that start above the teacher thresholds this labels dir was taught with.
+
+    LabelingConfig checks the same thing against its own thresholds, but fuse may run with a config
+    that differs from the one teach pinned: raw boxes scoring between the pinned threshold and the
+    band's lower edge would become labels without being flagged for review.
+    A labels dir without teach_config.json (taught before pinning) cannot be checked.
+    """
+    path = labels_dir / TEACH_CONFIG
+    if not path.exists():
+        return
+    pinned = _read_pin(path)
+    retinaface, yunet = (_pinned_threshold(pinned, path, name) for name in ("retinaface_score", "yunet_score"))
+    owlv2 = _pinned_threshold(pinned, path, "owlv2_score")
+    tail = "boxes below the band would become labels without being flagged for review; lower the band or teach a new labels dir"
+    if cfg.face_low_score[0] > min(retinaface, yunet):
+        raise ValueError(
+            f"{path}: face_low_score lower edge {cfg.face_low_score[0]} is above a face teacher threshold this labels dir "
+            f"was taught with (retinaface_score {retinaface}, yunet_score {yunet}): {tail}"
+        )
+    if cfg.plate_low_score[0] > owlv2:
+        raise ValueError(
+            f"{path}: plate_low_score lower edge {cfg.plate_low_score[0]} is above the plate teacher threshold this labels dir "
+            f"was taught with (owlv2_score {owlv2}): {tail}"
+        )
+
+
 def pin_teach_settings(labels_dir: Path, cfg: LabelingConfig) -> None:
     """Records the teacher thresholds on first use; refuses a later run with different ones.
 
@@ -139,12 +183,7 @@ def pin_teach_settings(labels_dir: Path, cfg: LabelingConfig) -> None:
         tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, path)
         return
-    try:
-        pinned = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"{path}: not valid JSON ({e})") from e
-    if not isinstance(pinned, dict):
-        raise ValueError(f"{path}: expected a JSON object of teacher thresholds, got {type(pinned).__name__}")
+    pinned = _read_pin(path)
     if pinned == settings:
         return
     changes = ", ".join(
@@ -209,9 +248,12 @@ def _by_frame(path: Path) -> dict[int, list[Box]]:
 
 
 def run_fuse(frames_dir: Path, labels_dir: Path, cfg: LabelingConfig) -> tuple[FuseSummary, list[tuple[FrameRef, list[Box]]], list[Flag]]:
-    """Fuses raw teacher boxes, fills temporal holes, applies rules, writes merged/flags/YOLO."""
+    """Fuses raw teacher boxes, fills temporal holes, applies rules, writes merged/flags/YOLO.
+
+    Refuses a labels dir of another video, and low-score bands that start above the pinned teacher thresholds."""
     all_refs = read_frames_csv(frames_dir)
     check_labels_match_frames(frames_dir, labels_dir, all_refs)
+    check_bands_against_pin(labels_dir, cfg)
     done = read_processed(labels_dir)
     refs = [r for r in all_refs if r.frame in done]
     raw, aux = _by_frame(labels_dir / RAW), _by_frame(labels_dir / AUX)
