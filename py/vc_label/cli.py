@@ -97,10 +97,12 @@ def _run(args: argparse.Namespace) -> str:
 
     cfg = _load_config(args.config)
     if args.command == "teach":
-        from vc_label.pipeline import run_teach
+        from vc_label.pipeline import check_labels_match_frames, run_teach
 
         if args.every < 1 or (args.limit is not None and args.limit < 1):
             raise ValueError("--every and --limit must be >= 1")
+        # Refuse a wrong labels dir before loading ~1 GB of models; run_teach checks again on its own.
+        check_labels_match_frames(args.frames, args.labels, read_frames_csv(args.frames))
         count = run_teach(args.frames, args.labels, _load_teachers(cfg, args.device), cfg, args.every, args.limit)
         return f"teach: labelled {count} new frames into {args.labels}"
     if args.command == "fuse":

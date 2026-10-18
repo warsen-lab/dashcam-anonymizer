@@ -1,3 +1,5 @@
+import pytest
+
 import vc_label.cli
 from conftest import REPO_ROOT
 from vc_label.cli import main
@@ -161,6 +163,23 @@ def test_a_labels_dir_of_another_video_is_a_usage_error(tmp_path, capsys, monkey
 
     assert main(["export-review", "--frames", str(other), "--labels", str(labels), "--review", str(tmp_path / "review")]) == 2
     assert "does not match" in capsys.readouterr().err
+
+
+def test_teach_refuses_a_mismatched_labels_dir_before_loading_the_teachers(tmp_path, capsys, monkeypatch):
+    _, labels = _labelled(tmp_path)
+    other = _other_video_frames(tmp_path)
+
+    def load_teachers(cfg, device):
+        pytest.fail("the teacher models (~1 GB) were loaded for a labels dir that belongs to another video")
+
+    monkeypatch.setattr("vc_label.cli._load_teachers", load_teachers)
+    before = {p.name: p.read_bytes() for p in labels.iterdir()}
+
+    assert main(["teach", "--frames", str(other), "--labels", str(labels)]) == 2
+
+    err = capsys.readouterr().err
+    assert "does not match" in err and "trip.mp4" in err
+    assert {p.name: p.read_bytes() for p in labels.iterdir()} == before
 
 
 def test_export_review_refuses_to_use_the_labels_dir_as_review_dir(tmp_path, capsys):
