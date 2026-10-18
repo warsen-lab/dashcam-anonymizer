@@ -1,4 +1,5 @@
 import csv
+import shutil
 
 import cv2
 import numpy as np
@@ -24,13 +25,20 @@ def test_crop_windows_on_4k_at_half_scale():
     ]
 
 
-def test_crop_windows_tiles_both_axes_when_needed():
+def test_crop_windows_takes_both_ends_of_each_axis_and_leaves_the_middle_of_a_3000_px_frame_uncovered():
     assert crop_windows(3000, 3000, 1.0) == [
         (0, 0, 1280, 1280),
         (1720, 0, 1280, 1280),
         (0, 1720, 1280, 1280),
         (1720, 1720, 1280, 1280),
     ]
+
+
+def test_crop_windows_hold_whole_every_box_up_to_twice_the_window_minus_the_frame_width():
+    windows = crop_windows(1920, 1080, 1.0)  # w = 1280, so boxes up to 2 * 1280 - 1920 = 640 px wide
+    for x1 in range(0, 1920 - 640 + 1, 10):
+        assert any(x0 <= x1 and x1 + 640 <= x0 + w for x0, _, w, _ in windows), x1
+    assert not any(x0 <= 639 and 1281 <= x0 + w for x0, _, w, _ in windows)  # [639, 1281] is 642 px wide: cut by both
 
 
 def test_crop_windows_round_half_up_like_the_letterbox():
@@ -131,7 +139,7 @@ def test_build_dataset_rejects_labels_of_another_video(tmp_path):
 
 
 def test_failed_label_check_creates_nothing_and_a_rerun_with_the_same_out_succeeds(tmp_path):
-    frames_dir, labels_dir = _segment(tmp_path, "a", [(0, 0.0), (10, 200.0)], {})
+    frames_dir, labels_dir = _segment(tmp_path, "a", [(0, 0.0), (10, 200.0), (20, 30000.0)], {})
     label_file = labels_dir / "yolo" / "000010.txt"
     label_file.unlink()
     out = tmp_path / "ds"
@@ -141,13 +149,13 @@ def test_failed_label_check_creates_nothing_and_a_rerun_with_the_same_out_succee
 
     label_file.write_text("")
     summary = build_dataset([(frames_dir, labels_dir)], out, 1920, 1088)
-    assert summary.val_frames == 2  # both frames sit inside the 20 s tail
-    assert (out / "labels" / "val" / "a_000010_full.txt").exists()
+    assert (summary.train_frames, summary.val_frames) == (2, 1)
+    assert (out / "labels" / "train" / "a_000010_full.txt").exists()
 
 
 def test_build_dataset_refuses_two_segments_with_the_same_video_stem(tmp_path):
-    seg_one = _segment(tmp_path / "one", "a", [(0, 0.0)], {})
-    seg_two = _segment(tmp_path / "two", "a", [(0, 0.0)], {})
+    seg_one = _segment(tmp_path / "one", "a", [(0, 0.0), (1, 30000.0)], {})
+    seg_two = _segment(tmp_path / "two", "a", [(0, 0.0), (1, 30000.0)], {})
     out = tmp_path / "ds"
     with pytest.raises(ValueError, match="'a'"):
         build_dataset([seg_one, seg_two], out, 1920, 1088)
@@ -156,7 +164,7 @@ def test_build_dataset_refuses_two_segments_with_the_same_video_stem(tmp_path):
 
 @pytest.mark.parametrize("preexisting", [False, True])
 def test_failed_write_leaves_the_output_dir_as_it_was(tmp_path, monkeypatch, preexisting):
-    seg = _segment(tmp_path, "a", [(0, 0.0)], {})
+    seg = _segment(tmp_path, "a", [(0, 0.0), (1, 30000.0)], {})
     out = tmp_path / "ds"
     if preexisting:
         out.mkdir()
@@ -170,19 +178,19 @@ def test_failed_write_leaves_the_output_dir_as_it_was(tmp_path, monkeypatch, pre
 
 
 def test_build_dataset_4k_frame_at_half_scale_is_cut_and_shrunk_to_the_input_size(tmp_path):
-    seg = _segment(tmp_path, "k", [(0, 0.0)], {0: [Box("face", 1000, 1000, 1100, 1100)]}, size=(3840, 2160))
+    seg = _segment(tmp_path, "k", [(0, 0.0), (1, 30000.0)], {0: [Box("face", 1000, 1000, 1100, 1100)]}, size=(3840, 2160))
     out = tmp_path / "ds"
     summary = build_dataset([seg], out, 1920, 1088)
 
-    # the only frame is inside the 20 s tail, so it is validation data
+    # frame 0 is 30 s before the last processed frame, so it is training data
     for i in (0, 1):
-        assert cv2.imread(str(out / "images" / "val" / f"k_000000_c{i}.jpg")).shape == (1080, 1280, 3)
+        assert cv2.imread(str(out / "images" / "train" / f"k_000000_c{i}.jpg")).shape == (1080, 1280, 3)
     # windows (0, 0, 2560, 2160) and (1280, 0, 2560, 2160); the box is only in the first one.
     # exact maths: cx = 1050 * 0.5 / 1280 = 0.41015625, w = 50 / 1280 = 0.0390625 (a tie), cy and h as below.
     # The input label is stored with 6 decimals on a 3840 px frame (cx 0.273438 = 1050.002 px), which moves
     # the box by ~0.002 px, so the written values are 0.410157 and 0.039063.
-    assert (out / "labels" / "val" / "k_000000_c0.txt").read_text() == "0 0.410157 0.486111 0.039063 0.046296\n"
-    assert (out / "labels" / "val" / "k_000000_c1.txt").read_text() == ""
+    assert (out / "labels" / "train" / "k_000000_c0.txt").read_text() == "0 0.410157 0.486111 0.039063 0.046296\n"
+    assert (out / "labels" / "train" / "k_000000_c1.txt").read_text() == ""
     with (out / MANIFEST).open() as f:
         rows = {r["sample"]: r for r in csv.DictReader(f)}
     assert (rows["k_000000_c0.jpg"]["x0"], rows["k_000000_c0.jpg"]["y0"]) == ("0", "0")
@@ -198,4 +206,61 @@ def test_build_dataset_wants_positive_multiples_of_32_before_writing(tmp_path, w
     out = tmp_path / "ds"
     with pytest.raises(ValueError, match="multiple of 32"):
         build_dataset([seg], out, width, height)
+    assert not out.exists()
+
+
+def test_build_dataset_summary_counts_frames_per_segment(tmp_path):
+    seg_a = _segment(tmp_path, "a", [(0, 0.0), (1, 5000.0), (2, 30000.0)], {})
+    seg_b = _segment(tmp_path, "b", [(0, 0.0), (1, 30000.0), (2, 31000.0)], {})
+    summary = build_dataset([seg_a, seg_b], tmp_path / "ds", 1920, 1088)
+    assert [(s.name, s.train_frames, s.val_frames) for s in summary.segments] == [("a", 2, 1), ("b", 1, 2)]
+    assert (summary.train_frames, summary.val_frames) == (3, 3)
+
+
+@pytest.mark.parametrize("how", ["missing dir", "no processed.txt", "empty processed.txt"])
+def test_build_dataset_refuses_a_segment_without_processed_frames(tmp_path, how):
+    good = _segment(tmp_path, "a", [(0, 0.0), (1, 30000.0)], {})
+    frames_dir, labels_dir = _segment(tmp_path, "b", [(0, 0.0), (1, 30000.0)], {})
+    if how == "missing dir":
+        shutil.rmtree(labels_dir)
+    elif how == "no processed.txt":
+        (labels_dir / "processed.txt").unlink()
+    else:
+        (labels_dir / "processed.txt").write_text("")
+    out = tmp_path / "ds"
+    with pytest.raises(ValueError, match="vc_label teach") as excinfo:
+        build_dataset([good, (frames_dir, labels_dir)], out, 1920, 1088)
+    assert str(labels_dir) in str(excinfo.value) and "fuse" in str(excinfo.value)
+    assert not out.exists()
+
+
+def test_build_dataset_refuses_an_input_with_nothing_in_it(tmp_path):
+    out = tmp_path / "ds"
+    with pytest.raises(ValueError, match="no segments"):
+        build_dataset([], out, 1920, 1088)
+    assert not out.exists()
+
+
+def test_build_dataset_refuses_a_segment_not_longer_than_the_validation_tail(tmp_path):
+    long_enough = _segment(tmp_path, "a", [(0, 0.0), (1, 30000.0)], {})
+    frames_dir, labels_dir = _segment(tmp_path, "b", [(0, 0.0), (1, 20000.0)], {})  # exactly the tail: all of it is val
+    out = tmp_path / "ds"
+    with pytest.raises(ValueError, match="no train frames") as excinfo:
+        build_dataset([long_enough, (frames_dir, labels_dir)], out, 1920, 1088)
+    assert str(labels_dir) in str(excinfo.value) and "val_tail_ms" in str(excinfo.value)
+    assert not out.exists()
+
+
+def test_a_shorter_validation_tail_lets_a_short_segment_through(tmp_path):
+    seg = _segment(tmp_path, "a", [(0, 0.0), (1, 20000.0)], {})
+    summary = build_dataset([seg], tmp_path / "ds", 1920, 1088, val_tail_ms=10000.0)
+    assert (summary.train_frames, summary.val_frames) == (1, 1)
+
+
+def test_a_crop_that_cv2_cannot_write_is_an_error_naming_the_file_and_leaves_no_output(tmp_path, monkeypatch):
+    seg = _segment(tmp_path, "a", [(0, 0.0), (1, 30000.0)], {})
+    out = tmp_path / "ds"
+    monkeypatch.setattr(dataset.cv2, "imwrite", lambda *args, **kwargs: False)  # what cv2 does on a full disk
+    with pytest.raises(ValueError, match="a_000000_c0.jpg"):
+        build_dataset([seg], out, 1920, 1088)
     assert not out.exists()

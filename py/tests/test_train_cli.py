@@ -1,4 +1,5 @@
 import csv
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -58,7 +59,9 @@ def test_dataset_command_builds_from_stems(tmp_path, capsys):
         "--out", str(out),
     ])
     assert code == 0
-    assert "dataset: 6 train / 6 val samples from 2 / 2 frames" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "dataset: 6 train / 6 val samples from 2 / 2 frames" in printed
+    assert "  a: 1 train / 1 val frames" in printed and "  b: 1 train / 1 val frames" in printed
     assert (out / "data.yaml").exists()
 
 
@@ -66,6 +69,27 @@ def test_dataset_command_reports_errors_with_exit_2(tmp_path, capsys):
     code = main(["dataset", "--stem", "missing", "--frames-root", str(tmp_path), "--labels-root", str(tmp_path), "--out", str(tmp_path / "ds")])
     assert code == 2
     assert capsys.readouterr().err.startswith("vc_train: ")
+
+
+@pytest.mark.parametrize("what", ["labels missing", "short segment"])
+def test_dataset_command_stops_on_a_segment_it_cannot_use_and_writes_nothing(tmp_path, capsys, what):
+    _segment(tmp_path, "a")
+    if what == "labels missing":
+        shutil.rmtree(tmp_path / "labels" / "a")
+    else:
+        # frame 1 moves from 30 s to 10 s: the whole segment is inside the 20 s validation tail
+        text = (tmp_path / "frames" / "a" / "frames.csv").read_text().replace("30000.0", "10000.0")
+        (tmp_path / "frames" / "a" / "frames.csv").write_text(text)
+    out = tmp_path / "ds"
+    code = main([
+        "dataset", "--stem", "a",
+        "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
+        "--out", str(out),
+    ])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("vc_train: ") and (str(tmp_path / "labels" / "a") in err)
+    assert not out.exists()
 
 
 def test_dataset_output_inside_a_frames_dir_is_refused(tmp_path, capsys):

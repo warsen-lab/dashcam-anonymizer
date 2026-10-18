@@ -74,6 +74,8 @@ def _dataset(args) -> int:
         f"dataset: {s.train_samples} train / {s.val_samples} val samples from "
         f"{s.train_frames} / {s.val_frames} frames, {s.boxes} boxes in {args.out}"
     )
+    for segment in s.segments:
+        print(f"  {segment.name}: {segment.train_frames} train / {segment.val_frames} val frames")
     return 0
 
 

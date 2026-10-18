@@ -23,18 +23,27 @@ _MANIFEST_FIELDS = ["sample", "split", "video", "frame", "x0", "y0", "w", "h", "
 
 
 @dataclass(frozen=True)
+class SegmentSummary:
+    name: str  # the segment's frames dir name
+    train_frames: int
+    val_frames: int
+
+
+@dataclass(frozen=True)
 class DatasetSummary:
     train_samples: int
     val_samples: int
     train_frames: int
     val_frames: int
     boxes: int
+    segments: tuple[SegmentSummary, ...] = ()
 
 
 @dataclass(frozen=True)
 class _Frame:
     """A labelled frame whose inputs phase 1 has read and checked."""
 
+    segment: int  # index into the segments list
     stem: str
     ref: FrameRef
     width: int
@@ -53,7 +62,12 @@ def _positions(size: int, window: int) -> list[int]:
 
 
 def crop_windows(width: int, height: int, scale: float, crop: int = 1280) -> list[Window]:
-    """Windows that become crop x crop samples at `scale`; together they contain every box of width <= W - w."""
+    """Windows that become crop x crop samples at `scale`: on each axis the two ends {0, size - window}.
+
+    For a frame of width W and a window of width w <= W <= 2w the two windows overlap, and together they contain every
+    box of width <= 2w - W whole (the same for heights). Wider boxes can be cut, and for W > 2w the middle of the
+    frame is in no window at all; the full frame sample of every labelled frame covers both.
+    """
     w = min(width, _round_half_up(crop / scale))
     h = min(height, _round_half_up(crop / scale))
     return [(x0, y0, w, h) for y0 in _positions(height, h) for x0 in _positions(width, w)]
@@ -77,7 +91,9 @@ def _scaled(box: Box, s: float) -> Box:
 
 def _write_sample(out_dir: Path, split: str, name: str, image, boxes: list[Box]) -> None:
     height, width = image.shape[:2]
-    cv2.imwrite(str(out_dir / "images" / split / f"{name}.jpg"), image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    path = out_dir / "images" / split / f"{name}.jpg"
+    if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 95]):  # cv2 reports a failed write only by returning False
+        raise ValueError(f"cannot write {path}")
     lines = to_yolo_lines(boxes, width, height)
     (out_dir / "labels" / split / f"{name}.txt").write_text("".join(f"{line}\n" for line in lines))
 
@@ -102,7 +118,13 @@ def _check_out_dir(out_dir: Path) -> None:
 
 
 def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]:
-    """Phase 1: reads and checks every segment, writes nothing."""
+    """Phase 1: reads and checks every segment, writes nothing.
+
+    A segment that is missing its labels, or whose frames all fall into the validation tail, is an error: skipping
+    it quietly would hand the training run less data (or none at all) than the command line asked for.
+    """
+    if not segments:
+        raise ValueError("no segments given; pass at least one segment")
     frames: list[_Frame] = []
     owner: dict[str, int] = {}  # video stem -> index of the segment that writes its samples
     for index, (frames_dir, labels_dir) in enumerate(segments):
@@ -111,8 +133,12 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]
         done = read_processed(labels_dir)
         used = [r for r in refs if r.frame in done]
         if not used:
-            continue
+            raise ValueError(
+                f"{labels_dir} has no processed frames for {frames_dir} (the labels dir is missing or empty); "
+                f"run vc_label teach and vc_label fuse for this segment first"
+            )
         val_from = max(r.pts_ms for r in used) - val_tail_ms
+        segment_frames: list[_Frame] = []
         for ref in used:
             stem = Path(ref.video).stem
             if owner.setdefault(stem, index) != index:
@@ -125,7 +151,14 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]
             width, height = image_size(ref.image)
             boxes = from_yolo_lines(label_file.read_text().splitlines(), width, height)
             split = "val" if ref.pts_ms >= val_from else "train"
-            frames.append(_Frame(stem, ref, width, height, boxes, split))
+            segment_frames.append(_Frame(index, stem, ref, width, height, boxes, split))
+        if all(f.split == "val" for f in segment_frames):
+            span = max(r.pts_ms for r in used) - min(r.pts_ms for r in used)
+            raise ValueError(
+                f"{labels_dir} would have no train frames: its {len(used)} processed frames span {span:.0f} ms, "
+                f"which is not longer than val_tail_ms={val_tail_ms:.0f}. Label a longer segment or lower --val-tail-ms"
+            )
+        frames.extend(segment_frames)
     return frames
 
 
@@ -169,7 +202,9 @@ def _write_frame(out_dir: Path, frame: _Frame, in_width: int, in_height: int, cr
     return rows
 
 
-def _write_dataset(out_dir: Path, frames: list[_Frame], in_width: int, in_height: int, crop: int) -> DatasetSummary:
+def _write_dataset(
+    out_dir: Path, segments: list[tuple[Path, Path]], frames: list[_Frame], in_width: int, in_height: int, crop: int
+) -> DatasetSummary:
     """Phase 2: writes the samples, the manifest and data.yaml."""
     for kind in ("images", "labels"):
         for split in ("train", "val"):
@@ -189,6 +224,14 @@ def _write_dataset(out_dir: Path, frames: list[_Frame], in_width: int, in_height
         train_frames=sum(f.split == "train" for f in frames),
         val_frames=sum(f.split == "val" for f in frames),
         boxes=sum(r["boxes"] for r in rows),
+        segments=tuple(
+            SegmentSummary(
+                frames_dir.name,
+                sum(f.split == "train" for f in frames if f.segment == index),
+                sum(f.split == "val" for f in frames if f.segment == index),
+            )
+            for index, (frames_dir, _) in enumerate(segments)
+        ),
     )
 
 
@@ -214,7 +257,8 @@ def build_dataset(
 ) -> DatasetSummary:
     """segments: (frames_dir, labels_dir) pairs; only frames in processed.txt are used.
 
-    Every input is checked before anything is written. If writing fails, the output dir is removed
+    Every input is checked before anything is written: a segment without processed frames (labels not taught or fused
+    yet) or without any frame older than the validation tail raises ValueError instead of being skipped. If writing fails, the output dir is removed
     (or emptied, when it existed empty), so the same --out can be used again after the fix.
     """
     check_input_size(in_width, in_height)
@@ -222,7 +266,7 @@ def build_dataset(
     frames = _plan(segments, val_tail_ms)
     created = not out_dir.exists()
     try:
-        return _write_dataset(out_dir, frames, in_width, in_height, crop)
+        return _write_dataset(out_dir, segments, frames, in_width, in_height, crop)
     except BaseException:
         _remove_partial_output(out_dir, created)
         raise
