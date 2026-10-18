@@ -50,7 +50,12 @@ def size_bin(box: Box, frame_height: int) -> str:
 
 
 def covered_fraction(target: Box, masks: list[Box]) -> float:
-    """Exact share of the target's area under the union of the masks (any class)."""
+    """Exact share of the target's area under the union of the masks (any class).
+
+    The result is rounded to 9 places and capped at 1.0 so float noise cannot push a
+    fully covered box below 1.0 or a box at the 80 % threshold just under it. A zero-area
+    target returns 0.0; callers should skip degenerate boxes instead of relying on this.
+    """
     if target.area <= 0:
         return 0.0
     parts = [
@@ -69,18 +74,30 @@ def covered_fraction(target: Box, masks: list[Box]) -> float:
             cy = (ya + yb) / 2
             if any(p[0] <= cx < p[2] and p[1] <= cy < p[3] for p in parts):
                 covered += (xb - xa) * (yb - ya)
-    return covered / target.area
+    return min(1.0, round(covered / target.area, 9))
 
 
 def _pixels(box: Box, width: int, height: int) -> tuple[slice, slice]:
-    rows = slice(max(0, math.floor(box.y1)), min(height, math.ceil(box.y2)))
-    cols = slice(max(0, math.floor(box.x1)), min(width, math.ceil(box.x2)))
-    return rows, cols
+    """Whole-pixel rows and columns of ``box`` clipped to the frame.
+
+    Both ends are clamped: a box lying wholly outside the frame gets an empty slice
+    instead of a negative stop, which Python would read as "counted from the end".
+    """
+    row_lo = max(0, math.floor(box.y1))
+    row_hi = max(row_lo, min(height, math.ceil(box.y2)))
+    col_lo = max(0, math.floor(box.x1))
+    col_hi = max(col_lo, min(width, math.ceil(box.x2)))
+    return slice(row_lo, row_hi), slice(col_lo, col_hi)
 
 
 def stray_mask_fraction(masks: list[Box], targets: list[Box], width: int, height: int) -> float:
-    """Share of the frame covered by masks but by no target box (the false-positive area)."""
-    if not masks:
+    """Share of the frame covered by masks but by no target box (the false-positive area).
+
+    Boxes are rounded outward to whole pixels (floor of the min edge, ceil of the max
+    edge) and clipped to the frame. Returns 0.0 when there are no masks or the frame
+    has no pixels.
+    """
+    if not masks or width * height == 0:
         return 0.0
     grid = np.zeros((height, width), dtype=bool)
     for m in masks:
@@ -98,13 +115,16 @@ def heat_cell(box: Box, width: int, height: int) -> tuple[int, int]:
 
 
 def wilson_interval(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval; the bounds are exactly 0.0 with no hits and 1.0 with all hits."""
     if total == 0:
         return (0.0, 1.0)
     p = hits / total
     denom = 1 + z * z / total
     centre = (p + z * z / (2 * total)) / denom
     half = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
-    return (max(0.0, centre - half), min(1.0, centre + half))
+    lower = 0.0 if hits == 0 else max(0.0, centre - half)
+    upper = 1.0 if hits == total else min(1.0, centre + half)
+    return (lower, upper)
 
 
 @dataclass(frozen=True)
