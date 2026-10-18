@@ -51,16 +51,23 @@ def decode_yolov8(
     iou_threshold: float,
     src: str = "student",
 ) -> list[Box]:
-    """Raw YOLOv8 output -> boxes in frame pixels after thresholding and per-class NMS."""
+    """Raw YOLOv8 output -> boxes in frame pixels after thresholding and per-class NMS.
+
+    A broken model must stop the run instead of quietly losing detections, so this raises ValueError when any class
+    score of any anchor is not finite (NaN would otherwise fail every threshold test and the anchor would just vanish),
+    and when a kept anchor has a non-finite coordinate. Coordinates of anchors below the threshold are never read.
+    The C++ decoder does the same.
+    """
     p = pred[0] if pred.ndim == 3 else pred
     if p.shape[0] != 4 + len(classes):
         raise ValueError(f"output has {p.shape[0] - 4} classes, model.json lists {len(classes)} classes")
     scores = p[4:]
+    if not np.isfinite(scores).all():
+        raise ValueError("model output has non-finite scores")
     cls_ids = scores.argmax(axis=0)
     conf = scores.max(axis=0)
     keep = np.nonzero(conf >= score_threshold)[0]
     if not np.isfinite(p[:4, keep]).all():
-        # a broken model must stop the run, never turn into masks; the C++ decoder does the same
         raise ValueError("model output has non-finite box coordinates")
     cx, cy, w, h = (p[i, keep] for i in range(4))
     x1 = np.clip((cx - w / 2) / r, 0, frame_width)

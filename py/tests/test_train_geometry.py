@@ -114,13 +114,20 @@ def test_decode_stops_on_a_non_finite_box_that_passes_the_threshold(cx, cy, w, h
         decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
 
 
-def test_decode_ignores_non_finite_boxes_below_the_threshold_and_nan_scores():
+def test_decode_ignores_non_finite_boxes_below_the_threshold():
     pred = _pred(
         [
             (32, 16, 8, 4, 0.9, 0.0),  # kept
-            (np.nan, np.inf, np.nan, 4, 0.05, 0.0),  # below the threshold: never read
-            (32, 16, 8, 4, np.nan, 0.5),  # NaN face score: numpy max is NaN, so the anchor is dropped
+            (np.nan, np.inf, np.nan, 4, 0.05, 0.0),  # below the threshold: its box is never read
         ]
     )
     boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
     assert [b.cls for b in boxes] == ["face"]
+
+
+@pytest.mark.parametrize("face, plate", [(np.nan, 0.5), (0.1, np.nan), (np.inf, 0.0), (0.0, -np.inf)])
+def test_decode_stops_on_any_non_finite_class_score(face, plate):
+    # a NaN score used to be dropped silently (numpy max is NaN, NaN >= threshold is False); it must stop the run
+    pred = _pred([(32, 16, 8, 4, 0.9, 0.0), (32, 16, 8, 4, face, plate)])
+    with pytest.raises(ValueError, match="non-finite scores"):
+        decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
