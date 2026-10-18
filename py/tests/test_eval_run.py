@@ -452,9 +452,9 @@ def test_a_failing_vc_redact_is_a_value_error_carrying_its_stderr(tmp_path, monk
         run_all(_cfg(tmp_path), runner=_redact_fails([], "boom"))
     message = str(info.value)
     assert "vc_redact failed" in message and STEM in message and "exit 3" in message and "--detect-every-frame" in message
-    # a later run names its own detection rate
+    # a later run names its own detection rate; the first, failed run left files in the report dir
     with pytest.raises(ValueError, match="boom") as info:
-        run_all(_cfg(tmp_path), runner=_redact_fails([], "boom", after=2))
+        run_all(_cfg(tmp_path, overwrite=True), runner=_redact_fails([], "boom", after=2))
     assert "--detect-fps 10" in str(info.value)
 
 
@@ -504,11 +504,34 @@ def test_report_dir_inside_frames_dir_is_refused_before_any_run(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "where",
+    [
+        ("out", "frames", "unlisted", "report"),  # the frames dir of a stem that --stems does not list
+        ("out", "frames", "report"),  # straight under the frames root, in no stem's directory
+        ("redacted_root", "frames", "unlisted", "redacted"),
+        ("redacted_root", "frames", "redacted"),
+    ],
+)
+def test_report_and_redacted_dirs_anywhere_under_the_frames_root_are_refused(tmp_path, where):
+    _setup(tmp_path)
+    (tmp_path / "frames" / "unlisted").mkdir()  # vc_extract --overwrite would delete this whole directory
+    field, *parts = where
+    calls = []
+    with pytest.raises(ValueError, match="inside the frames directory"):
+        run_all(_cfg(tmp_path, **{field: tmp_path.joinpath(*parts)}), runner=_fake_runner(calls))
+    assert calls == [] and not (tmp_path / "frames" / "report").exists() and not (tmp_path / "frames" / "unlisted" / "report").exists()
+
+
+@pytest.mark.parametrize(
     "kw, message",
     [
         ({"stems": []}, "no stems"),
         ({"fps_values": []}, "no detection rates"),
-        ({"fps_values": [5, 0]}, "positive"),
+        ({"fps_values": [5, 0]}, "at least 5"),
+        ({"fps_values": [5, -1]}, "at least 5"),
+        ({"fps_values": [5, 4.9]}, "at least 5"),
+        ({"fps_values": [5, float("nan")]}, "at least 5"),
+        ({"fps_values": [5, float("inf")]}, "at least 5"),
         ({"fps_values": [5, 5.0]}, "twice"),
         ({"stems": [STEM, STEM]}, "twice"),
         ({"stems": ["missing"]}, "missing.mp4"),
@@ -520,6 +543,65 @@ def test_bad_configuration_is_refused_before_any_run(tmp_path, kw, message):
     with pytest.raises(ValueError, match=message):
         run_all(_cfg(tmp_path, **kw), runner=_fake_runner(calls))
     assert calls == []
+
+
+def test_a_non_empty_report_dir_is_refused_unless_overwriting(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "old.txt").write_text("a previous report")
+    calls = []
+    with pytest.raises(ValueError, match="not empty") as info:
+        run_all(_cfg(tmp_path), runner=_fake_runner(calls))
+    assert "--overwrite" in str(info.value) and calls == [] and (report / "old.txt").read_text() == "a previous report"
+
+    run_all(_cfg(tmp_path, overwrite=True), runner=_fake_runner(calls))  # cleared first, then the run writes its own files
+    assert not (report / "old.txt").exists() and (report / "summary.json").is_file()
+
+
+def test_an_empty_or_missing_report_dir_needs_no_overwrite(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    (tmp_path / "report").mkdir()
+    run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert (tmp_path / "report" / "index.html").is_file()
+
+
+def test_a_report_path_that_is_a_file_is_refused(tmp_path):
+    _setup(tmp_path)
+    (tmp_path / "report").write_text("not a directory")
+    calls = []
+    with pytest.raises(ValueError, match="not a directory"):
+        run_all(_cfg(tmp_path, overwrite=True), runner=_fake_runner(calls))
+    assert calls == [] and (tmp_path / "report").read_text() == "not a directory"
+
+
+@pytest.mark.parametrize("inputs", ["frames", "labels", "videos", "model", "redacted"])
+def test_overwrite_never_clears_a_directory_holding_the_inputs(tmp_path, inputs):
+    _setup(tmp_path)
+    (tmp_path / "model").mkdir()
+    (tmp_path / "redacted" / "dense").mkdir(parents=True)
+    keep = {"frames": tmp_path / "frames" / STEM / "frames.csv", "labels": tmp_path / "labels" / STEM / "merged.jsonl",
+            "videos": tmp_path / "videos" / f"{STEM}.mp4", "model": tmp_path / "model", "redacted": tmp_path / "redacted"}[inputs]
+    keep.parent.mkdir(exist_ok=True)
+    out = {"frames": tmp_path, "labels": tmp_path / "labels", "videos": tmp_path / "videos", "model": tmp_path / "model", "redacted": tmp_path / "redacted" / "dense"}[inputs]
+    calls = []
+    with pytest.raises(ValueError, match="overlaps"):
+        run_all(_cfg(tmp_path, out=out, overwrite=True), runner=_fake_runner(calls))
+    assert calls == [] and keep.exists()
+
+
+def test_a_bad_input_leaves_the_old_report_in_place_even_when_overwriting(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    _break_labels(tmp_path / "labels" / STEM, "missing flags")
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "old.txt").write_text("a previous report")
+    with pytest.raises(ValueError, match="flags.csv"):
+        run_all(_cfg(tmp_path, overwrite=True), runner=_fake_runner([]))
+    assert (report / "old.txt").exists()
 
 
 def test_cli_coverage_and_errors(tmp_path, capsys):
@@ -601,9 +683,13 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert main(argv) == 0
     cfg = seen[0]
     assert cfg.stems == ["a", "b"] and cfg.fps_values == [5.0, 10.0, 15.0] and cfg.out == out
+    assert cfg.overwrite is False
     assert cfg.vc_redact == Path("build/cpp-release/vc_redact") and cfg.config == Path("configs/redact.json")
     printed = capsys.readouterr().out
     assert "10 fps" in printed and str(out / "index.html") in printed
+
+    assert main([*argv, "--overwrite"]) == 0 and seen[-1].overwrite is True
+    capsys.readouterr()
 
     outcome["chosen_fps"] = None
     assert main(argv) == 1

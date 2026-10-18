@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ MAX_MISS_TILES = 60
 MAX_UNCERTAIN_TILES = 60
 MAX_TEMPORAL_TILES = 30
 STDERR_TAIL_LINES = 20
+MIN_DETECT_FPS = 5.0
 STAGES = ("decode", "detect", "track", "mosaic", "encode")
 DASH = "—"
 
@@ -43,6 +46,46 @@ class RunConfig:
     consistency_count: int = 20
     spot_frames: int = 30
     seed: int = 0
+    overwrite: bool = False  # clear a non-empty `out` first instead of refusing it
+
+
+def _same_or_below(path: Path, parent: Path) -> bool:
+    """True when `path` is `parent` or lies anywhere under it (spelling-proof: APFS is case-insensitive)."""
+    target, root = path.resolve(), parent.resolve()
+    if target == root or root in target.parents:
+        return True
+    if parent.exists():
+        return any(c.exists() and os.path.samefile(c, parent) for c in (target, *target.parents))
+    return False
+
+
+def _validate_out(cfg: RunConfig) -> None:
+    """`out` is where the report goes and, with --overwrite, what gets cleared: it must not touch the data the run reads."""
+    for base in (cfg.out, cfg.redacted_root):
+        ensure_outside(cfg.frames_root, base)  # anywhere under the frames root, not only below the listed stems
+        for stem in cfg.stems:
+            ensure_outside(cfg.frames_root / stem, base)  # a stem directory may be a symlink to elsewhere
+    reads = [cfg.frames_root, cfg.labels_root, cfg.videos, cfg.model, cfg.vc_redact, cfg.vc_detect, cfg.config, cfg.redacted_root]
+    for path in reads:
+        if _same_or_below(path, cfg.out):
+            raise ValueError(f"{cfg.out} overlaps {path}; --out must be a directory of its own (--overwrite clears it)")
+    for run_dir in (cfg.redacted_root / "dense", *(_fps_dir(cfg, fps) for fps in cfg.fps_values)):
+        if _same_or_below(cfg.out, run_dir):
+            raise ValueError(f"{cfg.out} overlaps {run_dir}, where vc_redact writes; --out must be a directory of its own")
+    if cfg.out.exists():
+        if not cfg.out.is_dir():
+            raise ValueError(f"{cfg.out} is not a directory")
+        if not cfg.overwrite and any(cfg.out.iterdir()):
+            raise ValueError(f"{cfg.out} is not empty; pass --overwrite to clear it first, or use another --out")
+
+
+def _clear(directory: Path) -> None:
+    """Empties `directory` (links are removed, never followed) and keeps the directory itself."""
+    for child in directory.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
 
 
 def _validate(cfg: RunConfig) -> None:
@@ -53,14 +96,14 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError("a stem is listed twice")
     if not cfg.fps_values:
         raise ValueError("no detection rates to sweep")
-    if any(fps <= 0 for fps in cfg.fps_values):
-        raise ValueError("detection rates must be positive")
+    if not all(math.isfinite(fps) and fps >= MIN_DETECT_FPS for fps in cfg.fps_values):
+        raise ValueError(f"detection rates must be finite numbers of at least {MIN_DETECT_FPS:g} fps")
     if len({float(fps) for fps in cfg.fps_values}) != len(cfg.fps_values):
         raise ValueError("a detection rate is listed twice")
     if cfg.consistency_count < 1 or cfg.spot_frames < 0:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
+    _validate_out(cfg)
     for stem in cfg.stems:
-        ensure_outside(cfg.frames_root / stem, cfg.out)
         for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv"):
             if not needed.is_file():
                 raise ValueError(f"{needed} does not exist")
@@ -337,6 +380,8 @@ def _summary_md(summary: dict) -> str:
 def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
     _validate(cfg)
     _check_inputs(cfg)
+    if cfg.out.exists() and cfg.overwrite:
+        _clear(cfg.out)  # only after every input has been checked: a bad input must not cost the previous report
     cfg.out.mkdir(parents=True, exist_ok=True)
     consistency = _consistency(cfg, runner)  # a missing vc_detect or a bad model fails here, not after minutes of sweeps
     runs: list[dict] = []
