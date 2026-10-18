@@ -118,7 +118,8 @@ def boxes_from_labelme(path: Path, doc: dict) -> tuple[list[Box], list[str], boo
     for name in on:
         if name != REVIEWED_FLAG and name not in SCENE_FLAGS:
             raise ValueError(f"{path}: unknown image flag {name!r} (expected {REVIEWED_FLAG!r} or one of {SCENE_FLAGS})")
-    return boxes, sorted(name for name in on if name in SCENE_FLAGS), REVIEWED_FLAG in on, width, height
+    reviewed = flags.get(REVIEWED_FLAG) is True  # the checkbox is a JSON boolean: a string "false" is not a tick
+    return boxes, sorted(name for name in on if name in SCENE_FLAGS), reviewed, width, height
 
 
 MAX_LISTED_FRAMES = 20

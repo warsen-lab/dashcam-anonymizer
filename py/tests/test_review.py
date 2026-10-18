@@ -423,3 +423,22 @@ def test_import_review_rejects_a_json_without_a_usable_image_path(tmp_path, imag
         import_review(review, read_frames_csv(frames), gold)
 
     assert not gold.exists()
+
+
+@pytest.mark.parametrize("value", ["false", "true", "yes", 1, [True]])
+def test_only_a_real_true_marks_a_frame_reviewed(tmp_path, value):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [_FACE], {})
+    path = review / "000007.json"
+    doc = json.loads(path.read_text())
+    doc["flags"][REVIEWED_FLAG] = value  # a hand-edited or foreign tool's file: truthy, but not the checkbox
+    path.write_text(json.dumps(doc))
+
+    assert read_labelme_boxes(path)[2] is False
+    with pytest.raises(ValueError, match=r"1 of 1 frames are not marked reviewed: 7"):
+        import_review(review, read_frames_csv(frames), gold)
+    assert not gold.exists()
+
+    assert import_review(review, read_frames_csv(frames), gold, allow_unreviewed=True) == 1
+    with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
+        assert list(csv.reader(fh))[1][3] == "false"
