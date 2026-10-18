@@ -1,0 +1,283 @@
+"""Detection-rate sweep over held-out segments, summary tables and the spot-check page (spec §6.3–§6.5)."""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import subprocess
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from urllib.parse import quote
+
+from vc_label.contracts import LABEL_CLASSES, read_frames_csv
+from vc_label.pipeline import MERGED
+from vc_label.review import ensure_outside
+from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
+from vc_eval.coverage import CoverageReport, evaluate_coverage
+from vc_eval.integrity import check_integrity, probe
+from vc_eval.metrics import HEATMAP_MIN_TARGETS, Rate
+from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
+from vc_eval.temporal import TemporalReport, evaluate_temporal
+
+MAX_MISS_TILES = 60
+MAX_TEMPORAL_TILES = 30
+STAGES = ("decode", "detect", "track", "mosaic", "encode")
+DASH = "—"
+
+
+@dataclass
+class RunConfig:
+    stems: list[str]
+    model: Path
+    fps_values: list[float]
+    out: Path
+    vc_redact: Path
+    vc_detect: Path
+    config: Path
+    videos: Path = Path("data/videos")
+    frames_root: Path = Path("data/frames")
+    labels_root: Path = Path("data/labels")
+    redacted_root: Path = Path("data/redacted")
+    consistency_count: int = 20
+    spot_frames: int = 30
+    seed: int = 0
+
+
+def _validate(cfg: RunConfig) -> None:
+    """Refuses a bad configuration before the first vc_redact run, which takes minutes."""
+    if not cfg.stems:
+        raise ValueError("no stems to evaluate")
+    if len(set(cfg.stems)) != len(cfg.stems):
+        raise ValueError("a stem is listed twice")
+    if not cfg.fps_values:
+        raise ValueError("no detection rates to sweep")
+    if any(fps <= 0 for fps in cfg.fps_values):
+        raise ValueError("detection rates must be positive")
+    if len({float(fps) for fps in cfg.fps_values}) != len(cfg.fps_values):
+        raise ValueError("a detection rate is listed twice")
+    if cfg.consistency_count < 1 or cfg.spot_frames < 0:
+        raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
+    for stem in cfg.stems:
+        ensure_outside(cfg.frames_root / stem, cfg.out)
+        for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv", cfg.labels_root / stem / MERGED):
+            if not needed.is_file():
+                raise ValueError(f"{needed} does not exist")
+
+
+def _fps_dir(cfg: RunConfig, fps: float) -> Path:
+    return cfg.redacted_root / f"fps{fps:g}"
+
+
+def _redact(cfg: RunConfig, stem: str, out: Path, extra: list[str], runner) -> None:
+    runner(
+        [str(cfg.vc_redact), "--input", str(cfg.videos / f"{stem}.mp4"), "--out", str(out), "--model", str(cfg.model),
+         "--config", str(cfg.config), *extra, "--overwrite"],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def rate_json(rate: Rate) -> dict:
+    lo, hi = rate.interval
+    return {"hits": rate.hits, "total": rate.total, "value": None if rate.total == 0 else rate.value, "ci": [lo, hi]}
+
+
+def coverage_json(c: CoverageReport) -> dict:
+    out = {cls: rate_json(c.classes[cls].rate) for cls in LABEL_CLASSES}
+    weakest = c.weakest_cell()
+    out["weakest_cell"] = None if weakest is None else {"cls": weakest[0], "row": weakest[1], "col": weakest[2], **rate_json(weakest[3])}
+    # P2 cannot be judged when no heatmap cell holds enough targets; that is not a pass
+    out["p2"] = "n/a" if weakest is None else ("pass" if c.heatmap_passed() else "fail")
+    out["temporal_fill"] = {cls: rate_json(c.classes[cls].temporal_fill) for cls in LABEL_CLASSES}
+    out["best_effort"] = {cls: rate_json(c.classes[cls].best_effort) for cls in LABEL_CLASSES}
+    out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
+    out["passed"] = c.passed()
+    return out
+
+
+def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport]:
+    run_dir = _fps_dir(cfg, fps) / stem
+    coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl")
+    temporal = evaluate_temporal(cfg.redacted_root / "dense" / stem / "detections.jsonl", run_dir / "masks.jsonl", coverage.height)
+    integrity = check_integrity(cfg.videos / f"{stem}.mp4", run_dir / f"{stem}.redacted.mp4")
+    stats = json.loads((run_dir / "stats.json").read_text(encoding="utf-8"))
+    entry = {
+        "stem": stem,
+        "fps": fps,
+        "coverage": coverage_json(coverage),
+        "temporal": {cls: rate_json(temporal.classes[cls]) for cls in LABEL_CLASSES},
+        "integrity": {"checks": integrity.checks, "details": integrity.details, "passed": integrity.passed},
+        "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
+        "stages": stats.get("stages", {}),
+        "elapsed_s": stats.get("elapsed_s"),
+        "detector": stats.get("detector", ""),
+        "encoder": stats.get("encoder", ""),
+    }
+    return entry, coverage, temporal
+
+
+def _spread(items: list, limit: int) -> list:
+    """At most `limit` items, evenly spaced over the list (a run of misses is mostly one target in neighbouring frames)."""
+    if len(items) <= limit:
+        return list(items)
+    return [items[i * len(items) // limit] for i in range(limit)]
+
+
+def _consistency(cfg: RunConfig, runner) -> dict:
+    refs = _spread(read_frames_csv(cfg.frames_root / cfg.stems[0]), cfg.consistency_count)
+    cpp = run_vc_detect(cfg.vc_detect, cfg.model, refs, cfg.out / "consistency", runner=runner)
+    report = compare_detections(cpp, python_detections(cfg.model, refs))
+    return {**asdict(report), "passed": report.passed()}
+
+
+def _choose(runs: list[dict], fps_values: list[float]) -> float | None:
+    for fps in sorted(fps_values):
+        mine = [r for r in runs if r["fps"] == fps]
+        if mine and all(r["coverage"]["passed"] and r["integrity"]["passed"] for r in mine):
+            return fps
+    return None
+
+
+def _href(path: str | Path) -> str:
+    return quote(Path(path).as_posix())
+
+
+def _spot_sections(cfg: RunConfig, fps: float, reports: dict[str, tuple[CoverageReport, TemporalReport]]) -> list[Section]:
+    img = cfg.out / "img"
+    rng = random.Random(cfg.seed)
+    misses, temporal, random_items, links = [], [], [], []
+    for stem, (coverage, tempo) in reports.items():
+        video = _fps_dir(cfg, fps) / stem / f"{stem}.redacted.mp4"
+        links.append((f"{stem} 打码视频（{fps:g} fps 检测）", _href(os.path.relpath(video, cfg.out))))
+        chosen_misses = _spread(coverage.misses, MAX_MISS_TILES)
+        chosen_temporal = _spread(tempo.misses, MAX_TEMPORAL_TILES)
+        frames = probe(video).video.frames or 0
+        pick = sorted(rng.sample(range(frames), min(cfg.spot_frames, frames)))
+        decoded = extract_frames(video, [m.frame for m in chosen_misses] + [m.frame for m in chosen_temporal] + pick, img / stem / "redacted")
+        for n, m in enumerate(chosen_misses):
+            original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
+            box = m.box.clipped(coverage.width, coverage.height)  # miss_tile needs a box at least partly inside the image
+            tile = miss_tile(original, decoded[m.frame], box, img / stem / f"miss_{m.frame:06d}_{n}.jpg")
+            misses.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}（左原帧，右打码）"))
+        for n, m in enumerate(chosen_temporal):
+            box = m.box.clipped(coverage.width, coverage.height)
+            tile = miss_tile(decoded[m.frame], None, box, img / stem / f"temporal_{m.frame:06d}_{n}.jpg")
+            temporal.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}"))
+        for frame in pick:
+            thumb = thumbnail(decoded[frame], img / stem / f"random_{frame:06d}.jpg")
+            random_items.append(Item(_href(thumb.relative_to(cfg.out)), f"{stem} 帧 {frame}"))
+    return [
+        Section("打码视频", "请完整看一遍，留意是否有露出的人脸或车牌。", [], links),
+        Section("未遮住的参照目标", "老师标注里必须遮住、但打码框覆盖不足 80% 的目标。", misses),
+        Section("逐帧检测有、稀疏打码漏掉", "同一模型逐帧检测到、但关键帧 + 补框没盖住的框（打码后画面）。", temporal),
+        Section("随机打码帧", "随机抽取的打码后画面，检查漏打与误打。", random_items),
+    ]
+
+
+def _pct(rate: dict) -> str:
+    if not rate["total"]:
+        return DASH
+    lo, hi = rate["ci"]
+    return f"{rate['value']:.1%} ({lo * 100:.1f}–{hi:.1%})，n={rate['total']}"
+
+
+def _weakest(coverage: dict) -> str:
+    w = coverage["weakest_cell"]
+    if w is None:
+        return f"n/a（无热力格达到 {HEATMAP_MIN_TARGETS} 个目标）"
+    return f"{w['cls']} r{w['row']}c{w['col']} {w['value']:.1%}（n={w['total']}）"
+
+
+def _number(value, fmt: str) -> str:
+    return DASH if value is None else format(value, fmt)
+
+
+def _failed_details(integrity: dict) -> str:
+    failed = [integrity["details"].get(name, name) for name, ok in integrity["checks"].items() if not ok]
+    return "；".join(failed).replace("|", "/")
+
+
+def _summary_md(summary: dict) -> str:
+    runs = summary["runs"]
+    first = runs[0] if runs else {}
+    chosen = summary["chosen_fps"]
+    mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
+    if chosen is None:
+        chosen_line = "- 选定检测频率：无满足 P1–P3 的频率"
+    else:
+        unjudged = any(r["fps"] == chosen and r["coverage"]["p2"] == "n/a" for r in runs)
+        chosen_line = f"- 选定检测频率：{chosen:g} fps" + ("（P2 无法判定：热力格样本不足）" if unjudged else "")
+    lines = [
+        "# 代理验证结果",
+        "",
+        f"- 模型：{summary['model']}；检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
+        chosen_line,
+        "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
+        "",
+        "## 最终覆盖率（P1 / P2）",
+        "",
+        "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） | 最弱热力格 | 通过 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in runs:
+        c = r["coverage"]
+        lines.append(f"| {r['stem']} | {r['fps']:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
+    if any(r["coverage"]["p2"] == "n/a" for r in runs):
+        lines += ["", f"n/a：没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 无法判定、不算通过；此时“通过”一栏只反映 P1。"]
+    lines += ["", "## 时间覆盖率", "", "| 段 | fps | 人脸 | 车牌 |", "|---|---|---|---|"]
+    lines += [f"| {r['stem']} | {r['fps']:g} | {_pct(r['temporal']['face'])} | {_pct(r['temporal']['plate'])} |" for r in runs]
+    lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|"]
+    for r in runs:
+        i = r["integrity"]
+        k = i["checks"]
+        cells = " | ".join(mark(k.get(name)) for name in ("decodable", "frame_count", "duration", "audio_kept", "av_sync"))
+        lines.append(f"| {r['stem']} | {r['fps']:g} | {cells} | {_failed_details(i)} |")
+    lines += ["", "## 误打面积（只报告）", "", "| 段 | fps | 最大 | 均值 | 95 分位 |", "|---|---|---|---|---|"]
+    lines += [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
+    lines += [
+        "", "## 速度（本机）", "",
+        "各阶段为吞吐（帧/秒），总耗时为整段秒数；后端见开头的检测后端与编码器。", "",
+        "| 段 | fps | 解码 | 检测 | 补框 | 打码 | 编码 | 总耗时 |", "|---|---|---|---|---|---|---|---|",
+    ]
+    for r in runs:
+        cells = " | ".join(_number(r["stages"].get(s, {}).get("fps"), ".0f") for s in STAGES)
+        lines.append(f"| {r['stem']} | {r['fps']:g} | {cells} | {_number(r['elapsed_s'], '.1f')} s |")
+    c = summary["consistency"]
+    lines += [
+        "",
+        "## C++ / Python 一致性",
+        "",
+        f"{c['images']} 张图、{c['boxes']} 个框，配上 {c['matched']} 个，最大坐标差 {c['max_diff_px']:.3f} px，"
+        f"未配上（分数 ≥ 0.3）{c['unmatched_confident']} 个、（< 0.3）{c['unmatched_low']} 个：{'通过' if c['passed'] else '未通过'}。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
+    _validate(cfg)
+    cfg.out.mkdir(parents=True, exist_ok=True)
+    runs: list[dict] = []
+    reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]] = {}
+    for stem in cfg.stems:
+        _redact(cfg, stem, cfg.redacted_root / "dense", ["--detect-every-frame"], runner)
+        for fps in cfg.fps_values:
+            _redact(cfg, stem, _fps_dir(cfg, fps), ["--detect-fps", f"{fps:g}"], runner)
+        for fps in cfg.fps_values:
+            entry, coverage, temporal = _evaluate(cfg, stem, fps)
+            runs.append(entry)
+            reports[(stem, fps)] = (coverage, temporal)
+    chosen = _choose(runs, cfg.fps_values)
+    summary = {"model": str(cfg.model), "chosen_fps": chosen, "runs": runs, "consistency": _consistency(cfg, runner)}
+    # the numbers first: a failure while building the page must not lose them
+    (cfg.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    (cfg.out / "summary.md").write_text(_summary_md(summary), encoding="utf-8")
+    spot_fps = chosen if chosen is not None else min(cfg.fps_values)
+    sections = _spot_sections(cfg, spot_fps, {stem: reports[(stem, spot_fps)] for stem in cfg.stems})
+    write_spotcheck(
+        cfg.out,
+        "打码抽查",
+        f"检测频率 {spot_fps:g} fps。参照为老师融合标注（代理），老师漏标的目标只能靠人眼发现。",
+        sections,
+    )
+    return summary

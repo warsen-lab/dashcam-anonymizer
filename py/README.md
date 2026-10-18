@@ -122,3 +122,52 @@ PYTHONPATH=py .venv/bin/python -m vc_label import-review --frames data/frames/<s
 ```
 
 带 `models` 标记的用例需要上面四个模型文件（RetinaFace、YuNet、COCO、OWLv2，以 `required_model_files()` 为准）和样例帧 `data/frames/sg_drive_600s/006005.jpg`，缺任何一个都整体跳过，从不触发下载。
+
+## vc_eval：代理评测
+
+设计见 `docs/superpowers/specs/2026-10-18-redaction-proxy-validation-design.md` §6。`vc_eval` 拿 `vc_redact` 的打码结果去对**老师融合标注**（`data/labels/<stem>/merged.jsonl`），所以这是“代理验收”：老师漏标的目标不会被算作漏打，不能代替人工金标准验收。代理通过条件（规格 §6.6）：
+
+| # | 条件 | 谁判定 |
+|---|---|---|
+| P1 | 最终覆盖率：人脸、车牌各自 ≥ 99%（同时给 95% 区间；某一类一个必须遮住的目标都没有时不通过） | `vc_eval` |
+| P2 | 热力图（6×4）中样本 ≥ 30 的格子覆盖率均 ≥ 97%；**没有格子够 30 个样本时显示 `n/a`，不算通过** | `vc_eval` |
+| P3 | 输出完整性：可解码、帧数 ±1、时长、音频保留、音画同步 | `vc_eval` |
+| P4 | 抽查页与打码视频里没有明显露出的人脸或车牌 | 用户看 `index.html` 后确认 |
+
+### run：检测频率扫描
+
+在仓库根目录运行。前提：每段留出视频有 `data/videos/<stem>.mp4`、`data/frames/<stem>/`、`data/labels/<stem>/`（已跑过 `vc_label fuse`，`merged.jsonl` 不能比 `processed.txt` 旧），`--model` 是含 `model.onnx` 和 `model.json` 的目录，`build/cpp-release/` 下有 `vc_redact` 和 `vc_detect`。
+
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <模型目录> --out data/reports/<run>
+```
+
+- `--fps 5,10,15,30`（默认）：要扫描的检测频率；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。
+- 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
+- 选定频率 = 所有段的最终覆盖率（P1 / P2）和输出完整性（P3）都通过的最小频率；没有就显示“无满足 P1–P3 的频率”，抽查页改用最小的频率。
+- 产物：`data/reports/<run>/summary.md`（覆盖率、时间覆盖率、完整性、误打面积、速度、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。`--out` 不能在任何 `data/frames/<stem>/` 里面。
+- 退出码：0 选出了频率；1 没有频率通过；2 输入或运行错误（stderr 打印 `vc_eval: <原因>`）。
+
+### 单项子命令
+
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_eval coverage --frames data/frames/<stem> --labels data/labels/<stem> --masks data/redacted/fps5/<stem>/masks.jsonl [--json out.json]
+```
+
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_eval temporal --dense data/redacted/dense/<stem>/detections.jsonl --sparse data/redacted/fps5/<stem>/masks.jsonl --frame-height 1080 [--json out.json]
+```
+
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source data/videos/<stem>.mp4 --redacted data/redacted/fps5/<stem>/<stem>.redacted.mp4 [--json out.json]
+```
+
+各打印一行摘要，`--json` 另存完整结果。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
+
+### vc_eval 的测试
+
+按文件运行，用假的 `vc_redact` / `vc_detect` 和 ffmpeg 现场生成的小视频，不跑真正的二进制：
+
+```bash
+.venv/bin/pytest -q py/tests/test_eval_metrics.py py/tests/test_eval_coverage.py py/tests/test_eval_integrity.py py/tests/test_eval_consistency.py py/tests/test_eval_spotcheck.py py/tests/test_eval_run.py
+```
