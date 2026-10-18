@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from vc_label.contracts import Box, FrameRef, read_frames_csv
 from vc_label.review import REVIEWED_FLAG, SCENE_FLAGS, ensure_outside, import_review, labelme_document, read_labelme_boxes, write_review_queue
@@ -56,10 +57,14 @@ def _frames_dir(tmp_path: Path, frames_numbers=(7,)) -> Path:
     frames.mkdir(parents=True)
     rows = ["video,frame,pts_ms,reason,motion_score"] + [f"trip.mp4,{n},{n * 16.7:.1f},base,0" for n in frames_numbers]
     (frames / "frames.csv").write_text("\n".join(rows) + "\n")
+    for n in frames_numbers:
+        Image.new("RGB", (200, 100)).save(frames / f"{n:06d}.jpg")
     return frames
 
 
-def _review_json(review: Path, shapes: list[dict], flags: dict, frame: int = 7, reviewed: bool = True) -> None:
+def _review_json(
+    review: Path, shapes: list[dict], flags: dict, frame: int = 7, reviewed: bool = True, size: tuple[int, int] = (200, 100)
+) -> None:
     review.mkdir(parents=True, exist_ok=True)
     doc = {
         "version": "5.4.1",
@@ -67,8 +72,8 @@ def _review_json(review: Path, shapes: list[dict], flags: dict, frame: int = 7, 
         "shapes": shapes,
         "imagePath": "x.jpg",
         "imageData": None,
-        "imageHeight": 100,
-        "imageWidth": 200,
+        "imageHeight": size[1],
+        "imageWidth": size[0],
     }
     (review / f"{frame:06d}.json").write_text(json.dumps(doc))
 
@@ -229,3 +234,63 @@ def test_import_review_rejects_an_unknown_true_flag_but_ignores_a_false_one(tmp_
 
     _review_json(review, [], {"snow": False})
     assert import_review(review, read_frames_csv(frames), tmp_path / "gold") == 1
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+_FACE = {"label": "face", "points": [[0, 0], [20, 10]], "shape_type": "rectangle"}
+
+
+def test_import_review_is_atomic_when_a_later_file_is_bad(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [_FACE], {"day": True}, frame=7)
+    _review_json(review, [], {}, frame=8)
+    assert import_review(review, read_frames_csv(frames), gold) == 2
+    before = _snapshot(gold)
+    _review_json(review, [], {"night": True}, frame=7)  # would change 000007.txt and the meta
+    _review_json(review, [{"label": "person", "points": [[0, 0], [1, 1]], "shape_type": "rectangle"}], {}, frame=8)
+
+    with pytest.raises(ValueError, match="unknown label"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert _snapshot(gold) == before
+
+
+def test_import_review_removes_labels_of_frames_no_longer_in_the_review_dir(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [_FACE], {}, frame=7)
+    _review_json(review, [_FACE], {}, frame=8)
+    assert import_review(review, read_frames_csv(frames), gold) == 2
+    (review / "000008.json").unlink()
+
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+
+    assert sorted(p.name for p in (gold / "yolo").iterdir()) == ["000007.txt", "classes.txt"]
+    assert (gold / "yolo" / "classes.txt").read_text(encoding="utf-8") == "face\nplate\n"
+    with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
+        assert [row[2] for row in csv.reader(fh)] == ["frame", "7"]
+    assert not (gold / "gold_meta.csv.tmp").exists()
+
+
+def test_import_review_rejects_a_json_sized_differently_from_its_frame_image(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [_FACE], {}, size=(100, 200))
+
+    with pytest.raises(ValueError, match=r"000007\.json.*100x200.*200x100"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert not gold.exists()
+
+
+def test_import_review_refuses_a_labels_dir_as_gold_dir(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "labels"
+    _review_json(review, [_FACE], {})
+    gold.mkdir()
+    (gold / "processed.txt").write_text("7\n")
+
+    with pytest.raises(ValueError, match="labels dir"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert sorted(p.name for p in gold.iterdir()) == ["processed.txt"]

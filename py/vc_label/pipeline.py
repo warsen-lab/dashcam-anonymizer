@@ -14,12 +14,11 @@ from typing import Protocol
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from vc_label.boxes import fuse
 from vc_label.config import LabelingConfig
 from vc_label.contracts import LABEL_CLASSES, Box, Detection, FrameRef, read_frames_csv, read_jsonl, to_yolo_lines, write_jsonl
-from vc_label.review import labelme_document, write_review_queue
+from vc_label.review import image_size, labelme_document, write_review_queue
 from vc_label.rules import Flag, flag_frame, temporal_fill
 
 RAW = "raw.jsonl"
@@ -129,11 +128,6 @@ def _by_frame(path: Path) -> dict[int, list[Box]]:
     return grouped
 
 
-def _image_size(ref: FrameRef) -> tuple[int, int]:
-    with Image.open(ref.image) as img:
-        return img.size
-
-
 def run_fuse(frames_dir: Path, labels_dir: Path, cfg: LabelingConfig) -> tuple[FuseSummary, list[tuple[FrameRef, list[Box]]], list[Flag]]:
     """Fuses raw teacher boxes, fills temporal holes, applies rules, writes merged/flags/YOLO."""
     done = read_processed(labels_dir)
@@ -146,7 +140,7 @@ def run_fuse(frames_dir: Path, labels_dir: Path, cfg: LabelingConfig) -> tuple[F
     yolo_dir.mkdir(exist_ok=True)
     (yolo_dir / "classes.txt").write_text("".join(f"{c}\n" for c in LABEL_CLASSES))
     for ref, boxes in sequence:
-        width, height = _image_size(ref)
+        width, height = image_size(ref.image)
         flags += flag_frame(ref, boxes, aux.get(ref.frame, []), width, height, cfg)
         (yolo_dir / f"{ref.frame:06d}.txt").write_text("".join(f"{line}\n" for line in to_yolo_lines(boxes, width, height)))
     write_jsonl(labels_dir / MERGED, [Detection(r.video, r.frame, r.pts_ms, b) for r, boxes in sequence for b in boxes])
@@ -185,7 +179,7 @@ def run_export_review(
         if target.exists() and not force:
             kept += 1
             continue
-        width, height = _image_size(ref)
+        width, height = image_size(ref.image)
         doc = labelme_document(ref, boxes, per_frame.get(ref.frame, []), review_dir, width, height)
         target.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
         written += 1

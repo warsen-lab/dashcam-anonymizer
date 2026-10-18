@@ -8,6 +8,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+from PIL import Image
+
 from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, to_yolo_lines
 from vc_label.rules import Flag
 
@@ -104,19 +106,32 @@ def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], bool, int, int
 MAX_LISTED_FRAMES = 20
 
 
+def image_size(path: Path) -> tuple[int, int]:
+    with Image.open(path) as img:  # header read only
+        return img.size
+
+
 def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_unreviewed: bool = False) -> int:
     """Converts reviewed LabelMe JSONs to gold YOLO labels plus gold_meta.csv; returns frame count.
 
     Every frame must carry the `reviewed` checkbox unless `allow_unreviewed` (training videos only:
     their pre-labels pass through, recorded as reviewed=false in gold_meta.csv).
+    All JSONs are parsed and validated first; only then is the gold dir touched, so a bad file leaves an
+    earlier import intact. Label files of frames no longer in the review dir are removed.
     """
+    if (gold_dir / "processed.txt").exists():
+        raise ValueError(f"{gold_dir} is a labels dir (it has processed.txt): fuse would overwrite its yolo/; use another --gold")
     by_name = {f"{r.frame:06d}": r for r in refs}
     parsed = []
     for path in sorted(review_dir.glob("*.json")):
         ref = by_name.get(path.stem)
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")
-        parsed.append((ref, *read_labelme_boxes(path)))
+        boxes, tags, reviewed, width, height = read_labelme_boxes(path)
+        actual = image_size(ref.image)
+        if (width, height) != actual:
+            raise ValueError(f"{path}: imageWidth x imageHeight is {width}x{height} but {ref.image} is {actual[0]}x{actual[1]}")
+        parsed.append((ref, boxes, tags, reviewed, width, height))
     pending = [ref.frame for ref, _, _, reviewed, _, _ in parsed if not reviewed]
     if pending and not allow_unreviewed:
         listed = ", ".join(str(n) for n in pending[:MAX_LISTED_FRAMES])
@@ -125,6 +140,7 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
             f"{len(pending)} of {len(parsed)} frames are not marked reviewed: {listed}{more}; "
             f"tick 'reviewed' in X-AnyLabeling or pass --allow-unreviewed (training videos only)"
         )
+
     yolo_dir = gold_dir / "yolo"
     yolo_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -132,8 +148,16 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
         yolo_text = "".join(f"{line}\n" for line in to_yolo_lines(boxes, width, height))
         (yolo_dir / f"{ref.frame:06d}.txt").write_text(yolo_text, encoding="utf-8")
         rows.append([ref.image.name, ref.video, ref.frame, "true" if reviewed else "false", ";".join(tags)])
-    with (gold_dir / "gold_meta.csv").open("w", newline="", encoding="utf-8") as fh:
+    imported = {f"{ref.frame:06d}.txt" for ref, *_ in parsed}
+    for stale in yolo_dir.glob("*.txt"):
+        if stale.name != "classes.txt" and stale.name not in imported:
+            stale.unlink()
+    (yolo_dir / "classes.txt").write_text("".join(f"{c}\n" for c in LABEL_CLASSES), encoding="utf-8")
+    meta = gold_dir / "gold_meta.csv"
+    tmp = meta.with_name(meta.name + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["image", "video", "frame", "reviewed", "scene_tags"])
         writer.writerows(rows)
+    os.replace(tmp, meta)
     return len(rows)
