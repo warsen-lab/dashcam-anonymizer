@@ -108,6 +108,20 @@ def test_dataset_refuses_a_non_empty_out_dir(tmp_path, capsys):
     assert (out / "keep.txt").read_text() == "previous run"
 
 
+@pytest.mark.parametrize("flag, value", [("--width", "100"), ("--height", "1080"), ("--width", "0")])
+def test_dataset_command_wants_input_sizes_that_are_multiples_of_32(tmp_path, capsys, flag, value):
+    _segment(tmp_path, "a")
+    out = tmp_path / "ds"
+    code = main([
+        "dataset", "--stem", "a",
+        "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
+        "--out", str(out), flag, value,
+    ])
+    assert code == 2
+    assert "multiple of 32" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_export_without_weights_exits_2(tmp_path, capsys):
     assert main(["export", "--run", str(tmp_path / "run")]) == 2
     assert "best.pt" in capsys.readouterr().err

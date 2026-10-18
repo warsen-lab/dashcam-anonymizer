@@ -190,3 +190,12 @@ def test_build_dataset_4k_frame_at_half_scale_is_cut_and_shrunk_to_the_input_siz
     assert (rows["k_000000_c1.jpg"]["x0"], rows["k_000000_c1.jpg"]["y0"]) == ("1280", "0")
     assert rows["k_000000_c0.jpg"]["scale"] == rows["k_000000_c1.jpg"]["scale"] == "0.5"
     assert summary.boxes == 2  # one box in crop c0, one in the full frame
+
+
+@pytest.mark.parametrize("width, height", [(100, 1088), (1920, 1080), (0, 1088), (1920, -32)])
+def test_build_dataset_wants_positive_multiples_of_32_before_writing(tmp_path, width, height):
+    seg = _segment(tmp_path, "a", [(0, 0.0)], {})
+    out = tmp_path / "ds"
+    with pytest.raises(ValueError, match="multiple of 32"):
+        build_dataset([seg], out, width, height)
+    assert not out.exists()

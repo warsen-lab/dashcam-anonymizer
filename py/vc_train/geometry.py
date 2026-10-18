@@ -19,15 +19,21 @@ from vc_label.contracts import Box
 PAD_VALUE = 114
 
 
+def check_input_size(in_width: int, in_height: int) -> None:
+    """The model input must be a positive multiple of 32 in both dimensions (YOLOv8's largest stride)."""
+    if min(in_width, in_height) <= 0 or in_width % 32 or in_height % 32:
+        raise ValueError(f"input size {in_width}x{in_height} must be a positive multiple of 32 in both dimensions")
+
+
 def letterbox_scale(width: int, height: int, in_width: int, in_height: int) -> float:
+    if min(width, height, in_width, in_height) <= 0:
+        raise ValueError(f"letterbox needs positive sizes, got image {width}x{height} and input {in_width}x{in_height}")
     return min(in_width / width, in_height / height)
 
 
 def letterbox(bgr: np.ndarray, in_width: int, in_height: int) -> tuple[np.ndarray, float]:
     """BGR uint8 image -> ([1, 3, in_height, in_width] float32 RGB in [0, 1], r)."""
     height, width = bgr.shape[:2]
-    if min(width, height, in_width, in_height) <= 0:
-        raise ValueError(f"letterbox needs positive sizes, got image {width}x{height} and input {in_width}x{in_height}")
     r = letterbox_scale(width, height, in_width, in_height)
     # half up like std::lround (Python's round() is half-to-even and would send 360.5 to 360)
     new_w = min(in_width, math.floor(width * r + 0.5))

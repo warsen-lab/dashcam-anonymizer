@@ -14,7 +14,7 @@ import cv2
 from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, from_yolo_lines, read_frames_csv, to_yolo_lines
 from vc_label.pipeline import check_labels_match_frames, read_processed
 from vc_label.review import image_size
-from vc_train.geometry import letterbox_scale
+from vc_train.geometry import check_input_size, letterbox_scale
 
 Window = tuple[int, int, int, int]  # x0, y0, w, h in frame pixels
 MANIFEST = "manifest.csv"
@@ -217,6 +217,7 @@ def build_dataset(
     Every input is checked before anything is written. If writing fails, the output dir is removed
     (or emptied, when it existed empty), so the same --out can be used again after the fix.
     """
+    check_input_size(in_width, in_height)
     _check_out_dir(out_dir)
     frames = _plan(segments, val_tail_ms)
     created = not out_dir.exists()

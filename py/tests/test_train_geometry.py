@@ -1,13 +1,29 @@
 import numpy as np
 import pytest
 
-from vc_train.geometry import PAD_VALUE, decode_yolov8, letterbox, letterbox_scale
+from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox, letterbox_scale
 
 
 def test_letterbox_scale_fits_the_limiting_side():
     assert letterbox_scale(1920, 1080, 1920, 1088) == 1.0
     assert letterbox_scale(3840, 2160, 1920, 1088) == 0.5
     assert letterbox_scale(100, 50, 64, 64) == pytest.approx(0.64)
+
+
+@pytest.mark.parametrize("sizes", [(0, 100, 64, 64), (100, 0, 64, 64), (-5, 100, 64, 64), (100, 50, 0, 64), (100, 50, 64, -32)])
+def test_letterbox_scale_rejects_non_positive_sizes(sizes):
+    with pytest.raises(ValueError, match="positive"):
+        letterbox_scale(*sizes)
+
+
+@pytest.mark.parametrize("width, height", [(0, 64), (64, 0), (-32, 64), (100, 64), (64, 1090)])
+def test_check_input_size_wants_positive_multiples_of_32(width, height):
+    with pytest.raises(ValueError, match="positive multiple of 32"):
+        check_input_size(width, height)
+
+
+def test_check_input_size_accepts_the_default_input():
+    check_input_size(1920, 1088)
 
 
 def test_letterbox_places_image_top_left_in_rgb_and_pads_with_114():

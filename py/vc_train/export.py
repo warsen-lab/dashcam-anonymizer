@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 
 from vc_label.boxes import iou
-from vc_train.geometry import PAD_VALUE, decode_yolov8, letterbox
+from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox
 from vc_train.offline import load_yolo
 
 MODEL_ONNX = "model.onnx"
@@ -60,8 +60,7 @@ def export_onnx(
 
     out_dir only receives files once the exported graph has been read back and has the expected static float shape.
     """
-    if min(in_width, in_height) <= 0 or in_width % 32 or in_height % 32:
-        raise ValueError(f"input size {in_width}x{in_height} must be a positive multiple of 32 in both dimensions")
+    check_input_size(in_width, in_height)
     map50 = _checkpoint_map50(Path(weights))
     model = load_yolo(weights)
     exported = Path(
