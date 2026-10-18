@@ -176,6 +176,8 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),
+        "setup_s": stats.get("setup_s"),
+        "frames": stats.get("frames"),
         "detector": stats.get("detector", ""),
         "encoder": stats.get("encoder", ""),
     }

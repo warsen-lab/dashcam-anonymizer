@@ -7,8 +7,9 @@ from vc_eval.metrics import CLASS_PASS, HEATMAP_MIN_TARGETS
 
 DASH = "—"
 CLS_NAME = {"face": "人脸", "plate": "车牌"}
-STAGES = ("decode", "detect", "track", "mosaic", "encode")
-STAGE_NAME = {"decode": "解码", "detect": "检测（关键帧）", "track": "补框", "mosaic": "打码", "encode": "编码"}
+PARALLEL_STAGES = ("decode", "main", "encode")  # the three pipeline threads
+MAIN_STAGES = ("detect", "track", "mosaic")  # run one after another on the main thread
+STAGE_NAME = {"decode": "解码", "main": "主线程", "encode": "编码", "detect": "检测（关键帧）", "track": "补框", "mosaic": "打码"}
 INTEGRITY_CHECKS = ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync")
 
 
@@ -24,10 +25,6 @@ def _weakest(coverage: dict) -> str:
     if w is None:
         return f"n/a（无热力格达到 {HEATMAP_MIN_TARGETS} 个目标）"
     return f"{w['cls']} r{w['row']}c{w['col']} {w['value']:.1%}（n={w['total']}）"
-
-
-def _number(value, fmt: str) -> str:
-    return DASH if value is None else format(value, fmt)
 
 
 def _failed_details(integrity: dict) -> str:
@@ -231,36 +228,62 @@ def _integrity_lines(runs: list[dict]) -> list[str]:
     return lines + [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
 
 
+def _busy(stages: dict, stage: str) -> float | None:
+    """Busy seconds of a stage; stats.json without a main entry (older vc_redact) adds up the main thread's stages."""
+    if stage == "main" and "main" not in stages:
+        parts = [stages.get(s, {}).get("busy_s") for s in MAIN_STAGES]
+        return sum(parts) if all(p is not None for p in parts) else None
+    return stages.get(stage, {}).get("busy_s")
+
+
+def _share(busy: float | None, whole: float | None) -> str:
+    if busy is None:
+        return DASH
+    return f"{busy:.1f} s（{busy / whole:.0%}）" if whole else f"{busy:.1f} s（{DASH}）"
+
+
+def _speed_row(r: dict) -> tuple[str, dict[str, float | None]]:
+    elapsed = r.get("elapsed_s")
+    busy = {s: _busy(r["stages"], s) for s in (*PARALLEL_STAGES, *MAIN_STAGES)}
+    setup = r.get("setup_s")
+    frames = r.get("frames")
+    cells = [
+        DASH if setup is None else f"{setup:.1f} s",
+        *(_share(busy[s], elapsed) for s in PARALLEL_STAGES),
+        *(_share(busy[s], busy["main"]) for s in MAIN_STAGES),
+        DASH if elapsed is None else f"{elapsed:.1f} s",
+        f"{frames / elapsed:.0f} fps" if frames and elapsed else DASH,
+    ]
+    return f"| {r['stem']} | {r['fps']:g} | {' | '.join(cells)} |", busy
+
+
 def _speed_lines(summary: dict) -> list[str]:
     lines = [
         "",
         f"## 速度（本机，{_segment_text(summary['segments'])}）",
         "",
-        "各阶段一栏是忙碌秒数，括号里是它占该次运行各阶段忙碌秒数之和的比例。这些阶段在流水线里并行运行，所以忙碌秒数加起来会大于总耗时。"
-        "“检测（关键帧）”只统计做过检测的关键帧，不是每一帧。后端见开头的检测后端与编码器。",
+        "解码、主线程、编码是流水线里并行运行的三个线程，括号里是忙碌秒数占该次总耗时的比例，最接近 100% 的就是瓶颈。"
+        "检测、补框、打码在主线程里串行，括号里是占主线程忙碌时间的比例；“检测（关键帧）”只统计做过检测的关键帧，不是每一帧。"
+        "准备是第一帧进入流水线之前的时间（打开输入、加载模型和 CoreML 编译；编码器在编码线程收到第一帧时才打开，算在编码里），算在总耗时里；吞吐是帧数除以总耗时。"
+        "后端见开头的检测后端与编码器。",
         "",
-        "| 段 | fps | " + " | ".join(STAGE_NAME[s] for s in STAGES) + " | 总耗时 |",
-        "|---|---|" + "---|" * (len(STAGES) + 1),
+        "| 段 | fps | 准备 | " + " | ".join(STAGE_NAME[s] for s in (*PARALLEL_STAGES, *MAIN_STAGES)) + " | 总耗时 | 吞吐 |",
+        "|---|---|---|" + "---|" * (len(PARALLEL_STAGES) + len(MAIN_STAGES) + 2),
     ]
-    totals = dict.fromkeys(STAGES, 0.0)
+    totals = dict.fromkeys(PARALLEL_STAGES, 0.0)
+    elapsed_total = 0.0
     for r in summary["runs"]:
-        busy = {s: r["stages"].get(s, {}).get("busy_s") for s in STAGES}
-        whole = sum(v for v in busy.values() if v is not None)
-        cells = []
-        for s in STAGES:
-            if busy[s] is None:
-                cells.append(DASH)
-                continue
-            totals[s] += busy[s]
-            cells.append(f"{busy[s]:.1f} s（{busy[s] / whole:.0%}）" if whole > 0 else f"{busy[s]:.1f} s（{DASH}）")
-        lines.append(f"| {r['stem']} | {r['fps']:g} | {' | '.join(cells)} | {_number(r['elapsed_s'], '.1f')} s |")
-    everything = sum(totals.values())
-    if everything > 0:
-        slowest = max(STAGES, key=totals.get)
+        line, busy = _speed_row(r)
+        lines.append(line)
+        if r.get("elapsed_s") and all(busy[s] is not None for s in PARALLEL_STAGES):
+            elapsed_total += r["elapsed_s"]
+            for s in PARALLEL_STAGES:
+                totals[s] += busy[s]
+    if elapsed_total > 0:
+        slowest = max(PARALLEL_STAGES, key=totals.get)
         lines += [
             "",
-            f"估计最慢阶段：{STAGE_NAME[slowest]}（所有运行合计忙碌 {totals[slowest]:.1f} s，占各阶段忙碌时间的 {totals[slowest] / everything:.0%}）；"
-            "各阶段并行，这只是瓶颈的粗略估计。",
+            f"估计瓶颈：{STAGE_NAME[slowest]}（有完整计时的运行合计忙碌 {totals[slowest]:.1f} s，为这些运行合计总耗时的 {totals[slowest] / elapsed_total:.0%}）。",
         ]
     return lines
 

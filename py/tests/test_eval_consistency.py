@@ -62,6 +62,20 @@ def test_python_detections_decode_the_model(tmp_path):
     assert (plate.x1, plate.y1, plate.x2, plate.y2) == pytest.approx((64, 72, 96, 88))
 
 
+def test_python_reference_sessions_are_single_threaded(tmp_path, monkeypatch):
+    # onnxruntime's thread pools racing interpreter teardown showed up as an intermittent libc++ abort at exit
+    import vc_eval.consistency as consistency
+    from vc_train.ort_cpu import cpu_session
+
+    model = _const_model(tmp_path / "m")
+    opts = cpu_session(model / "model.onnx").get_session_options()
+    assert (opts.intra_op_num_threads, opts.inter_op_num_threads) == (1, 1)
+    used = []
+    monkeypatch.setattr(consistency, "cpu_session", lambda path: used.append(path) or cpu_session(path))
+    python_detections(model, read_frames_csv(_frames(tmp_path)))
+    assert used == [model / "model.onnx"]
+
+
 def test_compare_detections_matches_per_class():
     a = {0: [Box("face", 10, 10, 20, 20, score=0.9), Box("plate", 50, 50, 70, 60, score=0.2)]}
     b = {0: [Box("face", 10.4, 10, 20, 20.2, score=0.9)]}

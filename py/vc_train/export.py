@@ -14,6 +14,7 @@ from vc_label.boxes import iou
 from vc_label.contracts import Box
 from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox
 from vc_train.offline import load_yolo, ultralytics_offline_env
+from vc_train.ort_cpu import cpu_session
 
 MODEL_ONNX = "model.onnx"
 MODEL_JSON = "model.json"
@@ -43,9 +44,7 @@ def _check_onnx_io(onnx_path: Path, in_width: int, in_height: int, n_classes: in
     One static NCHW input, float32 inputs and outputs only, and one output of shape [1, 4 + n_classes, N] with a fixed N > 0
     (the layout decode_yolov8 and the C++ decoder read).
     """
-    import onnxruntime as ort
-
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    session = cpu_session(onnx_path)
     inputs, outputs = session.get_inputs(), session.get_outputs()
     shapes = [list(i.shape) for i in inputs]
     if shapes != [[1, 3, in_height, in_width]]:
@@ -155,12 +154,11 @@ def check_consistency(
 ) -> ConsistencyReport:
     """Runs the same preprocessed tensors through PyTorch (CPU) and onnxruntime and compares decoded boxes."""
     ultralytics_offline_env()
-    import onnxruntime as ort
     import torch
 
     net = load_yolo(weights).model.float().eval()
     classes = [net.names[i] for i in sorted(net.names)]
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    session = cpu_session(onnx_path)
     inp = session.get_inputs()[0]
     in_height, in_width = inp.shape[2], inp.shape[3]
     total = matched = confident = low = 0

@@ -15,6 +15,7 @@ from vc_label.boxes import iou
 from vc_label.contracts import Box, FrameRef
 from vc_eval.records import detections_by_frame
 from vc_train.geometry import decode_yolov8, letterbox
+from vc_train.ort_cpu import cpu_session
 
 CONFIDENT = 0.3
 MATCH_IOU = 0.5
@@ -45,10 +46,8 @@ class ConsistencyReport:
 
 
 def python_detections(model_dir: Path, refs: list[FrameRef], score: float = 0.15, iou_threshold: float = 0.5) -> dict[int, list[Box]]:
-    import onnxruntime as ort
-
     meta = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
-    session = ort.InferenceSession(str(model_dir / "model.onnx"), providers=["CPUExecutionProvider"])
+    session = cpu_session(model_dir / "model.onnx")
     name = session.get_inputs()[0].name
     width_in, height_in = meta["input"]["width"], meta["input"]["height"]
     out: dict[int, list[Box]] = {}

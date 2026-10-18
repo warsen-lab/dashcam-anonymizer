@@ -90,13 +90,14 @@ def _rows(path):
         return list(csv.DictReader(f))
 
 
-STAGES = ("decode", "detect", "track", "mosaic", "encode")
+STAGES = ("decode", "main", "detect", "track", "mosaic", "encode")
 
 
-def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,), busy=None):
+def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,), busy=None, stats_extra=None):
     """`masks` is a list of mask dicts for every frame, or a function (stem, frame) -> list of mask dicts.
 
-    `busy` maps a stage to its busy seconds in stats.json (0.1 for the stages it does not name)."""
+    `busy` maps a stage to its busy seconds in stats.json (0.1 for the stages it does not name, None leaves the stage out);
+    `stats_extra` adds top-level fields to stats.json."""
     masks_of = masks if callable(masks) else (lambda stem, frame: list(masks))
 
     def run(cmd, check, capture_output, text):
@@ -119,7 +120,8 @@ def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,), busy=None):
         (d / "stats.json").write_text(json.dumps({
             "frames": N, "detect_every_frame": "--detect-every-frame" in cmd,
             "detector": "student/CPU", "encoder": "libx264", "elapsed_s": 1.5,
-            "stages": {s: {"busy_s": (busy or {}).get(s, 0.1), "items": N, "fps": 300.0} for s in STAGES},
+            "stages": {s: {"busy_s": b, "items": N, "fps": 300.0} for s in STAGES if (b := (busy or {}).get(s, 0.1)) is not None},
+            **(stats_extra or {}),
         }))
     return run
 
@@ -618,21 +620,73 @@ def test_summary_md_details_the_smallest_rate_when_none_passes(tmp_path, monkeyp
     assert md.split("## 细分")[1].splitlines()[0].startswith("（最小的 5 fps，没有频率通过 P1–P3")
 
 
-def test_speed_table_shows_busy_seconds_and_share_per_stage_and_estimates_the_slowest(tmp_path, monkeypatch):
+SPEED_HEADER = "| 段 | fps | 准备 | 解码 | 主线程 | 编码 | 检测（关键帧） | 补框 | 打码 | 总耗时 | 吞吐 |"
+
+
+def _speed(tmp_path) -> str:
+    return (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 速度")[1].split("\n## ")[0]
+
+
+def test_speed_table_measures_the_parallel_stages_against_elapsed_time_and_splits_the_main_thread(tmp_path, monkeypatch):
     _setup(tmp_path)
     _python_dets(monkeypatch)
-    run_all(_cfg(tmp_path), runner=_fake_runner([], busy={"mosaic": 0.6}))
+    busy = {"main": 1.2, "detect": 0.9, "track": 0.1, "mosaic": 0.2}
+    run_all(_cfg(tmp_path), runner=_fake_runner([], busy=busy, stats_extra={"setup_s": 0.3}))
     md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
-    speed = md.split("## 速度")[1].split("\n## ")[0]
+    speed = _speed(tmp_path)
     assert md.count("## 速度（本机，160×120，源视频 h264）") == 1
-    assert "| 段 | fps | 解码 | 检测（关键帧） | 补框 | 打码 | 编码 | 总耗时 |" in speed
-    row = _row(speed, "| seg | 5 |")
-    assert row.split("|")[3:8] == [" 0.1 s（10%） ", " 0.1 s（10%） ", " 0.1 s（10%） ", " 0.6 s（60%） ", " 0.1 s（10%） "]
-    assert row.rstrip().endswith("| 1.5 s |")
-    slowest = next(line for line in speed.splitlines() if "估计最慢阶段" in line)
-    assert "打码" in slowest and "1.2 s" in slowest and "60%" in slowest  # both detection rates together
-    assert "关键帧" in speed.split("| 段 | fps | 解码")[0]  # the note above the table says what the detect column counts
-    assert "并行" in speed
+    assert SPEED_HEADER in speed
+    cells = _row(speed, "| seg | 5 |").split("|")[3:-1]
+    # decode / main / encode run in parallel: share of the run's elapsed 1.5 s; detect / track / mosaic: share of the main thread
+    assert cells == [
+        " 0.3 s ", " 0.1 s（7%） ", " 1.2 s（80%） ", " 0.1 s（7%） ",
+        " 0.9 s（75%） ", " 0.1 s（8%） ", " 0.2 s（17%） ", " 1.5 s ", " 20 fps ",
+    ]
+    slowest = next(line for line in speed.splitlines() if "估计瓶颈" in line)
+    assert "主线程" in slowest and "2.4 s" in slowest and "80%" in slowest  # both detection rates together
+    note = speed.split(SPEED_HEADER)[0]
+    assert "并行" in note and "串行" in note and "关键帧" in note and "准备" in note
+
+
+def test_speed_table_adds_up_the_main_thread_for_stats_without_it(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([], busy={"main": None, "detect": 0.6}))
+    cells = _row(_speed(tmp_path), "| seg | 5 |").split("|")[3:-1]
+    assert cells[:4] == [" — ", " 0.1 s（7%） ", " 0.8 s（53%） ", " 0.1 s（7%） "]  # main = 0.6 + 0.1 + 0.1, no setup_s
+    assert cells[4] == " 0.6 s（75%） "
+
+
+def test_speed_bottleneck_pools_busy_over_elapsed_across_old_and_new_stats(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    # 5 fps: new stats, main 1.2 of 1.5 s; 10 fps: old stats without main (0.3 + 0.1 + 0.1), encode 2.4 of 3.0 s
+    per_rate = {
+        5: ({"main": 1.2}, {"setup_s": 0.3}),
+        10: ({"main": None, "detect": 0.3, "encode": 2.4}, {"elapsed_s": 3.0}),
+    }
+    fake = {fps: _fake_runner([], busy=b, stats_extra=x) for fps, (b, x) in per_rate.items()}
+
+    def runner(cmd, check, capture_output, text):
+        fps = int(cmd[cmd.index("--detect-fps") + 1]) if "--detect-fps" in cmd else 5
+        fake[fps](cmd, check, capture_output, text)
+
+    run_all(_cfg(tmp_path), runner=runner)
+    speed = _speed(tmp_path)
+    assert _row(speed, "| seg | 10 |").split("|")[3:7] == [" — ", " 0.1 s（3%） ", " 0.5 s（17%） ", " 2.4 s（80%） "]
+    slowest = next(line for line in speed.splitlines() if "估计瓶颈" in line)
+    # pooled: encode 2.5 s of 4.5 s (56%) beats main 1.7 s (38%); the mean of the per-run shares would pick main (48% vs 43%)
+    assert "编码" in slowest and "2.5 s" in slowest and "56%" in slowest
+
+
+def test_speed_table_dashes_the_main_thread_of_old_stats_missing_a_stage(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([], busy={"main": None, "track": None}, stats_extra={"elapsed_s": None}))
+    speed = _speed(tmp_path)
+    cells = _row(speed, "| seg | 5 |").split("|")[3:-1]
+    assert cells[2] == " — " and cells[5] == " — " and cells[-2:] == [" — ", " — "]
+    assert "估计瓶颈" not in speed  # no run it can measure
 
 
 def test_speed_table_survives_a_run_without_stage_timings(tmp_path, monkeypatch):
@@ -647,9 +701,9 @@ def test_speed_table_survives_a_run_without_stage_timings(tmp_path, monkeypatch)
             stats.write_text(json.dumps({**json.loads(stats.read_text()), "stages": {}}))
 
     run_all(_cfg(tmp_path), runner=no_stages)
-    speed = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 速度")[1].split("\n## ")[0]
-    assert _row(speed, "| seg | 5 |").split("|")[3:8] == [" — "] * 5
-    assert "估计最慢阶段" not in speed
+    speed = _speed(tmp_path)
+    assert _row(speed, "| seg | 5 |").split("|")[3:-1] == [" — "] * 7 + [" 1.5 s ", " 20 fps "]
+    assert "估计瓶颈" not in speed
 
 
 def test_consistency_runs_before_the_sweeps(tmp_path, monkeypatch):
@@ -970,10 +1024,13 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert cfg.stems == ["a", "b"] and cfg.fps_values == [5.0, 10.0, 15.0] and cfg.out == out
     assert cfg.overwrite is False
     assert cfg.vc_redact == Path("build/cpp-release/vc_redact") and cfg.config == Path("configs/redact.json")
+    assert cfg.redacted_root == Path("data/redacted")
     printed = capsys.readouterr().out
     assert "10 fps" in printed and str(out / "index.html") in printed
 
     assert main([*argv, "--overwrite"]) == 0 and seen[-1].overwrite is True
+    # a second config gets its own videos, or its run would overwrite the ones the first report links to
+    assert main([*argv, "--redacted-root", str(tmp_path / "tuned")]) == 0 and seen[-1].redacted_root == tmp_path / "tuned"
     capsys.readouterr()
 
     outcome["chosen_fps"] = None
