@@ -7,7 +7,8 @@
 namespace vc {
 namespace {
 
-// A box missed at this many keyframes in a row is dropped; fewer and it lives on as a ghost track.
+// A box may be missed at this many keyframes in a row and still be matched later (it lives on as a
+// ghost track); one more miss drops it.
 constexpr int kMaxMissedKeyframes = 1;
 
 struct Point {
@@ -45,12 +46,14 @@ void growTo(double& lo, double& hi, double minimum) {
 }
 
 // Position of each frame between two keyframes in [0, 1): by PTS when they increase strictly
-// inside the interval, otherwise by decode index.
+// inside the interval, otherwise by decode index. Every test is written so that a NaN fails it.
 std::vector<double> fractions(const std::vector<FrameTime>& frames, const FrameTime& from, const FrameTime& to) {
   bool usePts = to.ptsMs > from.ptsMs;
   for (size_t k = 0; usePts && k < frames.size(); ++k) {
     const double pts = frames[k].ptsMs;
-    if (pts < from.ptsMs || pts >= to.ptsMs || (k > 0 && pts <= frames[k - 1].ptsMs)) usePts = false;
+    const bool inRange = pts >= from.ptsMs && pts < to.ptsMs;
+    const bool increasing = k == 0 || pts > frames[k - 1].ptsMs;
+    if (!(inRange && increasing)) usePts = false;
   }
   std::vector<double> t;
   t.reserve(frames.size());
@@ -66,6 +69,17 @@ void requireIncreasing(const std::vector<FrameTime>& frames) {
   for (size_t k = 1; k < frames.size(); ++k) {
     if (frames[k].index <= frames[k - 1].index) {
       throw std::invalid_argument("BoxTimeline: frame indices must be strictly increasing");
+    }
+  }
+}
+
+// A broken box or timestamp must stop the run: comparisons with NaN are false, so it would otherwise
+// slip through matching and clamping into a mask that covers nothing.
+void requireFinite(const Keyframe& key) {
+  if (!std::isfinite(key.time.ptsMs)) throw std::invalid_argument("BoxTimeline: keyframe timestamp is not finite");
+  for (const Box& b : key.boxes) {
+    if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) {
+      throw std::invalid_argument("BoxTimeline: keyframe box has non-finite coordinates");
     }
   }
 }
@@ -149,17 +163,18 @@ void BoxTimeline::add(std::vector<MaskBox>& out, const Box& box, double motionX,
   x2 = std::clamp(x2, 0.0, static_cast<double>(width_));
   y1 = std::clamp(y1, 0.0, static_cast<double>(height_));
   y2 = std::clamp(y2, 0.0, static_cast<double>(height_));
-  if (x2 <= x1 || y2 <= y1) return;
+  if (!(x2 > x1) || !(y2 > y1)) return;
   out.push_back(MaskBox{box.cls, static_cast<float>(x1), static_cast<float>(y1), static_cast<float>(x2),
                         static_cast<float>(y2), origin});
 }
 
 std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTime>& frames,
                                                        const Keyframe& next) {
+  requireFinite(next);
   if (!keyTime_) {
     if (!frames.empty()) throw std::invalid_argument("BoxTimeline: frames before the first keyframe");
     std::vector<Track> tracks;
-    for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0});
+    for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0, box, 0.0});
     keyTime_ = next.time;
     tracks_ = std::move(tracks);
     return {};
@@ -195,6 +210,9 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
         const Point b = centerOf(to);
         add(masks[k], lerp(track.box, to, t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
             atKey ? keyOrigin : MaskOrigin::Interpolated);
+        // A ghost's position was a guess: hold the box it was matched with over the whole interval too,
+        // so a target that stopped after the missed keyframe is covered where it really is.
+        if (track.missed > 0) add(masks[k], to, 0.0, 0.0, MaskOrigin::Extended);
       } else {
         const Velocity v = track.velocity.value_or(Velocity{});
         add(masks[k], shifted(track.box, v.x * since, v.y * since), std::abs(v.x) * steps,
@@ -206,19 +224,23 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
     }
   }
   // Detections first (matched ones carry their velocity), then the ghosts of tracks that were missed.
+  // The velocity runs from the target's last real detection, not from a ghost's guessed position.
   std::vector<Track> tracks;
   tracks.reserve(next.boxes.size());
-  for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0});
+  for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0, box, 0.0});
   for (const auto& [i, j] : pairs) {
-    const Point a = centerOf(tracks_[i].box);
+    const Track& track = tracks_[i];
+    const Point a = centerOf(track.anchor);
     const Point b = centerOf(next.boxes[j]);
-    tracks[j].velocity = Velocity{(b.x - a.x) / steps, (b.y - a.y) / steps};
+    const double span = track.anchorSteps + steps;
+    tracks[j].velocity = Velocity{(b.x - a.x) / span, (b.y - a.y) / span};
   }
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Track& track = tracks_[i];
     if (matched[i] || track.missed >= kMaxMissedKeyframes) continue;
     const Velocity v = track.velocity.value_or(Velocity{});
-    tracks.push_back({shifted(track.box, v.x * steps, v.y * steps), track.velocity, track.missed + 1});
+    tracks.push_back({shifted(track.box, v.x * steps, v.y * steps), track.velocity, track.missed + 1, track.anchor,
+                      track.anchorSteps + steps});
   }
   keyTime_ = next.time;
   tracks_ = std::move(tracks);
