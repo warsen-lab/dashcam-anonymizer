@@ -15,6 +15,7 @@ import pytest
 
 from vc_label.contracts import Box, Detection, write_jsonl
 from vc_eval.cli import main
+from vc_eval import integrity
 from vc_eval.integrity import FFMPEG
 from vc_eval.run import RunConfig, run_all
 
@@ -407,6 +408,49 @@ def test_uncertain_tiles_are_capped_at_sixty_and_spread_over_the_segment(tmp_pat
     frames = [int(n) for n in re.findall(r"帧 (\d+) ", uncertain)]
     assert min(frames) == 0 and max(frames) >= 28  # spread over the whole segment, not the first 20 frames
     assert len(list((tmp_path / "report" / "img" / STEM).glob("uncertain_*.jpg"))) == 60
+
+
+def test_each_video_is_probed_once_per_run_and_the_spot_check_reuses_the_frame_count(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    real = subprocess.run
+    probed = []
+
+    def spy(cmd, *args, **kwargs):
+        if cmd[0] == integrity.FFPROBE:  # `-count_frames` decodes the whole file
+            probed.append(cmd[-1])
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(integrity.subprocess, "run", spy)
+    summary = run_all(_cfg(tmp_path, fps_values=[5, 10, 15]), runner=_fake_runner([]))
+    assert len(probed) == len(set(probed)) == 4  # the source, and the redacted video of each of the 3 rates
+    assert [r["integrity"]["redacted_frames"] for r in summary["runs"]] == [N, N, N]
+
+
+def test_the_full_resolution_redacted_frames_are_deleted_once_the_tiles_are_written(tmp_path, monkeypatch):
+    _setup(tmp_path, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([], dense=(FACE, Box("face", 100, 10, 130, 50, src="student"))))
+    img = tmp_path / "report" / "img" / STEM
+    assert not (img / "redacted").exists()
+    assert list(img.glob("random_*.jpg")) and list(img.glob("uncertain_*.jpg")) and list(img.glob("temporal_*.jpg"))
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    assert all((tmp_path / "report" / src).is_file() for src in re.findall(r'<img src="([^"]+)"', page))
+
+
+def test_the_extracted_frames_are_deleted_even_when_a_tile_fails(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    import vc_eval.run as run_module
+
+    def broken(*args, **kwargs):
+        raise ValueError("cannot write tile")
+
+    monkeypatch.setattr(run_module, "thumbnail", broken)
+    with pytest.raises(ValueError, match="cannot write tile"):
+        run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert not (tmp_path / "report" / "img" / STEM / "redacted").exists()
+    assert (tmp_path / "report" / "summary.md").is_file()  # the numbers were written first
 
 
 def test_consistency_runs_before_the_sweeps(tmp_path, monkeypatch):

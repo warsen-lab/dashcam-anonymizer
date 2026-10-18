@@ -223,3 +223,55 @@ def test_an_unknown_resolution_fails_the_resolution_check(tmp_path, monkeypatch)
     _drop_from_probe(monkeypatch, out, no_width)
     r = check_integrity(src, out)
     assert r.checks["resolution"] is False and "unknown" in r.details["resolution"]
+
+
+def _count_ffprobe_runs(monkeypatch):
+    """A dict path -> number of ffprobe runs made from now on."""
+    real = subprocess.run
+    counts = {}
+
+    def run(cmd, *args, **kwargs):
+        if cmd[0] == integrity.FFPROBE:
+            counts[cmd[-1]] = counts.get(cmd[-1], 0) + 1
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(integrity.subprocess, "run", run)
+    return counts
+
+
+def test_probe_decodes_a_file_once_per_cache_block_and_every_time_outside_one(tmp_path, monkeypatch):
+    v = _video(tmp_path / "a.mp4")
+    counts = _count_ffprobe_runs(monkeypatch)
+    probe(v), probe(v)
+    assert counts[str(v)] == 2  # no cache outside a block
+    with integrity.probe_cache():
+        first = probe(v)
+        assert probe(v) is first and counts[str(v)] == 3
+        check_integrity(v, v)
+        assert counts[str(v)] == 3  # both files of check_integrity came from the cache
+    probe(v)
+    assert counts[str(v)] == 4
+
+
+def test_a_file_that_changes_inside_a_cache_block_is_probed_again(tmp_path):
+    v = tmp_path / "a.mp4"
+    _video(v, seconds=1)
+    with integrity.probe_cache():
+        assert probe(v).video.frames == 30
+        _video(v, seconds=2)  # replaced by a longer clip: the size and mtime differ
+        assert probe(v).video.frames == 60
+
+
+def test_a_failed_probe_is_not_cached(tmp_path):
+    v = tmp_path / "a.mp4"
+    with integrity.probe_cache():
+        with pytest.raises(ValueError):
+            probe(v)
+        _video(v)
+        assert probe(v).video.frames == 30
+
+
+def test_the_report_carries_the_frame_count_of_the_redacted_video(tmp_path):
+    v = _video(tmp_path / "a.mp4")
+    assert check_integrity(v, v).redacted_frames == 30
+    assert check_integrity(v, tmp_path / "nope.mp4").redacted_frames is None

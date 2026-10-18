@@ -16,7 +16,7 @@ from vc_label.contracts import LABEL_CLASSES, read_frames_csv
 from vc_label.review import ensure_outside
 from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
 from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
-from vc_eval.integrity import check_integrity, probe
+from vc_eval.integrity import check_integrity, probe, probe_cache
 from vc_eval.metrics import HEATMAP_MIN_TARGETS, Rate
 from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
 from vc_eval.temporal import TemporalReport, evaluate_temporal
@@ -167,7 +167,10 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "fps": fps,
         "coverage": coverage_json(coverage),
         "temporal": {cls: rate_json(temporal.classes[cls]) for cls in LABEL_CLASSES},
-        "integrity": {"checks": integrity.checks, "details": integrity.details, "passed": integrity.passed},
+        "integrity": {
+            "checks": integrity.checks, "details": integrity.details, "passed": integrity.passed,
+            "redacted_frames": integrity.redacted_frames,
+        },
         "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),
@@ -215,7 +218,10 @@ def _href(path: str | Path) -> str:
     return quote(Path(path).as_posix())
 
 
-def _spot_sections(cfg: RunConfig, fps: float, reports: dict[str, tuple[CoverageReport, TemporalReport]]) -> list[Section]:
+def _spot_sections(
+    cfg: RunConfig, fps: float, reports: dict[str, tuple[CoverageReport, TemporalReport]], frame_counts: dict[str, int | None]
+) -> list[Section]:
+    """`frame_counts` holds the decoded frame count of each stem's redacted video, which integrity already counted."""
     img = cfg.out / "img"
     rng = random.Random(cfg.seed)
     misses, uncertain, temporal, random_items, links = [], [], [], [], []
@@ -225,28 +231,33 @@ def _spot_sections(cfg: RunConfig, fps: float, reports: dict[str, tuple[Coverage
         chosen_misses = _spread(coverage.misses, MAX_MISS_TILES)
         chosen_uncertain = _spread(coverage.uncertain_misses, MAX_UNCERTAIN_TILES)
         chosen_temporal = _spread(tempo.misses, MAX_TEMPORAL_TILES)
-        frames = probe(video).video.frames or 0
+        frames = frame_counts[stem] or 0
         pick = sorted(rng.sample(range(frames), min(cfg.spot_frames, frames)))
         wanted = [m.frame for m in chosen_misses] + [m.frame for m in chosen_uncertain] + [m.frame for m in chosen_temporal] + pick
-        decoded = extract_frames(video, wanted, img / stem / "redacted")
-        for n, m in enumerate(chosen_misses):
-            original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
-            box = m.box.clipped(coverage.width, coverage.height)  # miss_tile needs a box at least partly inside the image
-            tile = miss_tile(original, decoded[m.frame], box, img / stem / f"miss_{m.frame:06d}_{n}.jpg")
-            misses.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}（左原帧，右打码）"))
-        for n, m in enumerate(chosen_uncertain):
-            original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
-            box = m.box.clipped(coverage.width, coverage.height)
-            tile = miss_tile(original, decoded[m.frame], box, img / stem / f"uncertain_{m.frame:06d}_{n}.jpg")
-            caption = f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}，老师分数 {m.box.score:.2f}（左原帧，右打码）"
-            uncertain.append(Item(_href(tile.relative_to(cfg.out)), caption))
-        for n, m in enumerate(chosen_temporal):
-            box = m.box.clipped(coverage.width, coverage.height)
-            tile = miss_tile(decoded[m.frame], None, box, img / stem / f"temporal_{m.frame:06d}_{n}.jpg")
-            temporal.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}"))
-        for frame in pick:
-            thumb = thumbnail(decoded[frame], img / stem / f"random_{frame:06d}.jpg")
-            random_items.append(Item(_href(thumb.relative_to(cfg.out)), f"{stem} 帧 {frame}"))
+        scratch = img / stem / "redacted"  # full-resolution frames: needed only to cut the tiles, then deleted
+        try:
+            decoded = extract_frames(video, wanted, scratch)
+            for n, m in enumerate(chosen_misses):
+                original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
+                box = m.box.clipped(coverage.width, coverage.height)  # miss_tile needs a box at least partly inside the image
+                tile = miss_tile(original, decoded[m.frame], box, img / stem / f"miss_{m.frame:06d}_{n}.jpg")
+                misses.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}（左原帧，右打码）"))
+            for n, m in enumerate(chosen_uncertain):
+                original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
+                box = m.box.clipped(coverage.width, coverage.height)
+                tile = miss_tile(original, decoded[m.frame], box, img / stem / f"uncertain_{m.frame:06d}_{n}.jpg")
+                caption = f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}，老师分数 {m.box.score:.2f}（左原帧，右打码）"
+                uncertain.append(Item(_href(tile.relative_to(cfg.out)), caption))
+            for n, m in enumerate(chosen_temporal):
+                box = m.box.clipped(coverage.width, coverage.height)
+                tile = miss_tile(decoded[m.frame], None, box, img / stem / f"temporal_{m.frame:06d}_{n}.jpg")
+                temporal.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}"))
+            for frame in pick:
+                thumb = thumbnail(decoded[frame], img / stem / f"random_{frame:06d}.jpg")
+                random_items.append(Item(_href(thumb.relative_to(cfg.out)), f"{stem} 帧 {frame}"))
+        finally:
+            if scratch.exists():
+                shutil.rmtree(scratch)
     return [
         Section("打码视频", "请完整看一遍，留意是否有露出的人脸或车牌。", [], links),
         Section("未遮住的参照目标", "老师标注里必须遮住、但打码框覆盖不足 80% 的高置信目标（P1 / P2 按这一层判定）。", misses),
@@ -386,6 +397,11 @@ def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
         _clear(cfg.out)  # only after every input has been checked: a bad input must not cost the previous report
     cfg.out.mkdir(parents=True, exist_ok=True)
     consistency = _consistency(cfg, runner)  # a missing vc_detect or a bad model fails here, not after minutes of sweeps
+    with probe_cache():  # `ffprobe -count_frames` decodes a whole file: once per file is enough
+        return _sweep_and_report(cfg, runner, consistency)
+
+
+def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
     runs: list[dict] = []
     segments: list[dict] = []
     reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]] = {}
@@ -407,7 +423,8 @@ def run_all(cfg: RunConfig, runner=subprocess.run) -> dict:
     (cfg.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (cfg.out / "summary.md").write_text(_summary_md(summary), encoding="utf-8")
     spot_fps = chosen if chosen is not None else min(cfg.fps_values)
-    sections = _spot_sections(cfg, spot_fps, {stem: reports[(stem, spot_fps)] for stem in cfg.stems})
+    frame_counts = {r["stem"]: r["integrity"]["redacted_frames"] for r in runs if r["fps"] == spot_fps}
+    sections = _spot_sections(cfg, spot_fps, {stem: reports[(stem, spot_fps)] for stem in cfg.stems}, frame_counts)
     write_spotcheck(
         cfg.out,
         "打码抽查",

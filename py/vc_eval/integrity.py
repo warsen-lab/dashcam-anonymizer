@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,12 +60,48 @@ def _stream(s: dict) -> StreamInfo:
     )
 
 
+_probe_cache: dict[tuple, MediaInfo] | None = None
+
+
+@contextmanager
+def probe_cache():
+    """Inside the block probe() remembers its answer per file, so a file is decoded for counting once per run.
+
+    A file is the same file only while its path, size and modification time are; a rewritten file is probed again.
+    """
+    global _probe_cache
+    outer = _probe_cache
+    _probe_cache = {}
+    try:
+        yield
+    finally:
+        _probe_cache = outer
+
+
+def _cache_key(path: Path) -> tuple | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None  # let ffprobe report the file as unreadable
+    return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+
+
 def probe(path: Path) -> MediaInfo:
     """Streams of a media file; decodes them to count frames (ffprobe -count_frames).
 
     A non-zero exit raises ValueError. Decode errors on an otherwise readable file come with exit 0, so the
-    stderr lines are kept in `MediaInfo.errors`.
+    stderr lines are kept in `MediaInfo.errors`. See probe_cache.
     """
+    key = None if _probe_cache is None else _cache_key(path)
+    if key is not None and key in _probe_cache:
+        return _probe_cache[key]
+    info = _probe(path)
+    if key is not None:
+        _probe_cache[key] = info
+    return info
+
+
+def _probe(path: Path) -> MediaInfo:
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True, text=True, check=False,
@@ -89,6 +127,7 @@ def probe(path: Path) -> MediaInfo:
 class IntegrityReport:
     checks: dict[str, bool] = field(default_factory=dict)
     details: dict[str, str] = field(default_factory=dict)
+    redacted_frames: int | None = None  # frames decoded from the redacted video; None when it could not be probed or reports none
 
     @property
     def passed(self) -> bool:
@@ -122,7 +161,7 @@ def check_integrity(source: Path, redacted: Path) -> IntegrityReport:
     except ValueError as exc:
         return _unreadable(str(exc))
     frame = 1.0 / s.fps if s.fps > 0 else 1.0 / 30
-    report = IntegrityReport()
+    report = IntegrityReport(redacted_frames=r.video.frames)
     report.checks["decodable"] = bool(r.video.frames) and len(r.errors) <= len(s.errors)
     report.details["decodable"] = (
         f"{r.video.frames} frames decoded; decode errors: source {len(s.errors)}, redacted {len(r.errors)}"
