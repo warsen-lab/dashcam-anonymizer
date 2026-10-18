@@ -17,6 +17,8 @@ SCENE_FLAGS = ("day", "night", "rain", "tunnel", "city", "highway")
 REVIEWED_FLAG = "reviewed"
 LABELME_VERSION = "5.4.1"
 SOURCE_KEY = "vc_source"
+# Where the safe way to fix a review dir without vc_source is written down (export-review --force is directory-wide).
+RECOVERY_HINT = 'see docs/labeling-guide.md, section "没有 vc_source 的旧复核目录"'
 
 
 def ensure_outside(frames_dir: Path, path: Path) -> None:
@@ -132,12 +134,12 @@ MAX_LISTED_FRAMES = 20
 def check_source(path: Path, doc: dict, ref: FrameRef) -> None:
     """The JSON must carry the `vc_source` that export-review wrote, naming this frame of this video."""
     if SOURCE_KEY not in doc:
-        raise ValueError(f"{path}: no {SOURCE_KEY}; re-export it with vc_label export-review")
+        raise ValueError(f"{path}: no {SOURCE_KEY}; re-export it with vc_label export-review; {RECOVERY_HINT}")
     source = doc[SOURCE_KEY]
     if not isinstance(source, dict):
         raise ValueError(
             f"{path}: {SOURCE_KEY} must be an object with video and frame, got {source!r}; "
-            f"re-export it with vc_label export-review"
+            f"re-export it with vc_label export-review; {RECOVERY_HINT}"
         )
     video, frame = source.get("video"), source.get("frame")
     if video != ref.video or type(frame) is not int or frame != ref.frame:  # type(): True == 1 is not frame 1

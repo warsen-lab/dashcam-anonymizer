@@ -604,3 +604,14 @@ def test_count_without_source_counts_parsable_json_files_that_lack_the_key(tmp_p
 
     assert count_without_source(review) == (2, 5)
     assert count_without_source(tmp_path / "nowhere") == (0, 0)
+
+
+@pytest.mark.parametrize("source", [None, "trip.mp4#7"], ids=["missing", "not-an-object"])
+def test_import_review_points_a_file_without_a_usable_vc_source_at_the_recovery_recipe(tmp_path, source):
+    frames, review = _frames_dir(tmp_path), tmp_path / "review"
+    _write_saved(review, _xanylabeling_save(source=source))
+
+    with pytest.raises(ValueError) as excinfo:
+        import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+    assert str(excinfo.value).endswith('; see docs/labeling-guide.md, section "没有 vc_source 的旧复核目录"')

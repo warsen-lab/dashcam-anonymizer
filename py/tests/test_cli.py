@@ -150,7 +150,7 @@ def test_export_review_warns_about_kept_files_without_vc_source(tmp_path, capsys
     assert "0 new LabelMe files, 1 kept" in captured.out
     [warning] = captured.err.splitlines()
     assert "1 of 1" in warning and "vc_source" in warning and str(review) in warning
-    assert "docs/labeling-guide.md" in warning
+    assert 'see docs/labeling-guide.md, section "没有 vc_source 的旧复核目录"' in warning
 
     assert main([*argv, "--force"]) == 0  # --force regenerates it with vc_source
     assert capsys.readouterr().err == ""
