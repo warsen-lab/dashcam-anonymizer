@@ -1,5 +1,6 @@
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -225,3 +226,40 @@ def test_a_bad_line_before_the_last_names_the_file_and_line(tmp_path):
         run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
     with pytest.raises(ValueError, match=r"raw\.jsonl:2"):
         run_fuse(frames, labels, CFG)
+
+
+TEACH_PIN = {"retinaface_score": 0.3, "yunet_score": 0.5, "coco_score": 0.3, "owlv2_score": 0.1, "plate_search_min_vehicle_frac": 0.03}
+
+
+def test_run_teach_pins_the_teacher_thresholds_on_first_use(tmp_path):
+    frames, labels = make_frames(tmp_path, 3), tmp_path / "labels"
+
+    run_teach(frames, labels, teachers(), CFG, limit=1, log=lambda _: None)
+
+    assert json.loads((labels / "teach_config.json").read_text(encoding="utf-8")) == TEACH_PIN
+    # Same teacher thresholds resume fine, and fuse-time settings may change between batches.
+    assert run_teach(frames, labels, teachers(), replace(CFG, fuse_iou=0.6, temporal_max_gap_ms=900.0), limit=1, log=lambda _: None) == 1
+    assert json.loads((labels / "teach_config.json").read_text(encoding="utf-8")) == TEACH_PIN
+
+
+@pytest.mark.parametrize("change", [{"yunet_score": 0.4}, {"owlv2_score": 0.2}, {"plate_search_min_vehicle_frac": 0.05}])
+def test_run_teach_rejects_changed_teacher_thresholds_and_leaves_the_labels_dir_alone(tmp_path, change):
+    frames, labels = make_frames(tmp_path, 3), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, limit=1, log=lambda _: None)
+    before = {p.name: p.read_bytes() for p in labels.iterdir()}
+    (name, new), = change.items()
+
+    with pytest.raises(ValueError, match=rf"{name} {TEACH_PIN[name]} -> {new}.*one set of teacher thresholds.*new labels dir"):
+        run_teach(frames, labels, teachers(), replace(CFG, **change), log=lambda _: None)
+
+    assert {p.name: p.read_bytes() for p in labels.iterdir()} == before
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]"])
+def test_run_teach_rejects_a_corrupt_teacher_pin(tmp_path, content):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    labels.mkdir()
+    (labels / "teach_config.json").write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="teach_config.json"):
+        run_teach(frames, labels, teachers(), CFG, log=lambda _: None)

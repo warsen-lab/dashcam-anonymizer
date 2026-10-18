@@ -26,6 +26,7 @@ AUX = "aux.jsonl"
 PROCESSED = "processed.txt"
 MERGED = "merged.jsonl"
 FLAGS = "flags.csv"
+TEACH_CONFIG = "teach_config.json"
 
 
 class FrameDetector(Protocol):
@@ -125,6 +126,37 @@ def _drop_unfinished(labels_dir: Path, done: set[int]) -> None:
         os.replace(tmp, path)
 
 
+def pin_teach_settings(labels_dir: Path, cfg: LabelingConfig) -> None:
+    """Records the teacher thresholds on first use; refuses a later run with different ones.
+
+    Raw teacher output depends on these thresholds, and a resumed run only labels the frames still
+    missing, so mixing two sets in one labels dir would leave frames that are not comparable.
+    """
+    path = labels_dir / TEACH_CONFIG
+    settings = cfg.teach_settings()
+    if not path.exists():
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return
+    try:
+        pinned = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path}: not valid JSON ({e})") from e
+    if not isinstance(pinned, dict):
+        raise ValueError(f"{path}: expected a JSON object of teacher thresholds, got {type(pinned).__name__}")
+    if pinned == settings:
+        return
+    changes = ", ".join(
+        f"{name} {pinned.get(name)} -> {settings[name]}" for name in settings if pinned.get(name) != settings[name]
+    )
+    raise ValueError(
+        f"{path} pins the teacher thresholds this labels dir was taught with ({changes}). "
+        f"A labels dir must be taught with one set of teacher thresholds: restore the config, "
+        f"or use a new labels dir (fuse-time settings may change freely)"
+    )
+
+
 def run_teach(
     frames_dir: Path,
     labels_dir: Path,
@@ -138,6 +170,7 @@ def run_teach(
     refs = read_frames_csv(frames_dir)
     labels_dir.mkdir(parents=True, exist_ok=True)
     check_labels_match_frames(frames_dir, labels_dir, refs)
+    pin_teach_settings(labels_dir, cfg)
     done = read_processed(labels_dir)
     _drop_unfinished(labels_dir, done)
     todo = [r for r in refs[::every] if r.frame not in done][:limit]

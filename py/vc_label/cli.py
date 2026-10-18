@@ -11,6 +11,9 @@ from vc_label.contracts import read_frames_csv
 from vc_label.paths import RETINAFACE_WEIGHTS, YUNET_MODEL, offline_model_env, required_model_files
 from vc_label.review import ensure_outside, import_review
 
+# The repository's thresholds, read by default (the path follows this file, not the working directory).
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "labeling.json"
+
 
 def _load_teachers(cfg: LabelingConfig, device_name: str):
     offline_model_env()
@@ -50,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--frames", type=Path, required=True, help="vc_extract output dir (with frames.csv)")
         p.add_argument("--labels", type=Path, required=True, help="label dir, outside --frames")
-        p.add_argument("--config", type=Path, help="JSON overrides for LabelingConfig")
+        p.add_argument("--config", type=Path, help=f"labeling thresholds as JSON (default: {DEFAULT_CONFIG})")
 
     teach = sub.add_parser("teach", help="run the teacher models (slow, resumable)")
     common(teach)
@@ -73,6 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_config(explicit: Path | None) -> LabelingConfig:
+    """--config if given (it must exist), else the repository's configs/labeling.json, else the built-in defaults."""
+    if explicit is not None:
+        if not explicit.is_file():
+            raise ValueError(f"--config {explicit} does not exist")
+        return LabelingConfig.from_json(explicit)
+    return LabelingConfig.from_json(DEFAULT_CONFIG) if DEFAULT_CONFIG.is_file() else LabelingConfig()
+
+
 def _run(args: argparse.Namespace) -> str:
     for name in ("labels", "review", "gold"):
         if getattr(args, name, None) is not None:
@@ -83,7 +95,7 @@ def _run(args: argparse.Namespace) -> str:
         count = import_review(args.review, read_frames_csv(args.frames), args.gold, allow_unreviewed=args.allow_unreviewed)
         return f"import-review: {count} gold frames in {args.gold}"
 
-    cfg = LabelingConfig.from_json(args.config) if args.config else LabelingConfig()
+    cfg = _load_config(args.config)
     if args.command == "teach":
         from vc_label.pipeline import run_teach
 

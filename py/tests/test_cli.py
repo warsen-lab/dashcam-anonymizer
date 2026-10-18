@@ -1,3 +1,5 @@
+import vc_label.cli
+from conftest import REPO_ROOT
 from vc_label.cli import main
 from vc_label.contracts import write_jsonl
 
@@ -169,3 +171,37 @@ def test_export_review_refuses_to_use_the_labels_dir_as_review_dir(tmp_path, cap
 
     assert "--review" in capsys.readouterr().err
     assert sorted(p.name for p in labels.iterdir()) == before
+
+
+def test_the_default_config_is_the_repository_file():
+    assert vc_label.cli.DEFAULT_CONFIG == REPO_ROOT / "configs" / "labeling.json"
+    assert vc_label.cli.DEFAULT_CONFIG.is_file()
+
+
+def test_the_default_config_file_is_read_and_validated(tmp_path, capsys, monkeypatch):
+    frames, labels = _labelled(tmp_path)
+    edited = tmp_path / "labeling.json"
+    edited.write_text('{"fuse_iou": 7}')
+    monkeypatch.setattr("vc_label.cli.DEFAULT_CONFIG", edited)
+
+    assert main(["fuse", "--frames", str(frames), "--labels", str(labels)]) == 2
+
+    assert "fuse_iou" in capsys.readouterr().err
+
+
+def test_a_missing_default_config_falls_back_to_the_built_in_defaults(tmp_path, capsys, monkeypatch):
+    frames, labels = _labelled(tmp_path)
+    monkeypatch.setattr("vc_label.cli.DEFAULT_CONFIG", tmp_path / "nowhere.json")
+
+    assert main(["fuse", "--frames", str(frames), "--labels", str(labels)]) == 0
+
+    assert "fuse: 1 frames, 1 boxes" in capsys.readouterr().out
+
+
+def test_an_explicit_config_that_does_not_exist_is_a_usage_error(tmp_path, capsys):
+    frames, labels = _labelled(tmp_path)
+    missing = tmp_path / "missing.json"
+
+    assert main(["fuse", "--frames", str(frames), "--labels", str(labels), "--config", str(missing)]) == 2
+
+    assert str(missing) in capsys.readouterr().err
