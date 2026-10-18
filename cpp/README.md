@@ -133,6 +133,7 @@ cmake --build build/cpp -j 4
 - **画面呈现信息随原片**：像素宽高比（SAR）、色彩范围 / 矩阵 / 原色 / 传输特性这四个标签，以及旋转（显示矩阵）都从输入视频流拷到输出，所以竖拍视频、BT.709 或全范围标签的视频输出后显示不变；原片没有写的项目输出里也不写。需要换像素格式才能编码时，色彩范围和矩阵照原样带过去，不会被悄悄压缩成有限范围。
 - **编码格式跟随原片**：HEVC 仍是 HEVC，其他一律输出 H.264，容器固定为 MP4，码率取原片视频流的码率（读不到时 8 Mb/s）。VideoToolbox 不可用时退到 libx264 / libx265，实际用的编码器写在统计行 `encoder`。
 - **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或 CoreML 无法使用、已回退，回退时 stderr 会有提示）；`fake` 表示回放。
+- **CoreML 编译缓存**：用 CoreML 时，onnxruntime 第一次创建会话要把模型编译成 CoreML 模型（大模型可能要几十秒以上），编译结果放在 `$VC_CACHE/coreml-cache/<model.onnx 的 sha256>/`（`VC_CACHE` 默认 `~/.cache/video-compliance`，所有 checkout 共享，`vc_detect` 也用它），之后同一个模型直接复用；模型文件内容一变，sha256 跟着变，会重新编译到新目录。目录建不了时 stderr 提示一行，照常编译、只是不缓存。旧模型的缓存目录不会自动删除，需要时手动清理。
 - **模型必须是 float32**：`model.onnx` 的输入输出是 float16 或其他类型时会直接报错，不会静默转换。`model.json` 与 ONNX 的输入尺寸、类别数不一致也会报错。
 - **解码错误**：解码器拒绝并跳过的损坏数据包 / 帧的个数写在统计行的 `decode errors` 和 `stats.json` 的 `decode_errors`；大于 0 时 stderr 还会多一行 `vc_redact: warning: …`（退出码仍为 0），这些帧不在输出里。
 - **`--detect-every-frame`** 只是评测对照用的开关，会让检测耗时随帧数线性增长，日常处理不要打开。

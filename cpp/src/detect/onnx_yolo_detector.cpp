@@ -3,13 +3,24 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "common/vc_error.h"
 #include "detect/letterbox.h"
 #include "detect/model_info.h"
+
+extern "C" {
+#include <libavutil/mem.h>
+#include <libavutil/sha.h>
+}
 
 namespace vc {
 namespace fs = std::filesystem;
@@ -56,6 +67,55 @@ TensorSpec readFloatTensorSpec(const Ort::TypeInfo& info, const char* what, cons
   return spec;
 }
 
+constexpr int kSha256Bits = 256;
+constexpr size_t kHashChunkBytes = 1 << 20;
+
+// Lower-case hex SHA-256 of the file's bytes.
+std::string sha256Hex(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw VcError("cannot read " + path.string());
+  const std::unique_ptr<AVSHA, decltype(&av_free)> sha(av_sha_alloc(), &av_free);
+  if (!sha || av_sha_init(sha.get(), kSha256Bits) < 0) throw VcError("cannot set up SHA-256");
+  std::vector<char> chunk(kHashChunkBytes);
+  while (in) {
+    in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    const std::streamsize got = in.gcount();
+    if (got > 0) av_sha_update(sha.get(), reinterpret_cast<const uint8_t*>(chunk.data()), static_cast<size_t>(got));
+  }
+  if (in.bad()) throw VcError("cannot read " + path.string());
+  std::array<uint8_t, kSha256Bits / 8> digest{};
+  av_sha_final(sha.get(), digest.data());
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex;
+  for (const uint8_t byte : digest) {
+    hex += kHex[byte >> 4];
+    hex += kHex[byte & 0xF];
+  }
+  return hex;
+}
+
+// A set, non-empty environment variable.
+std::optional<std::string> envValue(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') return std::nullopt;
+  return std::string(value);
+}
+
+// coreMlCacheDirectory(onnx), created; nullopt (CoreML then compiles into a temporary directory each
+// time) when there is none or it cannot be created, with a note on stderr for the latter.
+std::optional<fs::path> usableCoreMlCache(const fs::path& onnx) {
+  const std::optional<fs::path> dir = coreMlCacheDirectory(onnx);
+  if (!dir) return std::nullopt;
+  std::error_code error;
+  fs::create_directories(*dir, error);
+  if (error || !fs::is_directory(*dir)) {
+    std::fprintf(stderr, "vc: cannot create the CoreML cache %s (%s); compiling without it\n", dir->c_str(),
+                 error ? error.message().c_str() : "not a directory");
+    return std::nullopt;
+  }
+  return dir;
+}
+
 Ort::SessionOptions makeOptions() {
   Ort::SessionOptions options;
   options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -63,6 +123,17 @@ Ort::SessionOptions makeOptions() {
 }
 
 }  // namespace
+
+std::optional<fs::path> coreMlCacheDirectory(const fs::path& onnx) {
+  std::optional<fs::path> root;
+  if (const auto cache = envValue("VC_CACHE")) {
+    root = fs::path(*cache);
+  } else if (const auto home = envValue("HOME")) {
+    root = fs::path(*home) / ".cache" / "video-compliance";
+  }
+  if (!root) return std::nullopt;
+  return *root / "coreml-cache" / sha256Hex(onnx);
+}
 
 ExecutionProvider parseExecutionProvider(const std::string& text) {
   if (text == "coreml") return ExecutionProvider::CoreML;
@@ -125,9 +196,12 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
     Ort::SessionOptions options = makeOptions();
     if (provider == ExecutionProvider::CoreML) {
       try {
-        options.AppendExecutionProvider(
-            "CoreML", {{"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"},
-                       {"RequireStaticInputShapes", "1"}});
+        std::unordered_map<std::string, std::string> coreMl{
+            {"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"}, {"RequireStaticInputShapes", "1"}};
+        if (const std::optional<fs::path> cache = usableCoreMlCache(onnx)) {
+          coreMl["ModelCacheDirectory"] = cache->string();
+        }
+        options.AppendExecutionProvider("CoreML", coreMl);
         coreMlAttached = true;
       } catch (const Ort::Exception& e) {
         std::fprintf(stderr, "vc: CoreML execution provider unavailable (%s); using CPU\n", e.what());
