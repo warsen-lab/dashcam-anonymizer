@@ -40,7 +40,7 @@
 4. **导入**：`vc_label import-review`，生成 `data/gold/<stem>/`（`yolo/` 和 `gold_meta.csv`，列为 `image,video,frame,reviewed,scene_tags`）。
    - 默认只要有一帧没勾 `reviewed`，整个导入就失败，报出没勾的帧号和总数，什么都不写；金标准视频必须这样，漏勾的帧补勾后再导。
    - 训练视频只复核了一部分帧时，加 `--allow-unreviewed`：没勾的帧带着预标注原样进入，在 `gold_meta.csv` 里记为 `reviewed=false`，后续训练和验收靠这一列区分。
-   - 先全部校验再写，出错时已有的 `data/gold/<stem>/` 原样不动；重新导入时，已经删掉的 JSON 对应的旧标注文件会被清掉。`--gold` 不能指向 `data/labels/<stem>/`。
+   - 先全部校验再写（含 JSON 里的 `imagePath` 必须指向这个视频的同一帧图，别的视频的复核目录会被拒绝），出错时已有的 `data/gold/<stem>/` 原样不动；`--review` 路径打错（不是目录或没有 JSON）也是报错，不会清空金标准；重新导入时，已经删掉的 JSON 对应的旧标注文件会被清掉。`--gold` 不能指向 `data/labels/<stem>/`。
 
 ## 规则标记
 
@@ -56,7 +56,7 @@
 
 - **`fuse` 一侧的键**（`fuse_iou`、`face_low_score`/`plate_low_score`、`min_person_height_frac`、`face_region_frac`、`min_vehicle_width_frac`、`temporal_*`）：改了之后重跑 `vc_label fuse` 就生效，不用重跑 `teach`。`export-review` 不会更新已有的复核文件，想看新阈值的标记请导到新的 `--review` 目录。
 - **`teach` 一侧的键**（`retinaface_score`、`yunet_score`、`coco_score`、`owlv2_score`、`plate_search_min_vehicle_frac`）：原始输出已经按它们过滤，只在 `teach` 时生效，并且按 labels 目录固定在 `teach_config.json` 里。同一个 labels 目录用不同的值续跑会被拒绝；要换阈值就用新的 labels 目录，或把配置改回去。
-- 低分区间的下限不能高于对应的教师阈值，否则低于下限的框会成为标签却不会被标记；这类不合法的配置会直接报错。
+- 低分区间的下限不能高于对应的教师阈值，否则低于下限的框会成为标签却不会被标记；这类不合法的配置会直接报错。`fuse` 也会按 `teach_config.json` 里实际用过的教师阈值再核对一遍。
 
 ## 金标准规则（规格 §5.5）
 
