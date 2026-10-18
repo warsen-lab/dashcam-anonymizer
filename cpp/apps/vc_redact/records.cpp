@@ -1,6 +1,7 @@
 #include "vc_redact/records.h"
 
 #include <cmath>
+#include <string>
 
 #include <nlohmann/json.hpp>
 
@@ -9,8 +10,23 @@
 namespace vc {
 namespace {
 
-double round1(double v) { return std::round(v * 10.0) / 10.0; }
-double round4(double v) { return std::round(v * 10000.0) / 10000.0; }
+// v rounded to `scale` steps per unit, as a record writes it. Throws VcError when v is not finite
+// or the scaling overflows to infinity (nlohmann would write null). Returns +0.0 for -0.0, which
+// would otherwise read "-0.0".
+double recordNumber(double v, double scale, const char* field) {
+  const double rounded = std::round(v * scale) / scale;
+  if (!std::isfinite(rounded)) throw VcError(std::string(field) + " is not finite");
+  return rounded == 0 ? 0.0 : rounded;
+}
+
+double round1(double v, const char* field) { return recordNumber(v, 10.0, field); }
+double round4(double v, const char* field) { return recordNumber(v, 10000.0, field); }
+
+// One JSON line. Invalid UTF-8 (in a video or source name, say) is written as U+FFFD: it must not
+// throw an exception that is not a VcError out of the pipeline.
+std::string jsonLine(const nlohmann::ordered_json& j) {
+  return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+}
 
 const std::string& className(const std::vector<std::string>& classes, int cls) {
   if (cls < 0 || static_cast<size_t>(cls) >= classes.size()) {
@@ -27,15 +43,15 @@ std::string detectionRecord(const std::string& video, int64_t frame, double ptsM
   nlohmann::ordered_json j;
   j["video"] = video;
   j["frame"] = frame;
-  j["pts_ms"] = round1(ptsMs);
+  j["pts_ms"] = round1(ptsMs, "pts_ms");
   j["cls"] = className(classes, box.cls);
-  j["x1"] = round1(box.x1);
-  j["y1"] = round1(box.y1);
-  j["x2"] = round1(box.x2);
-  j["y2"] = round1(box.y2);
-  j["score"] = round4(box.score);
+  j["x1"] = round1(box.x1, "x1");
+  j["y1"] = round1(box.y1, "y1");
+  j["x2"] = round1(box.x2, "x2");
+  j["y2"] = round1(box.y2, "y2");
+  j["score"] = round4(box.score, "score");
   j["src"] = src;
-  return j.dump() + "\n";
+  return jsonLine(j);
 }
 
 std::string maskRecord(const std::string& video, int64_t frame, const std::vector<MaskBox>& boxes,
@@ -47,14 +63,14 @@ std::string maskRecord(const std::string& video, int64_t frame, const std::vecto
   for (const MaskBox& m : boxes) {
     nlohmann::ordered_json b;
     b["cls"] = className(classes, m.cls);
-    b["x1"] = round1(m.x1);
-    b["y1"] = round1(m.y1);
-    b["x2"] = round1(m.x2);
-    b["y2"] = round1(m.y2);
+    b["x1"] = round1(m.x1, "x1");
+    b["y1"] = round1(m.y1, "y1");
+    b["x2"] = round1(m.x2, "x2");
+    b["y2"] = round1(m.y2, "y2");
     b["origin"] = toString(m.origin);
     j["boxes"].push_back(b);
   }
-  return j.dump() + "\n";
+  return jsonLine(j);
 }
 
 }  // namespace vc

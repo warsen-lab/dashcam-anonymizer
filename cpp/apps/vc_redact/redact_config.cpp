@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string_view>
@@ -19,6 +20,21 @@ constexpr std::array<std::string_view, 11> kKeys = {
 
 // Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
 constexpr double kMaxMosaicSetting = 4096;
+
+// Float settings are written with this many decimals: 0.15f must read 0.15, not 0.15000000596….
+constexpr double kJsonFloatScale = 1e6;
+
+// A number as it reads in a message: 5, not 5.000000.
+std::string plainNumber(double v) {
+  std::ostringstream out;
+  out << v;
+  return out.str();
+}
+
+// A float setting as JSON, rounded to kJsonFloatScale steps per unit.
+double jsonFloat(float v) {
+  return std::round(static_cast<double>(v) * kJsonFloatScale) / kJsonFloatScale;
+}
 
 // The setting as an int: `key` must be a JSON integer in [1, kMaxMosaicSetting] (a fraction or an
 // out-of-range number must not be truncated or overflow into a different value); absent: `fallback`.
@@ -38,7 +54,17 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   const auto require = [&](bool ok, const std::string& what) {
     if (!ok) throw VcError(origin + ": " + what);
   };
-  require(c.detectFps >= kMinBaseFps, "detect_fps must be >= 5");
+  // NaN fails the range tests below, but +inf passes some of them: every double is checked here.
+  require(std::isfinite(c.detectFps), "detect_fps must be finite");
+  require(std::isfinite(c.maxDetectFps), "max_detect_fps must be finite");
+  require(std::isfinite(c.motionThreshold), "motion_threshold must be finite");
+  require(std::isfinite(c.decode.scoreThreshold), "score_threshold must be finite");
+  require(std::isfinite(c.decode.nmsIou), "nms_iou must be finite");
+  require(std::isfinite(c.timeline.matchMaxDistance), "match_max_distance must be finite");
+  require(std::isfinite(c.timeline.expandFraction), "expand_fraction must be finite");
+  require(std::isfinite(c.timeline.motionExpandFraction), "motion_expand_fraction must be finite");
+  require(std::isfinite(c.timeline.minBoxPx), "min_box_px must be finite");
+  require(c.detectFps >= kMinBaseFps, "detect_fps must be >= " + plainNumber(kMinBaseFps));
   require(c.maxDetectFps >= c.detectFps, "max_detect_fps must be >= detect_fps");
   require(c.motionThreshold >= 0 && c.motionThreshold <= 1, "motion_threshold must be in [0, 1]");
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
@@ -99,8 +125,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["detect_fps"] = c.detectFps;
   j["max_detect_fps"] = c.maxDetectFps;
   j["motion_threshold"] = c.motionThreshold;
-  j["score_threshold"] = c.decode.scoreThreshold;
-  j["nms_iou"] = c.decode.nmsIou;
+  j["score_threshold"] = jsonFloat(c.decode.scoreThreshold);
+  j["nms_iou"] = jsonFloat(c.decode.nmsIou);
   j["match_max_distance"] = c.timeline.matchMaxDistance;
   j["expand_fraction"] = c.timeline.expandFraction;
   j["motion_expand_fraction"] = c.timeline.motionExpandFraction;

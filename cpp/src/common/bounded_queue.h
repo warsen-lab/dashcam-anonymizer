@@ -10,13 +10,14 @@
 namespace vc {
 
 // Blocking FIFO between pipeline threads. close() aborts it: waiting and later push() calls return
-// false, pop() returns nullopt and queued items are discarded.
+// false, pop() returns nullopt and queued items are discarded. close() is idempotent.
 template <typename T>
 class BoundedQueue {
  public:
   explicit BoundedQueue(size_t capacity) : capacity_(capacity == 0 ? 1 : capacity) {}
 
-  bool push(T item) {
+  // false means the queue was closed and the item was dropped; the caller must stop producing.
+  [[nodiscard]] bool push(T item) {
     std::unique_lock lock(mutex_);
     notFull_.wait(lock, [&] { return closed_ || items_.size() < capacity_; });
     if (closed_) return false;
