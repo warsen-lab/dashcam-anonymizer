@@ -6,10 +6,12 @@ add_executable(vc_tests
   box_test.cpp
   box_timeline_test.cpp
   bounded_queue_test.cpp
+  detect_cli_test.cpp
   detect_images_test.cpp
   extract_cli_test.cpp
   extract_job_test.cpp
   fake_detector_test.cpp
+  frame_file_name_test.cpp
   frame_sampler_test.cpp
   jpeg_writer_test.cpp
   letterbox_test.cpp

@@ -23,13 +23,18 @@ std::vector<std::string> lines(const fs::path& path) {
 
 fs::path constModel() { return fs::path(VC_TEST_DATA_DIR) / "const_yolo"; }
 
+fs::path gray(int size) {
+  return test::makeMedia("gray" + std::to_string(size) + ".jpg",
+                         "-f lavfi -i color=c=gray:s=" + std::to_string(size) + "x" + std::to_string(size) +
+                             " -frames:v 1 -update 1");
+}
+
 // A fresh frames directory holding one grey 128x128 JPEG per name in `frameFiles`.
 fs::path framesDirWith(const std::string& name, const std::vector<std::string>& frameFiles) {
-  const fs::path gray = test::makeMedia("gray128.jpg", "-f lavfi -i color=c=gray:s=128x128 -frames:v 1 -update 1");
   const fs::path dir = test::tmpDir() / name;
   fs::remove_all(dir);
   fs::create_directories(dir);
-  for (const std::string& file : frameFiles) fs::copy_file(gray, dir / file);
+  for (const std::string& file : frameFiles) fs::copy_file(gray(128), dir / file);
   return dir;
 }
 
@@ -75,13 +80,64 @@ TEST(DetectImages, KeepsACommaInTheVideoName) {
   EXPECT_EQ(got[0].rfind(R"({"video":"a,b.mp4","frame":3,"pts_ms":100.0,)", 0), 0u) << got[0];
 }
 
-TEST(DetectImages, WritesNothingForAnEmptyList) {
+// A frames.csv without a single frame is a wrong directory (or a failed vc_extract), not "no
+// detections": an empty detections file would be taken for a clean result.
+TEST(DetectImages, RejectsAnEmptyFramesList) {
   const fs::path frames = framesDirWith("detect_empty", {});
   std::ofstream(frames / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n";
   const DetectImagesOptions o = optionsFor(frames, "detect_empty.jsonl");
-  EXPECT_EQ(runDetectImages(o), 0);
-  EXPECT_TRUE(fs::exists(o.out));
-  EXPECT_TRUE(lines(o.out).empty());
+  try {
+    runDetectImages(o);
+    ADD_FAILURE() << "no throw for an empty frames.csv";
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find("lists no frames"), std::string::npos) << e.what();
+  }
+  EXPECT_FALSE(fs::exists(o.out));
+  EXPECT_FALSE(fs::exists(fs::path(o.out).concat(".partial")));
+}
+
+TEST(DetectImages, TheScoreThresholdChangesTheOutput) {
+  const fs::path frames = framesDirWith("detect_score", {"000000.jpg"});
+  std::ofstream(frames / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n"
+                                          "t.mp4,0,0.0,base,0.0000\n";
+  // The constant model reports a face at 0.9 and a plate at 0.7 on every image.
+  const struct {
+    float score;
+    size_t records;
+  } cases[] = {{0.15f, 2}, {0.8f, 1}, {0.95f, 0}};
+  for (const auto& c : cases) {
+    DetectImagesOptions o = optionsFor(frames, "detect_score.jsonl");
+    o.decode.scoreThreshold = c.score;
+    EXPECT_EQ(runDetectImages(o), 1);
+    const std::vector<std::string> got = lines(o.out);
+    EXPECT_EQ(got.size(), c.records) << "score " << c.score;
+    if (c.score == 0.8f) {
+      ASSERT_EQ(got.size(), 1u);
+      EXPECT_NE(got[0].find(R"("cls":"face")"), std::string::npos) << got[0];
+    }
+  }
+}
+
+// The letterbox scale depends on the image size, so a detector built for one size cannot serve
+// another: mixed sizes in one frames.csv need the detector rebuilt.
+TEST(DetectImages, RebuildsTheDetectorWhenImageSizesChange) {
+  const fs::path frames = framesDirWith("detect_sizes", {});
+  fs::copy_file(gray(128), frames / "000000.jpg");
+  fs::copy_file(gray(64), frames / "000001.jpg");
+  fs::copy_file(gray(128), frames / "000002.jpg");
+  std::ofstream(frames / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n"
+                                          "t.mp4,0,0.0,base,0.0000\n"
+                                          "t.mp4,1,33.3,base,0.0000\n"
+                                          "t.mp4,2,66.7,base,0.0000\n";
+  const DetectImagesOptions o = optionsFor(frames, "detect_sizes.jsonl");
+  EXPECT_EQ(runDetectImages(o), 3);
+  const std::vector<std::string> got = lines(o.out);
+  ASSERT_EQ(got.size(), 6u);
+  // The model input is 64x64: a 128x128 image is scaled by 0.5 (the face is at x 24..40), a 64x64
+  // image by 1 (x 12..20).
+  EXPECT_NE(got[0].find(R"("x1":24.0)"), std::string::npos) << got[0];
+  EXPECT_NE(got[2].find(R"("x1":12.0)"), std::string::npos) << got[2];
+  EXPECT_NE(got[4].find(R"("x1":24.0)"), std::string::npos) << got[4];
 }
 
 TEST(DetectImages, RejectsAFramesDirWithoutFramesCsv) {

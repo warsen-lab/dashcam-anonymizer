@@ -16,15 +16,22 @@
 - onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
 
   ```bash
-  C=~/.cache/video-compliance/third_party && mkdir -p "$C/nlohmann_json-3.12.0/include/nlohmann"
-  curl -L -o /tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz
-  shasum -a 256 /tmp/ort.tgz   # 6ebb5062a934537c352937821f9fe9718e7de1a2db1122a93dd363ffd53a7012
-  tar -xzf /tmp/ort.tgz -C "$C"
-  curl -L -o "$C/nlohmann_json-3.12.0/include/nlohmann/json.hpp" https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
-  shasum -a 256 "$C/nlohmann_json-3.12.0/include/nlohmann/json.hpp"   # aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
+  (
+    set -euo pipefail
+    C=~/.cache/video-compliance/third_party
+    T=$(mktemp -d); trap 'rm -rf "$T"' EXIT   # 下载先落在临时目录，校验通过才动缓存
+    curl -fL -o "$T/ort.tgz" https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz
+    (cd "$T" && echo "6ebb5062a934537c352937821f9fe9718e7de1a2db1122a93dd363ffd53a7012  ort.tgz" | shasum -a 256 -c -)
+    mkdir -p "$C"
+    tar -xzf "$T/ort.tgz" -C "$C"
+    curl -fL -o "$T/json.hpp" https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
+    (cd "$T" && echo "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63  json.hpp" | shasum -a 256 -c -)
+    mkdir -p "$C/nlohmann_json-3.12.0/include/nlohmann"
+    mv "$T/json.hpp" "$C/nlohmann_json-3.12.0/include/nlohmann/json.hpp"
+  )
   ```
 
-  这两步会联网（合计约 43MB），只需做一次。**在计费流量的网络上先征得同意再下载**；校验和对不上就不要解压。其他机器或 worktree 直接复用同一份缓存，不必重复下载。
+  这两步会联网（合计约 43MB），只需做一次。**在计费流量的网络上先征得同意再下载**。每个文件都先下载到临时目录，`shasum -a 256 -c` 校验通过后才解压或放进缓存；校验和对不上时脚本在那一步直接失败（退出码非 0），缓存里不会留下没校验过的文件。其他机器或 worktree 直接复用同一份缓存，不必重复下载。
 
 ## 构建
 
@@ -43,11 +50,11 @@ cmake --build build/cpp -j 4
 
 ```bash
 ./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*'
-./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*'
+./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
 ./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*'
 ./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:BoundedQueue.*:RedactConfig.*:Records.*'
-./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectImages.*'
+./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectCli.*:DetectImages.*'
 ```
 
 仓库目前没有配置 CI；上面六组过滤命令合起来覆盖全部测试，本机不需要跑 `ctest` 或不带过滤的全量。新增测试套件时把它加进其中一组，保证六组之并等于全部。
@@ -118,11 +125,13 @@ cmake --build build/cpp -j 4
 
 要点：
 
-- **检测器出错整段失败**：模型无法加载、推理报错、输出里有非有限的框等都会让整次运行失败，并删除本次已写出的所有文件，不留半成品；而不是悄悄少打几个码。
-- **音频直接拷贝**（不重编码）；GPS / 字幕 / 额外视频流等其他流会被丢弃，丢了哪些会列在运行结束的统计行和 `stats.json` 的 `dropped_streams` 里。
+- **检测器出错整段失败**：模型无法加载、推理报错、输出里有非有限的分数或框等都会让整次运行失败，并删除本次已写出的所有文件（本次新建的输出根目录和新建的上级目录，空了也一并删除），不留半成品；而不是悄悄少打几个码。
+- **音频直接拷贝**（不重编码）；MP4 放不下的音频编码（例如 MOV 里的 `pcm_mulaw`）会在创建输出文件之前报错并点名这个编码，不会写出一个没有声音的视频。GPS / 字幕 / 额外视频流等其他流会被丢弃，丢了哪些会列在运行结束的统计行和 `stats.json` 的 `dropped_streams` 里。
+- **画面呈现信息随原片**：像素宽高比（SAR）、色彩范围 / 矩阵 / 原色 / 传输特性这四个标签，以及旋转（显示矩阵）都从输入视频流拷到输出，所以竖拍视频、BT.709 或全范围标签的视频输出后显示不变；原片没有写的项目输出里也不写。需要换像素格式才能编码时，色彩范围和矩阵照原样带过去，不会被悄悄压缩成有限范围。
 - **编码格式跟随原片**：HEVC 仍是 HEVC，其他一律输出 H.264，容器固定为 MP4，码率取原片视频流的码率（读不到时 8 Mb/s）。VideoToolbox 不可用时退到 libx264 / libx265，实际用的编码器写在统计行 `encoder`。
 - **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或 CoreML 无法使用、已回退，回退时 stderr 会有提示）；`fake` 表示回放。
 - **模型必须是 float32**：`model.onnx` 的输入输出是 float16 或其他类型时会直接报错，不会静默转换。`model.json` 与 ONNX 的输入尺寸、类别数不一致也会报错。
+- **解码错误**：解码器拒绝并跳过的损坏数据包 / 帧的个数写在统计行的 `decode errors` 和 `stats.json` 的 `decode_errors`；大于 0 时 stderr 还会多一行 `vc_redact: warning: …`（退出码仍为 0），这些帧不在输出里。
 - **`--detect-every-frame`** 只是评测对照用的开关，会让检测耗时随帧数线性增长，日常处理不要打开。
 - **`--overwrite` 的安全规则**：只会替换空目录或含有 `masks.jsonl` 的目录（即上一次 `vc_redact` 的输出），其余一律拒绝；输出目录会包含输入视频时也拒绝（退出码 1，换一个 `--out`）。所有检查都在创建或删除任何东西之前完成。
 
@@ -130,7 +139,14 @@ cmake --build build/cpp -j 4
 
 退出码：0 成功，1 处理失败，2 参数错误（含无法读取或非法的 `--config`），3 输出目录已存在（或存在但不是 `vc_redact` 的输出）。
 
-不需要模型的冒烟运行（几秒钟）：
+不需要模型的冒烟运行（几秒钟）。它用 `build/cpp/tests/tmp/basic.mp4`，这个文件由测试现场生成：先跑一遍上面的第二组测试（会生成它），或者自己生成：
+
+```bash
+mkdir -p build/cpp/tests/tmp
+ffmpeg -v error -y -f lavfi -i testsrc2=s=640x360:r=30:d=2 -c:v libx264 -pix_fmt yuv420p -g 30 build/cpp/tests/tmp/basic.mp4
+```
+
+然后：
 
 ```bash
 printf '{"video":"basic.mp4","frame":0,"pts_ms":0,"cls":"face","x1":100,"y1":100,"x2":200,"y2":180,"score":0.9,"src":"fake"}\n' > build/cpp/tests/tmp/smoke.jsonl
@@ -153,5 +169,7 @@ printf '{"video":"basic.mp4","frame":0,"pts_ms":0,"cls":"face","x1":100,"y1":100
 | `--out <jsonl>` | 必填 | 要写的检测文件；先写 `.partial` 再改名，失败时不留文件 |
 | `--ep` | cpu | `cpu` / `coreml`；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
 | `--score <x>` | 0.15 | 分数阈值，取值 [0, 1]；比较时应与 Python 端一致 |
+
+检测的 NMS IoU 固定用默认值 0.5（没有对应参数），与 Python 端比较时要用同一个值。参数值以 `--` 开头会被当作漏写了值（退出码 2），与 `vc_redact` 相同。`frames.csv` 里一张图都没有时报错（退出码 1），不会写出一个空的检测文件。
 
 退出码：0 成功，1 处理失败，2 参数错误。

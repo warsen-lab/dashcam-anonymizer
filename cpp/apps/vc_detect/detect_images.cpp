@@ -2,7 +2,6 @@
 
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -11,6 +10,7 @@
 #include <vector>
 
 #include "common/vc_error.h"
+#include "io/frame_file_name.h"
 #include "io/video_reader.h"
 #include "vc_redact/records.h"
 
@@ -78,13 +78,10 @@ std::vector<Row> readFramesCsv(const fs::path& framesDir) {
     if (line.empty()) continue;
     rows.push_back(parseRow(line, csv.string() + " line " + std::to_string(lineNo)));
   }
+  // An empty list is a wrong directory or a failed vc_extract; an empty detections file would pass
+  // for "nothing detected".
+  if (rows.empty()) throw VcError(csv.string() + " lists no frames");
   return rows;
-}
-
-std::string frameFileName(int64_t frame) {
-  char name[32];
-  std::snprintf(name, sizeof(name), "%06lld.jpg", static_cast<long long>(frame));
-  return name;
 }
 
 void detectAll(const DetectImagesOptions& options, const std::vector<Row>& rows, const fs::path& target) {

@@ -24,6 +24,7 @@ add_library(vc_core STATIC
   src/common/vc_error.cpp
   src/detect/box.cpp
   src/detect/letterbox.cpp
+  src/io/frame_file_name.cpp
   src/io/jpeg_writer.cpp
   src/io/video_reader.cpp
   src/io/video_writer.cpp
@@ -54,6 +55,7 @@ target_link_libraries(vc_extract_lib PUBLIC vc_core)
 find_package(Threads REQUIRED)
 
 add_library(vc_redact_lib STATIC
+  apps/vc_detect/detect_cli.cpp
   apps/vc_detect/detect_images.cpp
   apps/vc_redact/records.cpp
   apps/vc_redact/redact_cli.cpp
