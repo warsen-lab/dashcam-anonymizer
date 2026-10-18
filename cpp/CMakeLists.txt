@@ -28,6 +28,7 @@ add_library(vc_core STATIC
   src/io/video_reader.cpp
   src/sampler/frame_sampler.cpp
   src/sampler/luma_thumb.cpp
+  src/track/box_timeline.cpp
 )
 target_include_directories(vc_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)

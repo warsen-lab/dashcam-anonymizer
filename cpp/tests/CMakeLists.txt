@@ -4,6 +4,7 @@ find_program(VC_FFMPEG_EXECUTABLE ffmpeg REQUIRED)
 add_executable(vc_tests
   test_media.cpp
   box_test.cpp
+  box_timeline_test.cpp
   extract_cli_test.cpp
   extract_job_test.cpp
   fake_detector_test.cpp
