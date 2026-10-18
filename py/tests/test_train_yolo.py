@@ -222,19 +222,26 @@ def test_export_accepts_a_static_yolov8_shaped_output(tmp_path, monkeypatch):
     weights = tmp_path / "best.pt"
     torch.save({"train_metrics": {"metrics/mAP50(B)": 0.5}}, weights)
     monkeypatch.setattr(export_mod, "load_yolo", lambda _weights: _ExportStub(good))
+    real, used = export_mod.cpu_session, []
+    monkeypatch.setattr(export_mod, "cpu_session", lambda path: used.append(path) or real(path))
 
     onnx_path = export_mod.export_onnx(weights, tmp_path / "model", 64, 64)
     assert onnx_path.is_file() and (tmp_path / "model" / "model.json").is_file()
+    assert used  # the graph is read back with the single-threaded reference session
 
 
-def test_pytorch_and_onnxruntime_agree(tiny_run):
+def test_pytorch_and_onnxruntime_agree(tiny_run, monkeypatch):
+    from vc_train import export as export_mod
     from vc_train.export import check_consistency, export_onnx
 
     root, (frames_dir, _), best = tiny_run
     onnx_path = export_onnx(best, root / "model_check", 64, 64)
     images = sorted(frames_dir.glob("*.jpg"))
+    real, used = export_mod.cpu_session, []
+    monkeypatch.setattr(export_mod, "cpu_session", lambda path: used.append(path) or real(path))
     # threshold 0 keeps every anchor, so a score sitting on the threshold cannot make the two runtimes disagree
     report = check_consistency(best, onnx_path, images, score_threshold=0.0)
+    assert used == [onnx_path]
     assert report.images == len(images)
     assert report.boxes > 0 and report.matched > 0
     assert report.passed(1.0), report

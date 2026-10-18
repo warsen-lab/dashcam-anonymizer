@@ -27,10 +27,6 @@ def _weakest(coverage: dict) -> str:
     return f"{w['cls']} r{w['row']}c{w['col']} {w['value']:.1%}（n={w['total']}）"
 
 
-def _number(value, fmt: str) -> str:
-    return DASH if value is None else format(value, fmt)
-
-
 def _failed_details(integrity: dict) -> str:
     failed = [f"{name}: {integrity['details'].get(name, 'failed')}" for name, ok in integrity["checks"].items() if not ok]
     return "；".join(failed).replace("|", "/")
@@ -268,7 +264,7 @@ def _speed_lines(summary: dict) -> list[str]:
         "",
         "解码、主线程、编码是流水线里并行运行的三个线程，括号里是忙碌秒数占该次总耗时的比例，最接近 100% 的就是瓶颈。"
         "检测、补框、打码在主线程里串行，括号里是占主线程忙碌时间的比例；“检测（关键帧）”只统计做过检测的关键帧，不是每一帧。"
-        "准备是开始处理第一帧之前的时间（加载模型、CoreML 编译、打开编码器），算在总耗时里；吞吐是帧数除以总耗时。"
+        "准备是第一帧进入流水线之前的时间（打开输入、加载模型和 CoreML 编译；编码器在编码线程收到第一帧时才打开，算在编码里），算在总耗时里；吞吐是帧数除以总耗时。"
         "后端见开头的检测后端与编码器。",
         "",
         "| 段 | fps | 准备 | " + " | ".join(STAGE_NAME[s] for s in (*PARALLEL_STAGES, *MAIN_STAGES)) + " | 总耗时 | 吞吐 |",
@@ -287,7 +283,7 @@ def _speed_lines(summary: dict) -> list[str]:
         slowest = max(PARALLEL_STAGES, key=totals.get)
         lines += [
             "",
-            f"估计瓶颈：{STAGE_NAME[slowest]}（所有运行合计忙碌 {totals[slowest]:.1f} s，为合计总耗时的 {totals[slowest] / elapsed_total:.0%}）。",
+            f"估计瓶颈：{STAGE_NAME[slowest]}（有完整计时的运行合计忙碌 {totals[slowest]:.1f} s，为这些运行合计总耗时的 {totals[slowest] / elapsed_total:.0%}）。",
         ]
     return lines
 

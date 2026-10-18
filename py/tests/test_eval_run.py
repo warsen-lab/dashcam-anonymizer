@@ -657,6 +657,38 @@ def test_speed_table_adds_up_the_main_thread_for_stats_without_it(tmp_path, monk
     assert cells[4] == " 0.6 s（75%） "
 
 
+def test_speed_bottleneck_pools_busy_over_elapsed_across_old_and_new_stats(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    # 5 fps: new stats, main 1.2 of 1.5 s; 10 fps: old stats without main (0.3 + 0.1 + 0.1), encode 2.4 of 3.0 s
+    per_rate = {
+        5: ({"main": 1.2}, {"setup_s": 0.3}),
+        10: ({"main": None, "detect": 0.3, "encode": 2.4}, {"elapsed_s": 3.0}),
+    }
+    fake = {fps: _fake_runner([], busy=b, stats_extra=x) for fps, (b, x) in per_rate.items()}
+
+    def runner(cmd, check, capture_output, text):
+        fps = int(cmd[cmd.index("--detect-fps") + 1]) if "--detect-fps" in cmd else 5
+        fake[fps](cmd, check, capture_output, text)
+
+    run_all(_cfg(tmp_path), runner=runner)
+    speed = _speed(tmp_path)
+    assert _row(speed, "| seg | 10 |").split("|")[3:7] == [" — ", " 0.1 s（3%） ", " 0.5 s（17%） ", " 2.4 s（80%） "]
+    slowest = next(line for line in speed.splitlines() if "估计瓶颈" in line)
+    # pooled: encode 2.5 s of 4.5 s (56%) beats main 1.7 s (38%); the mean of the per-run shares would pick main (48% vs 43%)
+    assert "编码" in slowest and "2.5 s" in slowest and "56%" in slowest
+
+
+def test_speed_table_dashes_the_main_thread_of_old_stats_missing_a_stage(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path), runner=_fake_runner([], busy={"main": None, "track": None}, stats_extra={"elapsed_s": None}))
+    speed = _speed(tmp_path)
+    cells = _row(speed, "| seg | 5 |").split("|")[3:-1]
+    assert cells[2] == " — " and cells[5] == " — " and cells[-2:] == [" — ", " — "]
+    assert "估计瓶颈" not in speed  # no run it can measure
+
+
 def test_speed_table_survives_a_run_without_stage_timings(tmp_path, monkeypatch):
     _setup(tmp_path)
     _python_dets(monkeypatch)
