@@ -22,17 +22,19 @@
 
 每个视频用自己的 `data/labels/<stem>/`、`data/review/<stem>/`、`data/gold/<stem>/`，不要几个视频共用一个目录：续跑记录 `processed.txt` 只按帧号区分，共用会让后一个视频的帧被当成"已处理"而跳过。`teach`/`fuse` 会核对 labels 目录里的视频名和帧号与 `--frames` 对得上，用错目录直接拒绝。
 
-**任何标注都不能放进 `data/frames/<stem>/`**：重新抽帧时 `vc_extract --overwrite` 会把这个目录整个删掉。`vc_label` 会拒绝把输出写进去；在 X-AnyLabeling 里也要把保存目录设到 `data/review/<stem>/`，不能用默认的“保存在图片旁边”。
+**任何标注都不能放进 `data/frames/<stem>/`**：重新抽帧时 `vc_extract --overwrite` 会把这个目录整个删掉。`vc_label` 会拒绝把输出写进去；用 `scripts/review_ui.sh <stem>` 打开 X-AnyLabeling 时，保存目录已经固定在 `data/review/<stem>/`，不会落到默认的“保存在图片旁边”。
 
 ## 流程
 
 1. **预标注**：`vc_label teach`，每批不超过 15 分钟（1080p 约 2.5 秒/帧，`--limit 300` 约 12 分钟），可以分多批续跑。
 2. **导出复核文件**：`vc_label export-review`。已有的 `<帧号>.json` 不会被改动（X-AnyLabeling 把你的复核存在这里）：`teach` 又跑了一批、或改了阈值之后再导出，只会补写新帧的文件，并打印 `N new LabelMe files, M kept`；`review_queue.csv` 每次重写。只有明确要丢掉已有复核重新生成时才加 `--force`。
-3. **人工复核**（X-AnyLabeling，需另行安装）：
-   - 打开图片目录 `data/frames/<stem>/`，把标注保存目录设为 `data/review/<stem>/`，即可看到预标注框。
-   - 标签只用 `face`、`plate`，只画矩形。
-   - 每个框的描述里有 `score=…`、`src=…` 和被标记的规则名，方便判断。
-   - 勾选图片级场景标记：`day`、`night`、`rain`、`tunnel`、`city`、`highway`。
+3. **人工复核**（X-AnyLabeling，需另行安装，见下面的“安装 X-AnyLabeling”）：在仓库根目录运行 `scripts/review_ui.sh <stem>`。它以 `data/frames/<stem>/` 为图片目录、`data/review/<stem>/` 为保存目录，标签固定为 `face`、`plate`，并把工具的所有联网途径指向本机的死代理（计费流量，复核时不出网）。`data/frames/<stem>/frames.csv` 或 `data/review/<stem>/` 不存在（还没 `export-review`），或者没装 X-AnyLabeling，脚本以退出码 2 拒绝。界面：
+   - 右上角 Flags 面板：这一帧复核完就勾 `reviewed`，同处勾场景标记 `day`、`night`、`rain`、`tunnel`、`city`、`highway`。
+   - Labels 只有 `face`、`plate`，只画矩形。
+   - Shapes 列表：这一帧的所有框；每个框的描述里有 `score=…`、`src=…` 和被标记的规则名，方便判断。
+   - 按 `R` 画矩形，画完会问标签。
+   - 存盘：点 Save 按钮或按 Cmd+S。
+   - `A` / `D`：上一张 / 下一张图片。
    - 删除误检，补画漏检，调整框到上面的规范。
    - **一帧复核完，就勾上图片级标记 `reviewed`**（和场景标记在同一处）。没勾的帧会被当作没人看过的预标注，不算金标准。
    - **训练用视频**：至少复核 `review_queue.csv` 里列出的帧（被标记多的排在前面，`where` 列给出被标记框的位置），复核过的帧勾 `reviewed`。
@@ -40,7 +42,21 @@
 4. **导入**：`vc_label import-review`，生成 `data/gold/<stem>/`（`yolo/` 和 `gold_meta.csv`，列为 `image,video,frame,reviewed,scene_tags`）。
    - 默认只要有一帧没勾 `reviewed`，整个导入就失败，报出没勾的帧号和总数，什么都不写；金标准视频必须这样，漏勾的帧补勾后再导。
    - 训练视频只复核了一部分帧时，加 `--allow-unreviewed`：没勾的帧带着预标注原样进入，在 `gold_meta.csv` 里记为 `reviewed=false`，后续训练和验收靠这一列区分。
-   - 先全部校验再写（含 JSON 里的 `imagePath` 必须指向这个视频的同一帧图，别的视频的复核目录会被拒绝），出错时已有的 `data/gold/<stem>/` 原样不动；`--review` 路径打错（不是目录或没有 JSON）也是报错，不会清空金标准；重新导入时，已经删掉的 JSON 对应的旧标注文件会被清掉。`--gold` 不能指向 `data/labels/<stem>/`。
+   - 先全部校验再写（含 JSON 里的 `vc_source` 必须是这个视频的这一帧，`imagePath` 作为第二道核对，别的视频的复核目录会被拒绝），出错时已有的 `data/gold/<stem>/` 原样不动；`--review` 路径打错（不是目录或没有 JSON）也是报错，不会清空金标准；重新导入时，已经删掉的 JSON 对应的旧标注文件会被清掉。`--gold` 不能指向 `data/labels/<stem>/`。
+
+## 安装 X-AnyLabeling
+
+复核用 X-AnyLabeling：PyPI 包 `x-anylabeling-cvhub==4.1.0`（GPL-3.0）。下载约 320MB，装完约 1GB，**联网前先确认**（计费流量）。装进它自己的 venv，不要装进仓库的 `.venv`，位置固定为 `~/.cache/video-compliance/x-anylabeling-venv`（`scripts/review_ui.sh` 就找这里的 `bin/xanylabeling`）：
+
+```bash
+python3 -m venv ~/.cache/video-compliance/x-anylabeling-venv
+```
+
+```bash
+~/.cache/video-compliance/x-anylabeling-venv/bin/pip install x-anylabeling-cvhub==4.1.0
+```
+
+**不要删掉 JSON 里的 `vc_source` 字段**：X-AnyLabeling 保存时会把 `imagePath` 改写成裸文件名（比如 `000120.jpg`），而每个视频的帧都叫 `NNNNNN.jpg`，光看 `imagePath` 分不出是哪个视频的帧。所以 `export-review` 在每个 JSON 顶层写入 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（X-AnyLabeling 会原样保留），`import-review` 靠它认文件：缺失或和 `frames.csv` 里对应的视频、帧号对不上就拒绝，整个导入什么都不写。没有 `vc_source` 的旧文件（这一版之前导出的）：还没复核的用 `export-review --force` 重新导出；已经复核过的不要加 `--force`（它会丢掉复核），在 JSON 顶层手工补上 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`。
 
 ## 规则标记
 
