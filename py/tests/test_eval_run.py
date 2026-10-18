@@ -227,6 +227,7 @@ def test_choice_needs_every_stem_and_the_integrity_checks(tmp_path, monkeypatch)
     assert [r["integrity"]["passed"] for r in summary["runs"]] == [False, True]
     md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
     integrity = md.split("## 输出完整性")[1].split("##")[0]
+    assert "| 分辨率 |" in integrity and _row(integrity, "| seg | 10 |").count("✓") == 6
     assert _row(integrity, "| seg | 5 |").rstrip().endswith("| av_sync: audio offset changed by 0.0 ms (limit 33.3 ms) |")  # the check name leads each detail
 
 

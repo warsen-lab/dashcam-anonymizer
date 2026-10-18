@@ -349,11 +349,11 @@ def _summary_md(summary: dict) -> str:
         lines.append(f"| 合计 | {fps:g} | {_pct(u['face'])} | {_pct(u['plate'])} |")
     lines += ["", "## 时间覆盖率", "", "| 段 | fps | 人脸 | 车牌 |", "|---|---|---|---|"]
     lines += [f"| {r['stem']} | {r['fps']:g} | {_pct(r['temporal']['face'])} | {_pct(r['temporal']['plate'])} |" for r in runs]
-    lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|"]
+    lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 分辨率 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|---|"]
     for r in runs:
         i = r["integrity"]
         k = i["checks"]
-        cells = " | ".join(mark(k.get(name)) for name in ("decodable", "frame_count", "duration", "audio_kept", "av_sync"))
+        cells = " | ".join(mark(k.get(name)) for name in ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"))
         lines.append(f"| {r['stem']} | {r['fps']:g} | {cells} | {_failed_details(i)} |")
     lines += ["", "## 误打面积（只报告）", "", "| 段 | fps | 最大 | 均值 | 95 分位 |", "|---|---|---|---|---|"]
     lines += [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]

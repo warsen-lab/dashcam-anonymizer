@@ -1,12 +1,14 @@
+import json
 import subprocess
 
 import pytest
 
+from vc_eval import integrity
 from vc_eval.integrity import FFMPEG, check_integrity, probe
 
 
-def _video(path, seconds=1, audio=True, rate=30, faststart=False):
-    args = [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=160x120:r={rate}:d={seconds}"]
+def _video(path, seconds=1, audio=True, rate=30, faststart=False, size="160x120"):
+    args = [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s={size}:r={rate}:d={seconds}"]
     if audio:
         args += ["-f", "lavfi", "-i", f"sine=f=440:d={seconds}", "-c:a", "aac", "-shortest"]
     args += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
@@ -47,7 +49,7 @@ def test_probe_reads_streams(tmp_path):
 def test_identical_files_pass(tmp_path):
     v = _video(tmp_path / "a.mp4")
     r = check_integrity(v, v)
-    assert r.passed and set(r.checks) == {"decodable", "frame_count", "duration", "audio_kept", "av_sync"}
+    assert r.passed and set(r.checks) == {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"}
 
 
 def test_missing_audio_and_wrong_length_fail(tmp_path):
@@ -65,7 +67,7 @@ def test_probe_rejects_a_non_media_file(tmp_path):
         probe(bad)
 
 
-CHECKS = {"decodable", "frame_count", "duration", "audio_kept", "av_sync"}
+CHECKS = {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"}
 
 
 def test_probe_of_a_clean_file_has_no_decode_errors(tmp_path):
@@ -135,3 +137,89 @@ def test_a_source_without_audio_passes_the_audio_checks(tmp_path):
     r = check_integrity(src, src)
     assert r.checks["audio_kept"] is True and r.checks["av_sync"] is True
     assert r.passed
+
+
+def _drop_from_probe(monkeypatch, path, edit):
+    """ffprobe output for `path` (only) goes through `edit(json)` first, as if the file's headers lacked those fields."""
+    real = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        out = real(cmd, *args, **kwargs)
+        if cmd[0] == integrity.FFPROBE and cmd[-1] == str(path):
+            data = json.loads(out.stdout)
+            edit(data)
+            return subprocess.CompletedProcess(cmd, out.returncode, json.dumps(data), out.stderr)
+        return out
+
+    monkeypatch.setattr(integrity.subprocess, "run", run)
+
+
+def _no_format_duration(data):
+    del data["format"]["duration"]
+
+
+def _no_start_time(codec_type):
+    def edit(data):
+        for stream in data["streams"]:
+            if stream["codec_type"] == codec_type:
+                del stream["start_time"]
+
+    return edit
+
+
+def test_probe_reports_an_unknown_duration_and_start_time_as_none_not_zero(tmp_path, monkeypatch):
+    v = _video(tmp_path / "a.mp4")
+    assert probe(v).duration == pytest.approx(1.0, abs=0.1) and probe(v).video.start == 0.0  # known: a real 0.0 stays 0.0
+    _drop_from_probe(monkeypatch, v, _no_format_duration)
+    assert probe(v).duration is None
+    _drop_from_probe(monkeypatch, v, _no_start_time("video"))
+    assert probe(v).video.start is None and probe(v).audio.start is not None
+
+
+@pytest.mark.parametrize("which", ["source", "redacted"])
+def test_an_unknown_container_duration_fails_the_duration_check(tmp_path, monkeypatch, which):
+    src, out = _video(tmp_path / "src.mp4"), _video(tmp_path / "out.mp4")
+    _drop_from_probe(monkeypatch, {"source": src, "redacted": out}[which], _no_format_duration)
+    r = check_integrity(src, out)
+    assert r.checks["duration"] is False and not r.passed
+    assert "unknown" in r.details["duration"] and "0.000" not in r.details["duration"]
+    assert r.checks["frame_count"] is True  # only the affected check fails
+
+
+@pytest.mark.parametrize("which, stream", [("source", "video"), ("source", "audio"), ("redacted", "video"), ("redacted", "audio")])
+def test_an_unknown_stream_start_time_fails_av_sync(tmp_path, monkeypatch, which, stream):
+    src, out = _video(tmp_path / "src.mp4"), _video(tmp_path / "out.mp4")
+    _drop_from_probe(monkeypatch, {"source": src, "redacted": out}[which], _no_start_time(stream))
+    r = check_integrity(src, out)
+    assert r.checks["av_sync"] is False and not r.passed
+    assert "unknown" in r.details["av_sync"] and "start_time" in r.details["av_sync"]
+    assert r.checks["audio_kept"] is True and r.checks["duration"] is True
+
+
+def test_an_unknown_start_time_does_not_matter_without_audio(tmp_path, monkeypatch):
+    src = _video(tmp_path / "src.mp4", audio=False)
+    _drop_from_probe(monkeypatch, src, _no_start_time("video"))
+    r = check_integrity(src, src)
+    assert r.checks["av_sync"] is True and r.passed
+
+
+def test_a_different_resolution_fails_the_resolution_check(tmp_path):
+    src = _video(tmp_path / "src.mp4")
+    out = _video(tmp_path / "out.mp4", size="320x240")
+    r = check_integrity(src, out)
+    assert r.checks["resolution"] is False and not r.passed
+    assert "160x120" in r.details["resolution"] and "320x240" in r.details["resolution"]
+    assert r.checks["frame_count"] is True and r.checks["duration"] is True
+    same = check_integrity(src, src)
+    assert same.checks["resolution"] is True and "160x120" in same.details["resolution"]
+
+
+def test_an_unknown_resolution_fails_the_resolution_check(tmp_path, monkeypatch):
+    src, out = _video(tmp_path / "src.mp4"), _video(tmp_path / "out.mp4")
+
+    def no_width(data):
+        del data["streams"][0]["width"]
+
+    _drop_from_probe(monkeypatch, out, no_width)
+    r = check_integrity(src, out)
+    assert r.checks["resolution"] is False and "unknown" in r.details["resolution"]
