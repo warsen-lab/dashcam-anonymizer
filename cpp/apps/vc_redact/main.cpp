@@ -65,7 +65,9 @@ int main(int argc, char** argv) {
 
   av_log_set_level(AV_LOG_ERROR);
   try {
-    printStats(vc::runRedact(options));
+    const vc::RedactStats stats = vc::runRedact(options);
+    printStats(stats);
+    for (const std::string& warning : vc::redactWarnings(stats)) std::cerr << "vc_redact: " << warning << '\n';
     return kExitOk;
   } catch (const vc::OutputExistsError& e) {
     std::cerr << "vc_redact: " << e.what() << '\n';

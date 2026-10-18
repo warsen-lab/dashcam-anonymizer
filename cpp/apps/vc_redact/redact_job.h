@@ -56,10 +56,20 @@ struct RedactStats {
   double elapsedSec = 0;
 };
 
+// Capacity of each queue between the pipeline stages: clamp(256 MiB / bytes per frame, 4, 64). The
+// frame size assumes 3 bytes per pixel, the largest layout the reader emits (8-bit 4:4:4), so a
+// queue never holds much more than 256 MiB of frames.
+size_t pipelineQueueCapacity(int width, int height);
+
+// Lines for stderr after a successful run (empty when there is nothing to warn about): currently
+// decoder errors, i.e. corrupt packets that were skipped.
+std::vector<std::string> redactWarnings(const RedactStats& stats);
+
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
 // renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json.
 // The options, the input, the detector and the output directory are all checked before anything is
-// created; any later failure removes this run's files and rethrows. Decoding, detection plus
+// created; any later failure removes this run's files (and the output root and its new parent
+// directories when this run created them and they are empty) and rethrows. Decoding, detection plus
 // masking, and encoding run on three threads; the first error stops all of them.
 //
 // Throws std::invalid_argument unless exactly one of modelDir / fakeDetections is set;

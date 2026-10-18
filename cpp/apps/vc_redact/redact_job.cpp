@@ -31,7 +31,10 @@ namespace fs = std::filesystem;
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr size_t kQueueCapacity = 64;
+constexpr size_t kMaxQueueCapacity = 64;
+constexpr size_t kMinQueueCapacity = 4;
+constexpr uint64_t kQueueBudgetBytes = 256ull * 1024 * 1024;
+constexpr uint64_t kBytesPerPixel = 3;  // the largest layout the reader emits: 8-bit 4:4:4
 // A keyframe is forced after this many buffered frames, so stalled timestamps cannot grow the buffer.
 constexpr size_t kMaxBufferedFrames = 120;
 constexpr const char* kMasksFile = "masks.jsonl";
@@ -78,9 +81,9 @@ class FirstError {
 // destroyed would terminate the process).
 class StageThreads {
  public:
-  explicit StageThreads(std::function<void()> abort) : abort_(std::move(abort)) {}
+  explicit StageThreads(std::function<void()> closeQueues) : closeQueues_(std::move(closeQueues)) {}
   ~StageThreads() {
-    abort_();
+    closeQueues_();
     join();
   }
   StageThreads(const StageThreads&) = delete;
@@ -94,7 +97,7 @@ class StageThreads {
   }
 
  private:
-  std::function<void()> abort_;
+  std::function<void()> closeQueues_;
   std::vector<std::thread> threads_;
 };
 
@@ -260,10 +263,15 @@ void decodeStage(VideoReader& reader, BoundedQueue<Item>& out, StageStat& decode
   std::unordered_map<int, size_t> ordinals;
   const std::vector<const AVStream*> audio = reader.audioStreams();
   for (size_t i = 0; i < audio.size(); ++i) ordinals[audio[i]->index] = i;
+  // The reader hands audio packets over from inside next(). Pushing them there would count the
+  // time spent waiting for room in the queue as decoding time, so they are only collected there
+  // and pushed once next() has returned, in the order they were read: before the video frame that
+  // call returned. (One next() call reads packets only until it has a frame, so this stays small.)
+  std::vector<AudioItem> delivered;
   reader.setAudioSink([&](const AVPacket& packet) {
     av::PacketPtr copy = av::allocPacket();
     checkAv(av_packet_ref(copy.get(), &packet), "reference audio packet");
-    if (!out.push(Item{AudioItem{std::move(copy), ordinals.at(packet.stream_index)}})) throw PipelineAborted{};
+    delivered.push_back(AudioItem{std::move(copy), ordinals.at(packet.stream_index)});
   });
   struct ResetSink {
     VideoReader& reader;
@@ -273,6 +281,10 @@ void decodeStage(VideoReader& reader, BoundedQueue<Item>& out, StageStat& decode
     const Clock::time_point started = Clock::now();
     const VideoFrame* frame = reader.next();
     decode.busySec += secondsSince(started);
+    for (AudioItem& packet : delivered) {
+      if (!out.push(Item{std::move(packet)})) throw PipelineAborted{};
+    }
+    delivered.clear();
     if (frame == nullptr) break;
     av::FramePtr clone(av_frame_clone(frame->av));
     if (!clone) throw VcError("av_frame_clone failed");
@@ -292,7 +304,7 @@ struct EncodeResult {
 
 // The writer is created on the first video frame, when its pixel format is known; audio that
 // arrives earlier is held until then.
-void encodeStage(BoundedQueue<Item>& in, WriterConfig config, const std::vector<const AVStream*>& audio,
+void encodeStage(BoundedQueue<Item>& in, WriterConfig config, const std::vector<AudioStreamInfo>& audio,
                  EncodeResult& result) {
   std::unique_ptr<VideoWriter> writer;
   std::vector<AudioItem> early;
@@ -330,6 +342,8 @@ void encodeStage(BoundedQueue<Item>& in, WriterConfig config, const std::vector<
   }
 }
 
+// Everything the encode thread needs to know about the input video, copied by value here on the
+// main thread, so that it never reads the demuxer's streams (the decode thread is using them).
 WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool preferHardware) {
   const AVStream* stream = reader.videoStream();
   WriterConfig c;
@@ -352,8 +366,9 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   std::ofstream masks(dir / kMasksFile);
   if (!detections || !masks) throw VcError("cannot create output files in " + dir.string());
 
-  BoundedQueue<Item> decoded(kQueueCapacity);
-  BoundedQueue<Item> processed(kQueueCapacity);
+  const size_t capacity = pipelineQueueCapacity(reader.info().width, reader.info().height);
+  BoundedQueue<Item> decoded(capacity);
+  BoundedQueue<Item> processed(capacity);
   FirstError error;
   const auto closeQueues = [&] {
     decoded.close();
@@ -374,10 +389,11 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   };
 
   // Everything that can fail before a thread exists is set up first, so the threads never see a
-  // half-built pipeline; the reader's info is copied because the decode thread owns the reader.
+  // half-built pipeline; the reader's info, the video stream's metadata and the audio streams'
+  // codec parameters and time bases are copied because the decode thread owns the reader.
   const VideoInfo info = reader.info();
   const WriterConfig config = writerConfig(reader, partial, options.preferHardwareEncoder);
-  const std::vector<const AVStream*> audio = reader.audioStreams();
+  const std::vector<AudioStreamInfo> audio = snapshotAudioStreams(reader.audioStreams());
   Processor processor(options, detector, info, options.input.filename().string(), detections, masks, processed,
                       stats);
   StageStat decodeStat;
@@ -458,6 +474,22 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
 
 }  // namespace
 
+size_t pipelineQueueCapacity(int width, int height) {
+  const uint64_t pixels = width > 0 && height > 0 ? static_cast<uint64_t>(width) * static_cast<uint64_t>(height) : 1;
+  const uint64_t frames = kQueueBudgetBytes / (pixels * kBytesPerPixel);
+  return static_cast<size_t>(std::clamp<uint64_t>(frames, kMinQueueCapacity, kMaxQueueCapacity));
+}
+
+std::vector<std::string> redactWarnings(const RedactStats& stats) {
+  std::vector<std::string> warnings;
+  if (stats.decodeErrors > 0) {
+    warnings.push_back("warning: the decoder rejected " + std::to_string(stats.decodeErrors) +
+                       " corrupt packet(s) or frame(s) and skipped them, so the output lacks those frames "
+                       "(decode_errors in stats.json)");
+  }
+  return warnings;
+}
+
 RedactStats runRedact(const RedactOptions& options) {
   const Clock::time_point started = Clock::now();
   checkOptions(options);
@@ -468,13 +500,19 @@ RedactStats runRedact(const RedactOptions& options) {
   RedactStats stats;
   stats.outputDir = options.outRoot / stem;
   checkOutputDir(options.input, stats.outputDir, options.overwrite);
-  fs::remove_all(stats.outputDir);
-  fs::create_directories(stats.outputDir);
+  // The directories this run is about to create (outRoot and parents that do not exist yet), deepest
+  // first: a failed run removes the ones that are still empty, so that it leaves nothing behind.
+  std::vector<fs::path> createdRoots;
+  for (fs::path dir = options.outRoot; !dir.empty() && !fs::exists(dir); dir = dir.parent_path()) {
+    createdRoots.push_back(dir);
+  }
   stats.video = stats.outputDir / (stem + ".redacted.mp4");
   const fs::path partial = stats.outputDir / (stem + ".redacted.mp4.partial");
   const std::vector<fs::path> written{partial, stats.video, stats.outputDir / kDetectionsFile,
                                       stats.outputDir / kMasksFile, stats.outputDir / kStatsFile};
   try {
+    fs::remove_all(stats.outputDir);
+    fs::create_directories(stats.outputDir);
     runPipeline(options, reader, *detector, partial, stats);
     fs::rename(partial, stats.video);
     stats.frames = stats.decode.items;
@@ -492,6 +530,9 @@ RedactStats runRedact(const RedactOptions& options) {
     std::error_code ignored;
     for (const fs::path& p : written) fs::remove(p, ignored);
     fs::remove(stats.outputDir, ignored);
+    for (const fs::path& dir : createdRoots) {
+      if (fs::is_empty(dir, ignored)) fs::remove(dir, ignored);
+    }
     throw;
   }
 }

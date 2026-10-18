@@ -4,10 +4,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <unistd.h>
 
@@ -118,6 +120,27 @@ fs::path videoWithMulawAudio() {
 fs::path rawH264Stream() {
   return makeMedia("raw.h264",
                    "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -c:v libx264 -pix_fmt yuv420p -f h264");
+}
+
+fs::path corruptFirstNalVideo() {
+  const fs::path output = tmpDir() / "basic_corrupt_first_nal.mp4";
+  if (fs::exists(output)) return output;
+  std::vector<char> bytes;
+  {
+    std::ifstream in(basicVideo(), std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  // The first NAL unit's 4-byte length prefix follows the "mdat" fourcc.
+  const std::string fourcc = "mdat";
+  const auto mdat = std::search(bytes.begin(), bytes.end(), fourcc.begin(), fourcc.end());
+  if (mdat == bytes.end()) throw std::runtime_error("no mdat box in basic.mp4");
+  const size_t prefix = static_cast<size_t>(mdat - bytes.begin()) + fourcc.size();
+  if (prefix + 4 >= bytes.size()) throw std::runtime_error("basic.mp4 is truncated");
+  std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(prefix), 4, static_cast<char>(0xFF));
+  const fs::path partial = tmpDir() / (std::to_string(getpid()) + "-basic_corrupt_first_nal.mp4");
+  std::ofstream(partial, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  fs::rename(partial, output);
+  return output;
 }
 
 fs::path videoWithSubtitles() {

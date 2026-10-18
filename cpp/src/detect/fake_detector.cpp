@@ -1,7 +1,9 @@
 #include "detect/fake_detector.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
+#include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -27,6 +29,12 @@ FakeDetector::FakeDetector(const std::filesystem::path& jsonl, std::vector<std::
         failing_.insert(frame);
         continue;
       }
+      if (j.contains("delay_ms")) {
+        const int64_t delay = j.at("delay_ms").get<int64_t>();
+        if (delay < 0) throw VcError(where + ": delay_ms must not be negative");
+        delayMs_[frame] = delay;
+        continue;
+      }
       const std::string cls = j.at("cls").get<std::string>();
       const auto it = std::find(classes_.begin(), classes_.end(), cls);
       if (it == classes_.end()) throw VcError(where + ": unknown class '" + cls + "'");
@@ -46,6 +54,9 @@ FakeDetector::FakeDetector(const std::filesystem::path& jsonl, std::vector<std::
 
 std::vector<Box> FakeDetector::detect(const VideoFrame& frame) {
   calls_.push_back(frame.index);
+  if (const auto delay = delayMs_.find(frame.index); delay != delayMs_.end()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay->second));
+  }
   if (failing_.count(frame.index) != 0) {
     throw VcError("fake detector failure at frame " + std::to_string(frame.index));
   }

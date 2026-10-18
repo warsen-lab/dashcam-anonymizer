@@ -68,7 +68,10 @@ class VideoReader {
   void setAudioSink(std::function<void(const AVPacket&)> sink);
 
   // Next frame, or nullptr at end of stream. The pointer and its AVFrame stay
-  // valid until the next call. Throws VcError on unrecoverable errors.
+  // valid until the next call. The frame's buffers are reference counted and a
+  // later call never reuses or overwrites them in place, so a caller may keep
+  // an av_frame_clone() of the frame for as long as it likes (vc_redact does).
+  // Throws VcError on unrecoverable errors.
   const VideoFrame* next();
 
  private:

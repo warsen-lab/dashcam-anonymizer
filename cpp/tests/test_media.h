@@ -29,6 +29,9 @@ std::filesystem::path videoWithAudio();
 // 2 s, 640x360 @ 30 fps H.264 (4 Mb/s) of testsrc2 with strong temporal noise, plus AAC audio:
 // every region has detail, so pixelation is measurable.
 std::filesystem::path noisyVideoWithAudio();
+// basicVideo() with the length prefix of its first NAL unit overwritten, so the decoder rejects the
+// first access unit and the rest of the stream still decodes.
+std::filesystem::path corruptFirstNalVideo();
 // 1 s, 320x240 @ 30 fps H.264 with a mov_text subtitle stream.
 std::filesystem::path videoWithSubtitles();
 // 2 s of videoWithAudio() cut with `ffmpeg -ss 0.7 -c copy`: the video starts on the keyframe before

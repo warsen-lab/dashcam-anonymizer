@@ -12,7 +12,8 @@
 namespace vc {
 
 // Replays detections.jsonl records (spec §3.2) by frame number, for tests and for checking the
-// pipeline without a model. A record {"frame": N, "fail": true} makes detect() throw for frame N.
+// pipeline without a model. A record {"frame": N, "fail": true} makes detect() throw for frame N;
+// {"frame": N, "delay_ms": M} makes it sleep M milliseconds first (to simulate a slow detector).
 class FakeDetector : public Detector {
  public:
   // Throws VcError naming the file and line for unreadable files, bad JSON or unknown classes.
@@ -30,6 +31,7 @@ class FakeDetector : public Detector {
   std::vector<std::string> classes_;
   std::map<int64_t, std::vector<Box>> byFrame_;
   std::set<int64_t> failing_;
+  std::map<int64_t, int64_t> delayMs_;
   std::vector<int64_t> calls_;
 };
 

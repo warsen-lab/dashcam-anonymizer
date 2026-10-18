@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -72,6 +73,25 @@ TEST(FakeDetector, FailsOnRequestedFrames) {
   FakeDetector detector(path);
   EXPECT_TRUE(detector.detect(frameNumber(2)).empty());
   EXPECT_THROW(detector.detect(frameNumber(3)), VcError);
+}
+
+// For tests of back-pressure: a slow detector makes the stages upstream of it wait.
+TEST(FakeDetector, SleepsOnRequestedFrames) {
+  const fs::path path = writeFile(
+      "fake_delay.jsonl",
+      R"({"frame":3,"delay_ms":120})" "\n"
+      R"({"frame":3,"cls":"face","x1":1,"y1":2,"x2":3,"y2":4,"score":0.9})" "\n");
+  FakeDetector detector(path);
+  const auto time = [&](int64_t frame) {
+    const auto start = std::chrono::steady_clock::now();
+    detector.detect(frameNumber(frame));
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  };
+  EXPECT_LT(time(2), 0.05);
+  EXPECT_GE(time(3), 0.12);
+  EXPECT_EQ(detector.detect(frameNumber(3)).size(), 1u);  // the delay record is not a box
+  const fs::path negative = writeFile("fake_delay_bad.jsonl", R"({"frame":3,"delay_ms":-5})" "\n");
+  EXPECT_THROW(FakeDetector{negative}, VcError);
 }
 
 }  // namespace

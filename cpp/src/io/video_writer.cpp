@@ -69,6 +69,21 @@ void copyPresentation(const AVStream& videoStream, WriterConfig& config) {
   }
 }
 
+AudioStreamInfo snapshotAudioStream(const AVStream& stream) {
+  AVCodecParameters* copy = avcodec_parameters_alloc();
+  if (copy == nullptr) throw VcError("avcodec_parameters_alloc failed");
+  std::shared_ptr<AVCodecParameters> owned(copy, [](AVCodecParameters* p) { avcodec_parameters_free(&p); });
+  checkAv(avcodec_parameters_copy(copy, stream.codecpar), "copy audio parameters");
+  return AudioStreamInfo{std::move(owned), stream.time_base};
+}
+
+std::vector<AudioStreamInfo> snapshotAudioStreams(const std::vector<const AVStream*>& streams) {
+  std::vector<AudioStreamInfo> out;
+  out.reserve(streams.size());
+  for (const AVStream* stream : streams) out.push_back(snapshotAudioStream(*stream));
+  return out;
+}
+
 struct VideoWriter::Impl {
   WriterConfig config;
   std::unique_ptr<AVFormatContext, OutputDeleter> output;
@@ -133,7 +148,7 @@ struct VideoWriter::Impl {
 };
 
 
-VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVStream*>& audio)
+VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<AudioStreamInfo>& audio)
     : impl_(std::make_unique<Impl>()) {
   Impl& s = *impl_;
   s.config = config;
@@ -142,8 +157,8 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVS
   checkAv(avformat_alloc_output_context2(&raw, nullptr, "mp4", path.c_str()), "create MP4 muxer");
   s.output.reset(raw);
   // Before anything is opened or created: a codec MP4 cannot hold would only fail at the header.
-  for (const AVStream* in : audio) {
-    const AVCodecID id = in->codecpar->codec_id;
+  for (const AudioStreamInfo& in : audio) {
+    const AVCodecID id = in.parameters->codec_id;
     if (avformat_query_codec(s.output->oformat, id, FF_COMPLIANCE_NORMAL) == 0) {
       throw VcError(std::string("audio codec ") + avcodec_get_name(id) + " cannot be stored in MP4");
     }
@@ -165,14 +180,14 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVS
     std::memcpy(matrix->data, config.displayMatrix->data(), sizeof(int32_t) * 9);
   }
 
-  for (const AVStream* in : audio) {
+  for (const AudioStreamInfo& in : audio) {
     AVStream* out = avformat_new_stream(s.output.get(), nullptr);
     if (out == nullptr) throw VcError("avformat_new_stream failed");
-    checkAv(avcodec_parameters_copy(out->codecpar, in->codecpar), "copy audio parameters");
+    checkAv(avcodec_parameters_copy(out->codecpar, in.parameters.get()), "copy audio parameters");
     out->codecpar->codec_tag = 0;
-    out->time_base = in->time_base;
+    out->time_base = in.timeBase;
     s.audioOut.push_back(out);
-    s.audioIn.push_back(in->time_base);
+    s.audioIn.push_back(in.timeBase);
   }
 
   checkAv(avio_open(&s.output->pb, path.c_str(), AVIO_FLAG_WRITE), "open " + path);

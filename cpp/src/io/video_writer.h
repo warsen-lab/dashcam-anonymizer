@@ -14,6 +14,7 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+struct AVCodecParameters;
 struct AVFrame;
 struct AVPacket;
 struct AVStream;
@@ -49,6 +50,17 @@ struct WriterConfig {
 // so call it where the demuxer is not in use on another thread.
 void copyPresentation(const AVStream& videoStream, WriterConfig& config);
 
+// Codec parameters and time base of an input audio stream, copied so that the writer never reads
+// the demuxer's own streams (the demuxer may be running on another thread). The copy stays valid
+// after the reader that produced it is gone.
+struct AudioStreamInfo {
+  std::shared_ptr<const AVCodecParameters> parameters;
+  AVRational timeBase{0, 1};
+};
+// Throws VcError when the copy fails.
+AudioStreamInfo snapshotAudioStream(const AVStream& stream);
+std::vector<AudioStreamInfo> snapshotAudioStreams(const std::vector<const AVStream*>& streams);
+
 // Encodes frames and stream-copies audio into an MP4 file.
 //
 // Not thread-safe, and not tied to one thread by construction either: create it, call every method
@@ -59,7 +71,7 @@ class VideoWriter {
   // Opens the first encoder that works and writes the MP4 header; `audio` streams are copied with
   // their codec parameters and time base. Throws VcError, also when an audio codec cannot be stored
   // in MP4 (checked before the file is created).
-  VideoWriter(const WriterConfig& config, const std::vector<const AVStream*>& audio);
+  VideoWriter(const WriterConfig& config, const std::vector<AudioStreamInfo>& audio);
   ~VideoWriter();  // closes the file; without finish() it is incomplete
   VideoWriter(const VideoWriter&) = delete;
   VideoWriter& operator=(const VideoWriter&) = delete;

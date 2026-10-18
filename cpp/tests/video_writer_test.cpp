@@ -53,7 +53,7 @@ std::string reencode(const fs::path& input, const fs::path& output, bool preferH
   while (const VideoFrame* frame = reader.next()) {
     if (!writer) {
       config.pixelFormat = static_cast<AVPixelFormat>(frame->av->format);
-      writer = std::make_unique<VideoWriter>(config, reader.audioStreams());
+      writer = std::make_unique<VideoWriter>(config, snapshotAudioStreams(reader.audioStreams()));
       for (const av::PacketPtr& p : early) writer->writeAudio(*p, 0);
       early.clear();
     }
@@ -250,6 +250,50 @@ TEST(VideoWriter, RejectsAFrameOfAnotherSize) {
   EXPECT_EQ(writer.videoFrames(), 1);
 }
 
+// The snapshot is what the encode thread works with: it must not depend on the demuxer's streams.
+TEST(VideoWriter, AudioSnapshotsOutliveTheReaderAndDriveTheWriter) {
+  std::vector<AudioStreamInfo> audio;
+  av::PacketPtr packet = av::allocPacket();
+  AVRational timeBase{0, 1};
+  AVCodecID codec = AV_CODEC_ID_NONE;
+  int sampleRate = 0;
+  {
+    VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
+    audio = snapshotAudioStreams(reader.audioStreams());
+    ASSERT_EQ(audio.size(), 1u);
+    reader.setAudioSink([&](const AVPacket& p) {
+      if (packet->size == 0 && av_packet_ref(packet.get(), &p) < 0) throw std::runtime_error("av_packet_ref");
+    });
+    while (packet->size == 0 && reader.next() != nullptr) {
+    }
+    ASSERT_GT(packet->size, 0);
+    timeBase = reader.audioStreams()[0]->time_base;
+    codec = reader.audioStreams()[0]->codecpar->codec_id;
+    sampleRate = reader.audioStreams()[0]->codecpar->sample_rate;
+  }
+  EXPECT_EQ(audio[0].timeBase.num, timeBase.num);
+  EXPECT_EQ(audio[0].timeBase.den, timeBase.den);
+  EXPECT_EQ(audio[0].parameters->codec_id, codec);
+  EXPECT_EQ(audio[0].parameters->sample_rate, sampleRate);
+  EXPECT_GT(sampleRate, 0);
+
+  WriterConfig config;
+  config.path = test::tmpDir() / "writer_snapshot.mp4";
+  config.width = 64;
+  config.height = 64;
+  config.preferHardware = false;
+  {
+    VideoWriter writer(config, audio);
+    av::FramePtr frame = test::makeFrame(64, 64, AV_PIX_FMT_YUV420P, 100, 128, 128);
+    frame->pts = 0;
+    writer.writeVideo(*frame);
+    writer.writeAudio(*packet, 0);  // an MP4 track without samples is not written
+    writer.finish();
+  }
+  EXPECT_EQ(test::streamCount(config.path, AVMEDIA_TYPE_AUDIO), 1);
+  EXPECT_EQ(test::streamCodec(config.path, AVMEDIA_TYPE_AUDIO), codec);
+}
+
 TEST(VideoWriter, RejectsAudioAndVideoAfterFinish) {
   VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
   WriterConfig config = configFor(reader, test::tmpDir() / "writer_after_finish.mp4", false);
@@ -265,7 +309,7 @@ TEST(VideoWriter, RejectsAudioAndVideoAfterFinish) {
   while (packet->size == 0 && reader.next() != nullptr) {
   }
   ASSERT_GT(packet->size, 0);
-  VideoWriter writer(config, reader.audioStreams());
+  VideoWriter writer(config, snapshotAudioStreams(reader.audioStreams()));
   writer.writeVideo(*frame);
   writer.writeAudio(*packet, 0);
   writer.finish();
@@ -290,7 +334,7 @@ TEST(VideoWriter, ClearsThePictType) {
     while (const VideoFrame* frame = reader.next()) {
       if (!writer) {
         config.pixelFormat = static_cast<AVPixelFormat>(frame->av->format);
-        writer = std::make_unique<VideoWriter>(config, reader.audioStreams());
+        writer = std::make_unique<VideoWriter>(config, snapshotAudioStreams(reader.audioStreams()));
       }
       av::FramePtr clone(av_frame_clone(frame->av));
       clone->pts = clone->best_effort_timestamp;
@@ -338,7 +382,7 @@ TEST(VideoWriter, RefusesAnAudioCodecThatMp4CannotStoreBeforeCreatingTheFile) {
   fs::remove(config.path);
   config.pixelFormat = AV_PIX_FMT_YUV420P;
   try {
-    VideoWriter writer(config, reader.audioStreams());
+    VideoWriter writer(config, snapshotAudioStreams(reader.audioStreams()));
     ADD_FAILURE() << "no throw";
   } catch (const VcError& e) {
     EXPECT_NE(std::string(e.what()).find("audio codec pcm_mulaw cannot be stored in MP4"), std::string::npos) << e.what();

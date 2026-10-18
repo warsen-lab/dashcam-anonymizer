@@ -103,13 +103,16 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
   const auto in = decodeAll(o.input);
   const auto out = decodeAll(s.video);
   ASSERT_EQ(out.size(), 60u);
+  ASSERT_EQ(in.size(), 60u);
   // The mask is the fake box grown by 15 % per side, (85, 88)-(215, 192), in 17 px blocks: the
-  // block [102, 119) x [105, 122) is flat in the output and noisy in the input.
-  EXPECT_LT(lumaStd(*out[30], 104, 107, 117, 120), 4.0);
-  EXPECT_GT(lumaStd(*in[30], 104, 107, 117, 120), 15.0);
-  // Far from the mask the picture is kept: same brightness, still detailed.
-  EXPECT_NEAR(lumaMean(*out[30], 400, 220, 560, 330), lumaMean(*in[30], 400, 220, 560, 330), 3.0);
-  EXPECT_GT(lumaStd(*out[30], 400, 220, 560, 330), 10.0);
+  // block [102, 119) x [105, 122) is flat in the output and noisy in the input, on every frame.
+  for (size_t i = 0; i < out.size(); ++i) {
+    EXPECT_LT(lumaStd(*out[i], 104, 107, 117, 120), 4.0) << "frame " << i;
+    EXPECT_GT(lumaStd(*in[i], 104, 107, 117, 120), 15.0) << "frame " << i;
+    // Far from the mask the picture is kept: same brightness, still detailed.
+    EXPECT_NEAR(lumaMean(*out[i], 400, 220, 560, 330), lumaMean(*in[i], 400, 220, 560, 330), 3.0) << "frame " << i;
+    EXPECT_GT(lumaStd(*out[i], 400, 220, 560, 330), 10.0) << "frame " << i;
+  }
 }
 
 TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
@@ -178,6 +181,17 @@ TEST(RedactJob, KeepsTheTimingOfVideoAndAudio) {
   const RedactStats s = runRedact(o);
   EXPECT_NEAR(test::streamDurationSec(s.video, AVMEDIA_TYPE_VIDEO), test::streamDurationSec(o.input, AVMEDIA_TYPE_VIDEO), 0.05);
   EXPECT_NEAR(test::streamDurationSec(s.video, AVMEDIA_TYPE_AUDIO), test::streamDurationSec(o.input, AVMEDIA_TYPE_AUDIO), 0.05);
+  // Each stream starts where it did in the input, so the audio / video offset is unchanged.
+  for (const AVMediaType type : {AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO}) {
+    const test::StreamTiming in = test::streamTiming(o.input, type);
+    const test::StreamTiming out = test::streamTiming(s.video, type);
+    EXPECT_NEAR(out.startSec, in.startSec, 1.0 / 30) << av_get_media_type_string(type);
+    EXPECT_NEAR(out.firstPtsSec, in.firstPtsSec, 1.0 / 30) << av_get_media_type_string(type);
+    EXPECT_NEAR(out.lastPtsSec, in.lastPtsSec, 1.0 / 30) << av_get_media_type_string(type);
+  }
+  const double sourceOffset = test::streamTiming(o.input, AVMEDIA_TYPE_AUDIO).startSec - test::streamTiming(o.input, AVMEDIA_TYPE_VIDEO).startSec;
+  const double outputOffset = test::streamTiming(s.video, AVMEDIA_TYPE_AUDIO).startSec - test::streamTiming(s.video, AVMEDIA_TYPE_VIDEO).startSec;
+  EXPECT_NEAR(outputOffset, sourceOffset, 1.0 / 30);
 }
 
 // The picture is shown like the input: same pixel aspect ratio, colour tags and rotation.
@@ -271,6 +285,119 @@ TEST(RedactJob, ForcesAKeyframeWhenTheBufferGrowsTooLong) {
   EXPECT_EQ(s.maskedFrames, 500);
   EXPECT_GE(s.keyframes, 5);  // frames 0, 120, 200, 320, 400; the sampler alone would pick 0, 200, 400
   EXPECT_EQ(lineCount(s.outputDir / "masks.jsonl"), 500u);
+}
+
+// A detector that takes 40 ms per frame keeps the processing stage busy and fills the queue in front
+// of it: the decode stage then waits for room, and that waiting is not decoding time (it used to
+// count when it happened while the reader was delivering an audio packet).
+TEST(RedactJob, DecodeTimingExcludesWaitingForASlowConsumer) {
+  RedactOptions o = baseOptions("redact_slow");
+  const fs::path slow = test::tmpDir() / "redact_slow.jsonl";
+  {
+    std::ofstream out(slow);
+    for (int i = 0; i < 60; ++i) {
+      out << R"({"frame":)" << i << R"(,"delay_ms":40})" << '\n';
+      out << R"({"video":"noisy_audio.mp4","frame":)" << i
+          << R"(,"pts_ms":0,"cls":"face","x1":100,"y1":100,"x2":200,"y2":180,"score":0.9,"src":"fake"})" << '\n';
+    }
+  }
+  o.fakeDetections = slow;
+  o.detectEveryFrame = true;
+  const RedactStats s = runRedact(o);
+  ASSERT_GT(s.audioPackets, 80);
+  ASSERT_GE(s.detect.busySec, 2.3);  // 60 x 40 ms
+  // Decoding 60 frames takes ~0.03 s; with the waiting counted it came to ~0.3 x the detect time.
+  EXPECT_LT(s.decode.busySec, 0.15 * s.detect.busySec) << "decode busy " << s.decode.busySec << " s, detect busy "
+                                                      << s.detect.busySec << " s";
+}
+
+// Failures on the decode and the encode thread: the run fails with the stage's own message and
+// leaves nothing behind, not even the output root this run created.
+TEST(RedactJob, ADecodeThreadFailureFailsTheRunAndLeavesNothing) {
+  RedactOptions o = baseOptions("redact_decode_fail");
+  o.input = test::rawH264Stream();  // frames without timestamps
+  try {
+    runRedact(o);
+    FAIL() << "expected VcError";
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find("has no timestamp"), std::string::npos) << e.what();
+  }
+  EXPECT_FALSE(fs::exists(o.outRoot / "raw"));
+  EXPECT_FALSE(fs::exists(o.outRoot));
+}
+
+TEST(RedactJob, AnEncodeThreadFailureFailsTheRunAndLeavesNothing) {
+  RedactOptions o = baseOptions("redact_encode_fail");
+  o.input = test::videoWithMulawAudio();  // the MP4 writer refuses this audio codec
+  try {
+    runRedact(o);
+    FAIL() << "expected VcError";
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find("audio codec pcm_mulaw cannot be stored in MP4"), std::string::npos) << e.what();
+  }
+  EXPECT_FALSE(fs::exists(o.outRoot / "video_mulaw"));
+  EXPECT_FALSE(fs::exists(o.outRoot));
+}
+
+fs::path failingDetections(const std::string& name) {
+  const fs::path path = test::tmpDir() / name;
+  std::ofstream(path) << R"({"frame":10,"fail":true})" << '\n';
+  return path;
+}
+
+TEST(RedactJob, AFailedRunRemovesTheOutputRootsItCreated) {
+  RedactOptions o = baseOptions("redact_nested_unused");
+  const fs::path top = test::tmpDir() / "redact_nested";
+  fs::remove_all(top);
+  o.outRoot = top / "a" / "b";
+  o.fakeDetections = failingDetections("redact_nested_fail.jsonl");
+  o.detectEveryFrame = true;
+  EXPECT_THROW(runRedact(o), VcError);
+  EXPECT_FALSE(fs::exists(top));
+}
+
+TEST(RedactJob, AFailedRunKeepsAnOutputRootThatExisted) {
+  RedactOptions o = baseOptions("redact_kept_root");
+  fs::create_directories(o.outRoot);
+  std::ofstream(o.outRoot / "notes.txt") << "keep me";
+  o.fakeDetections = failingDetections("redact_kept_root_fail.jsonl");
+  o.detectEveryFrame = true;
+  EXPECT_THROW(runRedact(o), VcError);
+  EXPECT_TRUE(fs::exists(o.outRoot / "notes.txt"));
+  EXPECT_FALSE(fs::exists(o.outRoot / kStem));
+
+  RedactOptions empty = baseOptions("redact_kept_empty_root");
+  fs::create_directories(empty.outRoot);
+  empty.fakeDetections = o.fakeDetections;
+  empty.detectEveryFrame = true;
+  EXPECT_THROW(runRedact(empty), VcError);
+  EXPECT_TRUE(fs::is_directory(empty.outRoot));  // it was there before the run
+}
+
+TEST(RedactJob, ReportsDecoderErrorsInTheStatsAndAsAWarning) {
+  RedactOptions o = baseOptions("redact_corrupt");
+  o.input = test::corruptFirstNalVideo();
+  const RedactStats s = runRedact(o);
+  EXPECT_GE(s.decodeErrors, 1);
+  EXPECT_GE(s.frames, 1);
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("decode_errors").get<int64_t>(), s.decodeErrors);
+  const std::vector<std::string> warnings = redactWarnings(s);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0].rfind("warning:", 0), 0u) << warnings[0];
+  EXPECT_NE(warnings[0].find(std::to_string(s.decodeErrors)), std::string::npos) << warnings[0];
+
+  RedactStats clean;
+  EXPECT_TRUE(redactWarnings(clean).empty());
+}
+
+TEST(RedactJob, QueueCapacityIsBoundedByBytesPerFrame) {
+  EXPECT_EQ(pipelineQueueCapacity(640, 360), 64u);
+  EXPECT_EQ(pipelineQueueCapacity(1920, 1080), 43u);  // 256 MiB / (1920 x 1080 x 3 bytes)
+  EXPECT_EQ(pipelineQueueCapacity(3840, 2160), 10u);
+  EXPECT_EQ(pipelineQueueCapacity(16384, 16384), 4u);  // never below 4
+  EXPECT_EQ(pipelineQueueCapacity(1, 1), 64u);         // never above 64
 }
 
 }  // namespace
