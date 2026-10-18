@@ -124,13 +124,19 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
     Every frame must carry the `reviewed` checkbox unless `allow_unreviewed` (training videos only:
     their pre-labels pass through, recorded as reviewed=false in gold_meta.csv).
     All JSONs are parsed and validated first; only then is the gold dir touched, so a bad file leaves an
-    earlier import intact. Label files of frames no longer in the review dir are removed.
+    earlier import intact. Label files of frames no longer in the review dir are removed, so a review
+    dir that is missing or holds no JSON is refused: it would otherwise empty the gold dir.
     """
     if (gold_dir / "processed.txt").exists():
         raise ValueError(f"{gold_dir} is a labels dir (it has processed.txt): fuse would overwrite its yolo/; use another --gold")
+    if not review_dir.is_dir():
+        raise ValueError(f"--review {review_dir} is not a directory")
+    json_files = sorted(review_dir.glob("*.json"))
+    if not json_files:
+        raise ValueError(f"--review {review_dir} has no *.json files to import")
     by_name = {f"{r.frame:06d}": r for r in refs}
     parsed = []
-    for path in sorted(review_dir.glob("*.json")):
+    for path in json_files:
         ref = by_name.get(path.stem)
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")

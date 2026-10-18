@@ -315,3 +315,31 @@ def test_import_review_refuses_a_labels_dir_as_gold_dir(tmp_path):
         import_review(review, read_frames_csv(frames), gold)
 
     assert sorted(p.name for p in gold.iterdir()) == ["processed.txt"]
+
+
+def _imported_gold(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A frames dir, a review dir holding one reviewed frame, and a gold dir imported from it."""
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [_FACE], {"day": True})
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+    return frames, review, gold
+
+
+def test_import_review_refuses_a_missing_or_empty_review_dir_and_leaves_gold_alone(tmp_path):
+    frames, review, gold = _imported_gold(tmp_path)
+    before = _snapshot(gold)
+    assert before  # a gold dir with a label file and gold_meta.csv worth losing
+    empty = tmp_path / "empty_review"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("not a LabelMe file")
+    not_a_dir = tmp_path / "review.json"
+    not_a_dir.write_text("{}")
+
+    with pytest.raises(ValueError, match=r"nowhere.*not a directory"):
+        import_review(tmp_path / "nowhere", read_frames_csv(frames), gold)
+    with pytest.raises(ValueError, match=r"empty_review.*no \*\.json"):
+        import_review(empty, read_frames_csv(frames), gold)
+    with pytest.raises(ValueError, match=r"review\.json.*not a directory"):
+        import_review(not_a_dir, read_frames_csv(frames), gold)
+
+    assert _snapshot(gold) == before
