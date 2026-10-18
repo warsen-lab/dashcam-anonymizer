@@ -124,7 +124,7 @@ vc_redact --input <video> --out <dir> (--model <dir> | --fake-detections <jsonl>
 - **Detector**：接口 `detect(const VideoFrame&) → vector<Box>`（原图坐标）。
   - `OnnxYoloDetector`：onnxruntime C++，优先 CoreML EP，失败退 CPU 并记录；libswscale 一步完成缩放 + 转 RGB24，按 §4.1 填充；输出 `[1, 4+nc, N]`（cx, cy, w, h, 各类分数）→ 阈值 → 按类 NMS → 除以 `r`。`model.json` 与 ONNX 输入形状、类别数不符时拒绝启动。
   - `FakeDetector`：读 `detections.jsonl` 契约格式，按帧号返回框，供测试。
-- **BoxTimeline**：按主设计 §7.2；插值按 PTS，PTS 不严格递增时退回按帧序号。
+- **BoxTimeline**：按主设计 §7.2；插值按 PTS，PTS 不严格递增时退回按帧序号。补充（实现评审后决定，召回优先）：某关键帧没检到的框作为“幽灵轨迹”按速度外推再保留一个间隔，仍参与下一关键帧的配对——单个关键帧漏检时用插值衔接，而不是只在两侧静态延长；配对代价取“有速度预测”与“零速度”两者较小值（急停的目标也能配上）；结尾外推最多一个间隔。
 - **Mosaic**：在 yuv420p 与 NV12 上直接像素化（Y、U、V 分别取块均值），块边长 = max(16px, ⌈框长边 / 8⌉)，块网格从框左上角起。
 - **VideoWriter**：与原片同编码格式（H.264 → `h264_videotoolbox`，HEVC → `hevc_videotoolbox`），目标码率取原片视频码率；VideoToolbox 打不开时退 `libx264` / `libx265` 并记录。PTS 透传、音频拷贝；写临时文件，成功后原子重命名，失败删除半成品。
 - **线程**：解码线程 → 有界队列 → 主线程（关键帧选择、检测、补框缓冲、打码）→ 有界队列 → 编码封装线程。缓冲帧用 `av_frame_clone` 共享引用。
