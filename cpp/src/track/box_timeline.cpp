@@ -189,7 +189,7 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
   }
   takeGreedily(std::move(strict), false);
 
-  // Second pass, over what is left: each axis in the larger box size along it, similar sizes only.
+  // Second pass, over what is left: both axes in the largest side of the two boxes, similar sizes only.
   std::vector<Candidate> loose;
   for (size_t i = 0; i < tracks_.size(); ++i) {
     if (usedTrack[i]) continue;
@@ -198,10 +198,9 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
       const Box& b = next.boxes[j];
       if (usedNext[j] || a.cls != b.cls || !similarSizes(a, b)) continue;
       const Point actual = centerOf(b);
-      const double w = std::max(1.0, std::max(widthOf(a), widthOf(b)));
-      const double h = std::max(1.0, std::max(heightOf(a), heightOf(b)));
+      const double side = std::max({1.0, widthOf(a), heightOf(a), widthOf(b), heightOf(b)});
       const double cost = cheapest(tracks_[i], [&](Point p) {
-        return std::max(std::abs(actual.x - p.x) / w, std::abs(actual.y - p.y) / h);
+        return std::max(std::abs(actual.x - p.x), std::abs(actual.y - p.y)) / side;
       });
       if (cost <= config_.matchMaxDistanceLoose) loose.push_back({cost, i, j});
     }
@@ -281,11 +280,21 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
       const Point b = centerOf(to);
       add(masks[k], lerp(track.box, to, t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
           atKey ? keyOrigin : MaskOrigin::Interpolated);
-      // A loose pairing may be wrong: keep what the track would have masked unmatched.
-      if (matched[i]->loose) sweep(masks[k], track, since, steps, MaskOrigin::Extended);
-      // A ghost's position was a guess, and a loose pairing may be wrong: hold the box it was matched
-      // with over the whole interval too, so a target that stopped is covered where it really is.
-      if (track.missed > 0 || matched[i]->loose) add(masks[k], to, 0.0, 0.0, MaskOrigin::Extended);
+      // A loose pairing may be wrong, and so may a first one (no velocity to check it against): keep
+      // what the track would have masked unmatched.
+      const bool unsure = matched[i]->loose || !track.velocity;
+      if (unsure) sweep(masks[k], track, since, steps, MaskOrigin::Extended);
+      // ... and, as for a ghost (its position was a guess), hold the box it was matched with over the
+      // whole interval, so a target that stopped is covered where it really is.
+      if (unsure || track.missed > 0) add(masks[k], to, 0.0, 0.0, MaskOrigin::Extended);
+      // A ghost is also interpolated from the target's last real detection: one that turned round
+      // after it is not where the ghost guessed.
+      if (track.missed > 0) {
+        const Point c = centerOf(track.anchor);
+        const double span = track.anchorSteps + steps;
+        add(masks[k], lerp(track.anchor, to, (track.anchorSteps + since) / span), std::abs(b.x - c.x),
+            std::abs(b.y - c.y), MaskOrigin::Interpolated);
+      }
     }
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       if (!nextUsed[j]) add(masks[k], next.boxes[j], 0.0, 0.0, MaskOrigin::Extended);

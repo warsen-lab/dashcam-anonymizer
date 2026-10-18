@@ -38,7 +38,7 @@ struct TimelineConfig {
   double expandFraction = 0.15;       // margin per side, fraction of the box width / height
   double motionExpandFraction = 0.5;  // extra margin per side, fraction of the displacement per interval
   double minBoxPx = 16.0;             // masks grow to at least this width and height
-  double matchMaxDistanceLoose = 6.0; // second pass: max |dx| / larger width and |dy| / larger height
+  double matchMaxDistanceLoose = 6.0; // second pass: max |dx| and |dy| / the largest side of the two boxes
 };
 
 // Turns detections on keyframes into masks for every frame (main spec §7.2): boxes matched across
@@ -48,19 +48,21 @@ struct TimelineConfig {
 // target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
 // matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar
 // size (each side within a factor of 3 of the other's) whose centres are at most
-// matchMaxDistanceLoose of the larger width apart in x and of the larger height in y: a target that
-// moves several box widths between keyframes. A loose match is interpolated AND keeps the masks the
-// track and the box would have had unmatched (over the whole interval), so a wrong loose pairing can
-// add masks but never remove one; it gives the next interval a velocity like any match.
+// matchMaxDistanceLoose times the largest side of the two boxes apart along each axis: a target that
+// moves several box widths between keyframes. A loose match, and a first-pass match of a track that
+// has no velocity yet (nothing to check the pairing against), is interpolated AND keeps the masks the
+// track and the box would have had unmatched (over the whole interval), so a wrong pairing can add
+// masks but never remove one. Any match gives the next interval a velocity.
 //
 // An unmatched track with a velocity masks the region it sweeps: on each frame the bounding box of
 // where the target was last detected and where the velocity takes it, so a target that stopped or
 // turned back stays covered. A box missed at one keyframe is kept for one more interval as a ghost
 // track (moved along its velocity, masked as `extended`, swept from its last real detection) and can
 // still be matched at the next keyframe; a second miss drops it. A ghost that is matched also gets
-// the new box held in place over the whole interval (`extended`, next to the interpolated mask): its
-// position was a guess, and a target that stopped after the missed keyframe must stay covered. The
-// velocity of a match is measured from the target's last real detection. Feed keyframes in order;
+// the new box held in place over the whole interval (`extended`, next to the interpolated mask) and a
+// second interpolation from the target's last real detection: its position was a guess, and a target
+// that stopped or turned round after the missed keyframe must stay covered. The velocity of a match is
+// measured from the target's last real detection. Feed keyframes in order;
 // frames are identified by decode index.
 class BoxTimeline {
  public:

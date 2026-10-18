@@ -122,9 +122,9 @@ TEST(BoxTimeline, InterpolatesMatchedBoxes) {
   EXPECT_TRUE(timeline.advance({}, key(0, {face(100, 100, 120, 120)})).empty());
   const auto masks = timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   ASSERT_EQ(masks.size(), 12u);
-  ASSERT_EQ(masks[0].size(), 1u);
+  ASSERT_EQ(masks[0].size(), 3u);  // a first pairing: the interpolation, then both end boxes held
   expectBox(masks[0][0], 100, 100, 120, 120, MaskOrigin::Detected);
-  ASSERT_EQ(masks[6].size(), 1u);
+  ASSERT_EQ(masks[6].size(), 3u);
   expectBox(masks[6][0], 106, 100, 126, 120, MaskOrigin::Interpolated);
 }
 
@@ -132,7 +132,7 @@ TEST(BoxTimeline, FallsBackToFrameIndexWhenTimestampsStall) {
   BoxTimeline timeline(exact(), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 120, 120)}, 0.0));
   const auto masks = timeline.advance(frames(0, 12, 0.0), key(12, {face(112, 100, 132, 120)}, 0.0));
-  ASSERT_EQ(masks[6].size(), 1u);
+  ASSERT_EQ(masks[6].size(), 3u);  // first pairing: interpolation + both end boxes
   expectBox(masks[6][0], 106, 100, 126, 120, MaskOrigin::Interpolated);
 }
 
@@ -183,7 +183,7 @@ TEST(BoxTimeline, ExpandsByFractionAndMotionAndEnforcesTheMinimumSize) {
   timeline.advance({}, key(0, {face(100, 100, 120, 110)}));
   const auto masks = timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 110)}));
   // x margin 0.15 * 20 + 0.5 * 12 = 9; y margin 1.5 gives 13 px, grown to 16 around y = 105
-  ASSERT_EQ(masks[0].size(), 1u);
+  ASSERT_EQ(masks[0].size(), 3u);  // first pairing: interpolation + both end boxes
   expectBox(masks[0][0], 91, 97, 129, 113, MaskOrigin::Detected);
 }
 
@@ -191,7 +191,7 @@ TEST(BoxTimeline, ClipsToTheFrame) {
   BoxTimeline timeline(TimelineConfig{1.0, 0.0, 0.0, 16.0}, 1000, 1000);
   timeline.advance({}, key(0, {face(0, 0, 4, 4)}));
   const auto masks = timeline.advance(frames(0, 6), key(6, {face(0, 0, 4, 4)}));
-  ASSERT_EQ(masks[0].size(), 1u);
+  ASSERT_EQ(masks[0].size(), 3u);  // first pairing: interpolation + both (identical) end boxes
   expectBox(masks[0][0], 0, 0, 10, 10, MaskOrigin::Detected);
 }
 
@@ -226,14 +226,17 @@ TEST(BoxTimeline, BridgesOneMissedKeyframeWithAGhostTrack) {
   expectBox(gap[6][0], 112, 100, 138, 120, MaskOrigin::Extended);
 
   const auto bridged = timeline.advance(frames(24, 36), key(36, {face(136, 100, 156, 120)}));
-  // The ghost is matched, not duplicated: its interpolation plus the next box held in place.
-  for (const auto& m : bridged) EXPECT_EQ(m.size(), 2u);
-  ASSERT_EQ(bridged[0].size(), 2u);  // frame 24: the ghost's predicted position
+  // The ghost is matched, not duplicated: its interpolation, the next box held in place and the
+  // interpolation from its last detection (112 at index 12; here the same path).
+  for (const auto& m : bridged) EXPECT_EQ(m.size(), 3u);
+  ASSERT_EQ(bridged[0].size(), 3u);  // frame 24: the ghost's predicted position
   expectBox(bridged[0][0], 124, 100, 144, 120, MaskOrigin::Extended);
   expectBox(bridged[0][1], 136, 100, 156, 120, MaskOrigin::Extended);
-  ASSERT_EQ(bridged[6].size(), 2u);  // frame 30
+  expectBox(bridged[0][2], 124, 100, 144, 120, MaskOrigin::Interpolated);
+  ASSERT_EQ(bridged[6].size(), 3u);  // frame 30
   expectBox(bridged[6][0], 130, 100, 150, 120, MaskOrigin::Interpolated);
   expectBox(bridged[6][1], 136, 100, 156, 120, MaskOrigin::Extended);
+  expectBox(bridged[6][2], 130, 100, 150, 120, MaskOrigin::Interpolated);
 }
 
 TEST(BoxTimeline, CoversATargetThatStopsAfterAMissedKeyframe) {
@@ -284,7 +287,7 @@ TEST(BoxTimeline, ExpandsForMotionInAnyDirection) {
   BoxTimeline timeline(TimelineConfig{1.0, 0.0, 0.5, 0.0}, 1000, 1000);
   timeline.advance({}, key(0, {face(112, 112, 132, 132)}));
   const auto masks = timeline.advance(frames(0, 12), key(12, {face(100, 100, 120, 120)}));
-  ASSERT_EQ(masks[0].size(), 1u);
+  ASSERT_EQ(masks[0].size(), 3u);  // first pairing: interpolation + both end boxes
   // displacement 12 px in x and in y, moving left / up: 0.5 * 12 = 6 px on every side
   expectBox(masks[0][0], 106, 106, 138, 138, MaskOrigin::Detected);
 }
@@ -307,20 +310,17 @@ TEST(BoxTimeline, ExtrapolatesADisappearingBoxAlongItsVelocity) {
 
 TEST(BoxTimeline, MatchesGreedilyByCost) {
   // Both previous faces are candidates for the next one (costs 1.25 and 0.25, limit 2.0): the
-  // cheaper pair wins and the other face is extended.
+  // cheaper pair wins (a first pairing: interpolated, both end boxes held) and the other face is
+  // extended.
   BoxTimeline timeline(TimelineConfig{2.0, 0.0, 0.0, 0.0}, 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 120, 120), face(130, 100, 150, 120)}));
   const auto masks = timeline.advance(frames(0, 12), key(12, {face(125, 100, 145, 120)}));
-  ASSERT_EQ(masks[6].size(), 2u);
-  const auto count = [&](MaskOrigin origin) {
-    return std::count_if(masks[6].begin(), masks[6].end(), [origin](const MaskBox& m) { return m.origin == origin; });
-  };
-  EXPECT_EQ(count(MaskOrigin::Interpolated), 1);
-  EXPECT_EQ(count(MaskOrigin::Extended), 1);
-  for (const MaskBox& m : masks[6]) {
-    if (m.origin == MaskOrigin::Interpolated) expectBox(m, 127.5f, 100, 147.5f, 120, MaskOrigin::Interpolated);
-    if (m.origin == MaskOrigin::Extended) expectBox(m, 100, 100, 120, 120, MaskOrigin::Extended);
-  }
+  ASSERT_EQ(masks[6].size(), 4u);
+  EXPECT_EQ(countOrigin(masks[6], MaskOrigin::Interpolated), 1u);
+  expectBox(masks[6][0], 100, 100, 120, 120, MaskOrigin::Extended);  // the face left unmatched
+  expectBox(masks[6][1], 127.5f, 100, 147.5f, 120, MaskOrigin::Interpolated);
+  expectBox(masks[6][2], 130, 100, 150, 120, MaskOrigin::Extended);
+  expectBox(masks[6][3], 125, 100, 145, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, InterpolatesByPtsForUnevenTimestamps) {
@@ -329,7 +329,7 @@ TEST(BoxTimeline, InterpolatesByPtsForUnevenTimestamps) {
   const std::vector<FrameTime> uneven = {{0, 0.0}, {1, 10.0}, {2, 20.0}, {3, 200.0}, {4, 210.0}};
   const auto masks = timeline.advance(uneven, Keyframe{{5, 270.0}, {face(127, 100, 157, 130)}});
   ASSERT_EQ(masks.size(), 5u);
-  ASSERT_EQ(masks[3].size(), 1u);  // pts 200 of 270: 100 + 27 * 200 / 270
+  ASSERT_EQ(masks[3].size(), 3u);  // pts 200 of 270: 100 + 27 * 200 / 270 (+ both end boxes)
   expectBox(masks[3][0], 120, 100, 150, 130, MaskOrigin::Interpolated);
 
   // A repeated pts is not usable: positions fall back to the frame index.
@@ -338,11 +338,11 @@ TEST(BoxTimeline, InterpolatesByPtsForUnevenTimestamps) {
   const std::vector<FrameTime> repeated = {{0, 0.0}, {1, 10.0}, {2, 10.0}, {3, 30.0}};
   const auto byIndex = stalled.advance(repeated, Keyframe{{4, 100.0}, {face(124, 100, 154, 130)}});
   ASSERT_EQ(byIndex.size(), 4u);
-  ASSERT_EQ(byIndex[1].size(), 1u);
+  ASSERT_EQ(byIndex[1].size(), 3u);
   expectBox(byIndex[1][0], 106, 100, 136, 130, MaskOrigin::Interpolated);
-  ASSERT_EQ(byIndex[2].size(), 1u);
+  ASSERT_EQ(byIndex[2].size(), 3u);
   expectBox(byIndex[2][0], 112, 100, 142, 130, MaskOrigin::Interpolated);
-  ASSERT_EQ(byIndex[3].size(), 1u);
+  ASSERT_EQ(byIndex[3].size(), 3u);
   expectBox(byIndex[3][0], 118, 100, 148, 130, MaskOrigin::Interpolated);
 }
 
@@ -351,9 +351,9 @@ TEST(BoxTimeline, ClipsAtTheRightAndBottomOfANonSquareFrame) {
   timeline.advance({}, key(0, {face(630, 350, 640, 360)}));
   const auto masks = timeline.advance(frames(0, 6), key(6, {face(630, 350, 640, 360)}));
   // 10 px grown to 16 around the centre (635, 355) is 627..643 x 347..363, clipped to 640 x 360
-  ASSERT_EQ(masks[0].size(), 1u);
+  ASSERT_EQ(masks[0].size(), 3u);  // first pairing: interpolation + both end boxes
   expectBox(masks[0][0], 627, 347, 640, 360, MaskOrigin::Detected);
-  ASSERT_EQ(masks[3].size(), 1u);
+  ASSERT_EQ(masks[3].size(), 3u);
   expectBox(masks[3][0], 627, 347, 640, 360, MaskOrigin::Interpolated);
 }
 
@@ -441,7 +441,7 @@ TEST(BoxTimeline, OneTrackMatchesAtMostOneBox) {
   BoxTimeline timeline(exact(), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
   const auto masks = timeline.advance(frames(0, 12), key(12, {face(104, 100, 124, 120), face(108, 100, 128, 120)}));
-  ASSERT_EQ(masks[6].size(), 2u);
+  ASSERT_EQ(masks[6].size(), 4u);  // the pairing (interpolation + both end boxes) and the other box
   const auto interpolated = std::count_if(masks[6].begin(), masks[6].end(),
                                           [](const MaskBox& m) { return m.origin == MaskOrigin::Interpolated; });
   EXPECT_EQ(interpolated, 1);
@@ -526,7 +526,7 @@ TEST(BoxTimeline, RejectsNonFiniteKeyframeBoxes) {
       EXPECT_THROW(later.advance(frames(0, 12), key(12, {face(100, 100, 120, 120), box})), std::invalid_argument);
       const auto masks = later.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
       ASSERT_EQ(masks.size(), 12u);
-      ASSERT_EQ(masks[6].size(), 1u);
+      ASSERT_EQ(masks[6].size(), 3u);  // first pairing: interpolation + both end boxes
       expectBox(masks[6][0], 106, 100, 126, 120, MaskOrigin::Interpolated);
     }
   }
@@ -554,10 +554,10 @@ TEST(BoxTimeline, FallsBackToTheIndexForAFrameWithoutAUsableTimestamp) {
   const auto masks = timeline.advance(broken, Keyframe{{5, 270.0}, {face(127, 100, 157, 130)}});
   ASSERT_EQ(masks.size(), 5u);
   expectFinite(masks);
-  // By index (pts alone would put frame 1 at 101.0): 100 + 27 * k / 5.
-  ASSERT_EQ(masks[1].size(), 1u);
+  // By index (pts alone would put frame 1 at 101.0): 100 + 27 * k / 5 (+ both end boxes).
+  ASSERT_EQ(masks[1].size(), 3u);
   expectBox(masks[1][0], 105.4f, 100, 135.4f, 130, MaskOrigin::Interpolated);
-  ASSERT_EQ(masks[3].size(), 1u);
+  ASSERT_EQ(masks[3].size(), 3u);
   expectBox(masks[3][0], 116.2f, 100, 146.2f, 130, MaskOrigin::Interpolated);
 }
 
@@ -572,7 +572,7 @@ TEST(BoxTimeline, FallsBackToTheIndexWhenAFrameLiesOutsideTheKeyframeTimestamps)
   };
   // All inside: by pts, frame 1 sits at (110 - 100) / 170 of the interval.
   auto masks = run({100, 110, 120, 130, 140});
-  ASSERT_EQ(masks[1].size(), 1u);
+  ASSERT_EQ(masks[1].size(), 3u);  // first pairing: interpolation + both end boxes
   expectBox(masks[1][0], 100.0f + 27.0f * 10.0f / 170.0f, 100, 130.0f + 27.0f * 10.0f / 170.0f, 130,
             MaskOrigin::Interpolated);
   // A frame before the previous keyframe's pts, at the next keyframe's pts, or after it: by index
@@ -582,7 +582,7 @@ TEST(BoxTimeline, FallsBackToTheIndexWhenAFrameLiesOutsideTheKeyframeTimestamps)
                                          std::vector<double>{100, 110, 120, 130, 300}}) {
     masks = run(pts);
     ASSERT_EQ(masks.size(), 5u);
-    ASSERT_EQ(masks[1].size(), 1u);
+    ASSERT_EQ(masks[1].size(), 3u);
     expectBox(masks[1][0], 105.4f, 100, 135.4f, 130, MaskOrigin::Interpolated);
   }
 }
@@ -597,8 +597,10 @@ TEST(BoxTimeline, NeverEmitsAMaskWithNonFiniteCoordinates) {
   ASSERT_EQ(masks.size(), 6u);
   expectFinite(masks);
   for (size_t k = 0; k < masks.size(); ++k) {
-    ASSERT_EQ(masks[k].size(), 1u) << "frame offset " << k;
+    ASSERT_EQ(masks[k].size(), 3u) << "frame offset " << k;  // first pairing: + both end boxes
     expectBox(masks[k][0], 0, 100, 1000, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+    expectBox(masks[k][1], 0, 100, 1000, 120, MaskOrigin::Extended);
+    expectBox(masks[k][2], 0, 100, 1000, 120, MaskOrigin::Extended);
   }
   const auto tail = timeline.finish(frames(6, 12));
   ASSERT_EQ(tail.size(), 6u);
@@ -706,10 +708,12 @@ TEST(BoxTimeline, ALooseMatchNeedsCloseEnoughBoxesOfASimilarSize) {
     const auto masks = timeline.advance(frames(0, 12), key(12, {to}));
     return countOrigin(masks[6], MaskOrigin::Interpolated);
   };
-  // 6 widths right and 6 heights down of a 20 x 10 box: matched, 6.5 widths: not.
+  // Both axes count in the larger side of the two boxes (20 here): 6 sides right and 3 down of a
+  // 20 x 10 box is matched, and so is 6.5 heights down; 6.5 sides either way is not.
   EXPECT_EQ(interpolated(exact(), face(100, 100, 120, 110), face(220, 160, 240, 170)), 1u);
+  EXPECT_EQ(interpolated(exact(), face(100, 100, 120, 110), face(100, 165, 120, 175)), 1u);
   EXPECT_EQ(interpolated(exact(), face(100, 100, 120, 110), face(230, 100, 250, 110)), 0u);
-  EXPECT_EQ(interpolated(exact(), face(100, 100, 120, 110), face(100, 165, 120, 175)), 0u);
+  EXPECT_EQ(interpolated(exact(), face(100, 100, 120, 110), face(100, 230, 120, 240)), 0u);
   // The gate is the configured value.
   TimelineConfig tight = exact();
   tight.matchMaxDistanceLoose = 2.0;
@@ -769,6 +773,96 @@ TEST(BoxTimeline, AnUnmatchedTrackMasksTheRegionItSweeps) {
   const auto stoppedAtTheEnd = defaults.finish(frames(24, 36));
   for (size_t k = 0; k < stoppedAtTheEnd.size(); ++k) {
     EXPECT_GE(coverage(stoppedAtTheEnd[k], 500, 500, 548, 516), 0.999) << "frame " << 24 + k;
+  }
+}
+
+// A plate moving vertically several of its (small) heights per interval: the second pass measures
+// both axes in the larger side of the boxes, so 9 heights of a 24 x 8 plate are 3 sides.
+TEST(BoxTimeline, CoversPlatesMovingVertically) {
+  for (const double heights : {3.0, 6.0, 9.0}) {
+    SCOPED_TRACE(std::to_string(heights) + " heights per interval");
+    const Mover mover{kPlate, 500, 200, 24, 8, 0, heights * 8 / kStep};
+    BoxTimeline timeline(TimelineConfig{}, 4096, 2160);
+    const auto masks = runPerfectDetector(timeline, {mover}, 8);
+    int uncovered = 0;
+    for (size_t f = 0; f < masks.size(); ++f) {
+      if (coverage(masks[f], mover.at(static_cast<int64_t>(f))) < 0.8) ++uncovered;
+    }
+    EXPECT_EQ(uncovered, 0);
+    for (int64_t f = kStep; f < 8 * kStep; ++f) {
+      if (f % kStep == 0) continue;
+      EXPECT_GE(countOrigin(masks[static_cast<size_t>(f)], MaskOrigin::Interpolated), 1u) << "frame " << f;
+    }
+  }
+}
+
+// Two faces one width apart, driving through each other within their first interval: with no
+// velocity yet the first pass pairs each with the other's new box (centres 1 side apart, while their
+// own are 2 sides away). A first pairing keeps both end boxes over the interval, so both stay covered
+// by the positions of the masks alone (no margins), and with the default margins.
+TEST(BoxTimeline, CoversTwoNearbyTargetsPairedTheWrongWayRound) {
+  const Mover right{kFace, 400, 100, 20, 20, 40.0 / kStep, 0};
+  const Mover left{kFace, 420, 100, 20, 20, -40.0 / kStep, 0};
+  for (const TimelineConfig& config : {exact(), TimelineConfig{}}) {
+    SCOPED_TRACE(config.expandFraction == 0 ? "no margins" : "default margins");
+    BoxTimeline timeline(config, 1920, 1080);
+    const auto masks = runPerfectDetector(timeline, {right, left}, 3);
+    for (size_t f = 0; f < masks.size(); ++f) {
+      const auto frame = static_cast<int64_t>(f);
+      EXPECT_GE(coverage(masks[f], right.at(frame)), 0.8) << "right-moving face, frame " << f;
+      EXPECT_GE(coverage(masks[f], left.at(frame)), 0.8) << "left-moving face, frame " << f;
+    }
+  }
+}
+
+// A first pairing (no velocity yet) is interpolated and holds both end boxes; once there is a
+// velocity, a first-pass match is interpolated alone.
+TEST(BoxTimeline, AFirstPairingHoldsBothEndBoxes) {
+  BoxTimeline timeline(exact(), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  const auto first = timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
+  ASSERT_EQ(first[6].size(), 3u);  // frame 6
+  expectBox(first[6][0], 106, 100, 126, 120, MaskOrigin::Interpolated);
+  expectBox(first[6][1], 100, 100, 120, 120, MaskOrigin::Extended);
+  expectBox(first[6][2], 112, 100, 132, 120, MaskOrigin::Extended);
+  const auto second = timeline.advance(frames(12, 24), key(24, {face(124, 100, 144, 120)}));
+  ASSERT_EQ(second[6].size(), 1u);  // frame 18
+  expectBox(second[6][0], 118, 100, 138, 120, MaskOrigin::Interpolated);
+}
+
+// A target that turns round after keyframe 12, is missed at 24 and found again at 36: the ghost's
+// guessed position (it kept going) is wrong, the interpolation from its last real detection is right.
+TEST(BoxTimeline, AMatchedGhostIsAlsoInterpolatedFromItsLastDetection) {
+  BoxTimeline timeline(exact(), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));  // v = 1 px per frame
+  timeline.advance(frames(12, 24), key(24, {}));  // really back at 100 by now; the ghost guesses 124
+  const auto masks = timeline.advance(frames(24, 36), key(36, {face(88, 100, 108, 120)}));
+  ASSERT_EQ(masks.size(), 12u);
+  for (size_t k = 0; k < masks.size(); ++k) {
+    const float x = 100 - static_cast<float>(k);
+    EXPECT_TRUE(covers(masks[k], x, 100, x + 20, 120)) << "frame " << 24 + k;
+  }
+  // From 112 at index 12 to 88 at index 36: frame 30 is 18 of 24 frames along.
+  ASSERT_FALSE(masks[6].empty());
+  expectBox(masks[6].back(), 94, 100, 114, 120, MaskOrigin::Interpolated);
+
+  // The reviewer's probe: a 40 x 14 plate at 1 to 6 px per frame turning round after keyframe 12,
+  // missed at 24, found at 36. Every frame from the re-detection back to the missed keyframe is covered.
+  for (const double v : {1.0, 2.0, 3.0, 4.0, 6.0}) {
+    SCOPED_TRACE("v = " + std::to_string(v) + " px per frame");
+    const auto x = [v](int64_t f) { return 600 + v * static_cast<double>(f <= kStep ? f : 2 * kStep - f); };
+    const auto plate = [&](int64_t f) {
+      return Box{kPlate, static_cast<float>(x(f)), 500, static_cast<float>(x(f) + 40), 514, 0.9f};
+    };
+    BoxTimeline probe(TimelineConfig{}, 1920, 1080);
+    probe.advance({}, key(0, {plate(0)}));
+    probe.advance(frames(0, kStep), key(kStep, {plate(kStep)}));
+    probe.advance(frames(kStep, 2 * kStep), key(2 * kStep, {}));
+    const auto found = probe.advance(frames(2 * kStep, 3 * kStep), key(3 * kStep, {plate(3 * kStep)}));
+    for (size_t k = 0; k < found.size(); ++k) {
+      EXPECT_GE(coverage(found[k], plate(2 * kStep + static_cast<int64_t>(k))), 0.8) << "frame " << 2 * kStep + k;
+    }
   }
 }
 
