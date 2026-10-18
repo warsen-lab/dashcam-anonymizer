@@ -55,6 +55,7 @@ find_package(Threads REQUIRED)
 add_library(vc_redact_lib STATIC
   apps/vc_redact/records.cpp
   apps/vc_redact/redact_config.cpp
+  apps/vc_redact/redact_job.cpp
 )
 target_include_directories(vc_redact_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
 target_link_libraries(vc_redact_lib PUBLIC vc_detect_lib Threads::Threads)

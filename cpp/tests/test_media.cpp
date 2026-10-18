@@ -67,6 +67,13 @@ fs::path videoWithAudio() {
                    "-c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -shortest");
 }
 
+fs::path noisyVideoWithAudio() {
+  return makeMedia("noisy_audio.mp4",
+                   "-f lavfi -i \"testsrc2=s=640x360:r=30:d=2,noise=alls=40:allf=t\" "
+                   "-f lavfi -i sine=f=440:d=2 -c:v libx264 -pix_fmt yuv420p -g 30 -b:v 4M "
+                   "-c:a aac -shortest");
+}
+
 fs::path videoWithSubtitles() {
   const fs::path srt = tmpDir() / "subs.srt";
   if (!fs::exists(srt)) {

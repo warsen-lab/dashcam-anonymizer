@@ -25,6 +25,9 @@ std::filesystem::path tenBitVideo();
 std::filesystem::path audioOnlyFile();
 // 2 s, 640x360 @ 30 fps H.264 (60 frames) with 2 s of AAC audio.
 std::filesystem::path videoWithAudio();
+// 2 s, 640x360 @ 30 fps H.264 (4 Mb/s) of testsrc2 with strong temporal noise, plus AAC audio:
+// every region has detail, so pixelation is measurable.
+std::filesystem::path noisyVideoWithAudio();
 // 1 s, 320x240 @ 30 fps H.264 with a mov_text subtitle stream.
 std::filesystem::path videoWithSubtitles();
 // Number of streams of `type` in a media file (opened with libavformat).
