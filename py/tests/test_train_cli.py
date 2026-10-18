@@ -1,4 +1,5 @@
 import csv
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from vc_label.contracts import Box, to_yolo_lines
 from vc_train import export as export_mod
 from vc_train import train as train_mod
 from vc_train.cli import main
-from vc_train.export import ConsistencyReport
+from vc_train.export import ConsistencyReport, match_boxes
 from vc_train.offline import YOLO_WEIGHTS
 
 PY_DIR = Path(__file__).resolve().parents[1]
@@ -184,7 +185,7 @@ def test_export_writes_onnx_and_passes_consistency_check(tmp_path, capsys, monke
 
     def fake_check(weights, onnx_path, images, **kwargs):
         seen.update(check_weights=weights, onnx=onnx_path, images=list(images))
-        return ConsistencyReport(images=len(images), boxes=7, max_diff_px=0.25, unmatched=0)
+        return ConsistencyReport(images=len(images), boxes=7, matched=6, max_diff_px=0.25, unmatched_confident=0, unmatched_low=1)
 
     monkeypatch.setattr(export_mod, "export_onnx", fake_export)
     monkeypatch.setattr(export_mod, "check_consistency", fake_check)
@@ -201,7 +202,7 @@ def test_export_writes_onnx_and_passes_consistency_check(tmp_path, capsys, monke
     # 50 frames, 5 checks: round(i * 49 / 4). i = 2 gives 24.5, which rounds half up to 25 (Python round() would give 24)
     assert [p.name for p in seen["images"]] == ["000000.jpg", "000012.jpg", "000025.jpg", "000037.jpg", "000049.jpg"]
     assert "export: " in out
-    assert "check: 5 images, 7 boxes, max diff 0.250 px, 0 unmatched" in out
+    assert "check: 5 images, 7 boxes, 6 matched, max diff 0.250 px, 0 unmatched confident, 1 unmatched low" in out
 
 
 def test_export_exits_1_when_the_consistency_check_fails(tmp_path, capsys, monkeypatch):
@@ -210,11 +211,13 @@ def test_export_exits_1_when_the_consistency_check_fails(tmp_path, capsys, monke
     monkeypatch.setattr(export_mod, "export_onnx", lambda weights, out_dir, *a, **k: out_dir / "model.onnx")
     monkeypatch.setattr(
         export_mod, "check_consistency",
-        lambda weights, onnx_path, images, **k: ConsistencyReport(images=len(images), boxes=3, max_diff_px=4.5, unmatched=2),
+        lambda weights, onnx_path, images, **k: ConsistencyReport(
+            images=len(images), boxes=3, matched=1, max_diff_px=4.5, unmatched_confident=2, unmatched_low=1
+        ),
     )
     code = main(["export", "--run", str(tmp_path / "run"), "--check-frames", str(tmp_path / "frames")])
     assert code == 1
-    assert "2 unmatched" in capsys.readouterr().out
+    assert "2 unmatched confident, 1 unmatched low" in capsys.readouterr().out
 
 
 def _sampled_check_images(tmp_path, monkeypatch, frame_count, check_count):
@@ -229,7 +232,7 @@ def _sampled_check_images(tmp_path, monkeypatch, frame_count, check_count):
 
     def fake_check(weights, onnx_path, images, **kwargs):
         seen["images"] = [p.name for p in images]
-        return ConsistencyReport(images=len(images), boxes=0, max_diff_px=0.0, unmatched=0)
+        return ConsistencyReport(images=len(images), boxes=1, matched=1, max_diff_px=0.0, unmatched_confident=0, unmatched_low=0)
 
     monkeypatch.setattr(export_mod, "export_onnx", fake_export)
     monkeypatch.setattr(export_mod, "check_consistency", fake_check)
@@ -300,3 +303,143 @@ def test_python_dash_m_runs_the_cli(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "dataset" in result.stdout and "export" in result.stdout
+
+
+# --- offline environment (no ultralytics needed): it must be in place before anything can import ultralytics ---
+
+class _Reached(Exception):
+    """Raised by a stub standing in for the first call that could import ultralytics."""
+
+
+@pytest.fixture
+def online_env(monkeypatch):
+    """A shell that has not been set up for offline use: YOLO_OFFLINE unset, nothing for the code under test to rely on."""
+    monkeypatch.setenv("YOLO_OFFLINE", "")
+    monkeypatch.delenv("YOLO_OFFLINE")
+
+
+def test_export_onnx_sets_the_offline_env_before_unpickling_the_checkpoint(tmp_path, monkeypatch, online_env):
+    import torch
+
+    seen = {}
+
+    def fake_load(*args, **kwargs):
+        # unpickling a checkpoint imports ultralytics.nn.tasks, which runs its is_online() check at import time
+        seen["offline"] = os.environ.get("YOLO_OFFLINE")
+        raise _Reached
+
+    monkeypatch.setattr(torch, "load", fake_load)
+    with pytest.raises(_Reached):
+        export_mod.export_onnx(tmp_path / "best.pt", tmp_path / "model", 64, 64)
+    assert seen["offline"] == "1"
+
+
+def test_check_consistency_sets_the_offline_env_before_loading_the_model(tmp_path, monkeypatch, online_env):
+    seen = {}
+
+    def fake_load_yolo(weights):
+        seen["offline"] = os.environ.get("YOLO_OFFLINE")
+        raise _Reached
+
+    monkeypatch.setattr(export_mod, "load_yolo", fake_load_yolo)
+    with pytest.raises(_Reached):
+        export_mod.check_consistency(tmp_path / "best.pt", tmp_path / "model.onnx", [])
+    assert seen["offline"] == "1"
+
+
+def test_check_consistency_sets_the_offline_env_before_importing_anything_heavy(tmp_path, monkeypatch, online_env):
+    seen = {}
+    real_import = __import__
+
+    def spy_import(name, *args, **kwargs):
+        if name in ("torch", "onnxruntime"):
+            seen.setdefault("offline", os.environ.get("YOLO_OFFLINE"))
+        return real_import(name, *args, **kwargs)
+
+    def fake_load_yolo(weights):
+        raise _Reached
+
+    monkeypatch.setattr("builtins.__import__", spy_import)
+    monkeypatch.setattr(export_mod, "load_yolo", fake_load_yolo)
+    with pytest.raises(_Reached):
+        export_mod.check_consistency(tmp_path / "best.pt", tmp_path / "model.onnx", [])
+    assert seen["offline"] == "1"
+
+
+def test_cli_main_sets_the_offline_env_first(tmp_path, online_env):
+    # a failing command still ends in main(), so the env is checked after an error exit
+    assert main(["export", "--run", str(tmp_path / "run")]) == 2
+    assert os.environ.get("YOLO_OFFLINE") == "1"
+    assert os.environ.get("YOLO_AUTOINSTALL") == "false"
+
+
+def test_no_vc_train_module_imports_ultralytics_when_imported():
+    code = (
+        "import sys\n"
+        "import vc_train.cli, vc_train.dataset, vc_train.export, vc_train.geometry, vc_train.offline, vc_train.train\n"
+        "sys.exit(1 if 'ultralytics' in sys.modules else 0)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={"PYTHONPATH": str(PY_DIR), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+# --- consistency report (aligned with vc_eval.consistency: only confident disagreements fail) ---
+
+CONFIDENT_SCORE = 0.3
+
+
+def _box(cls="face", x=0.0, score=0.9):
+    return Box(cls, x, 0.0, x + 10.0, 10.0, score=score)
+
+
+def test_match_boxes_counts_matched_boxes_and_the_worst_corner_difference():
+    a = [_box(x=0.0), _box("plate", x=100.0)]
+    b = [_box(x=0.5), _box("plate", x=100.0)]
+    assert match_boxes(a, b) == (2, 0, 0, 0.5)
+
+
+def test_match_boxes_splits_unmatched_boxes_by_score_on_either_side():
+    a = [_box(x=0.0, score=0.30), _box(x=200.0, score=0.29)]  # only in `a`: one at the threshold, one below it
+    b = [_box(x=400.0, score=0.9), _box(x=600.0, score=0.15)]  # only in `b`
+    assert match_boxes(a, b) == (0, 2, 2, 0.0)
+
+
+def test_match_boxes_does_not_match_across_classes_or_below_iou_half():
+    a = [_box("face", x=0.0), _box("face", x=100.0)]
+    b = [_box("plate", x=0.0), _box("face", x=108.0)]  # iou of x=100 and x=108 is 2 / 18, far below 0.5
+    assert match_boxes(a, b)[:3] == (0, 4, 0)
+
+
+def _report(**overrides):
+    values = dict(images=1, boxes=3, matched=3, max_diff_px=0.1, unmatched_confident=0, unmatched_low=0)
+    return ConsistencyReport(**{**values, **overrides})
+
+
+def test_consistency_report_passes_when_everything_agrees():
+    assert _report().passed()
+
+
+def test_consistency_report_ignores_unmatched_low_score_boxes():
+    assert _report(unmatched_low=5).passed()
+
+
+def test_consistency_report_fails_on_an_unmatched_confident_box():
+    assert not _report(unmatched_confident=1).passed()
+
+
+def test_consistency_report_fails_without_images_or_matched_boxes():
+    assert not _report(images=0).passed()
+    assert not _report(boxes=0, matched=0).passed()  # nothing detected: no evidence of agreement
+    assert not _report(boxes=2, matched=0, unmatched_low=2).passed()
+
+
+def test_consistency_report_fails_on_a_corner_difference_of_the_tolerance_or_more():
+    assert not _report(max_diff_px=1.0).passed()
+    assert _report(max_diff_px=0.99).passed()
+    assert _report(max_diff_px=1.5).passed(tol_px=2.0)

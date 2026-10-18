@@ -11,12 +11,15 @@ from pathlib import Path
 import cv2
 
 from vc_label.boxes import iou
+from vc_label.contracts import Box
 from vc_train.geometry import PAD_VALUE, check_input_size, decode_yolov8, letterbox
 from vc_train.offline import load_yolo, ultralytics_offline_env
 
 MODEL_ONNX = "model.onnx"
 MODEL_JSON = "model.json"
 MAP50_KEY = "metrics/mAP50(B)"
+CONFIDENT = 0.3  # an unmatched box at or above this score fails the consistency check; same value as vc_eval.consistency
+MATCH_IOU = 0.5
 
 
 def _sha256(path: Path) -> str:
@@ -34,8 +37,12 @@ def _checkpoint_map50(weights: Path) -> float:
     return float(train_metrics[MAP50_KEY])
 
 
-def _check_onnx_io(onnx_path: Path, in_width: int, in_height: int) -> None:
-    """Reads the exported graph back with onnxruntime: one static NCHW input, float32 inputs and outputs only."""
+def _check_onnx_io(onnx_path: Path, in_width: int, in_height: int, n_classes: int) -> None:
+    """Reads the exported graph back with onnxruntime.
+
+    One static NCHW input, float32 inputs and outputs only, and one output of shape [1, 4 + n_classes, N] with a fixed N > 0
+    (the layout decode_yolov8 and the C++ decoder read).
+    """
     import onnxruntime as ort
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -46,6 +53,18 @@ def _check_onnx_io(onnx_path: Path, in_width: int, in_height: int) -> None:
     types = [i.type for i in inputs] + [o.type for o in outputs]
     if any(t != "tensor(float)" for t in types):
         raise ValueError(f"{onnx_path} must use tensor(float) for every input and output, got {types}")
+    out_shapes = [list(o.shape) for o in outputs]
+    ok = (
+        len(out_shapes) == 1
+        and len(out_shapes[0]) == 3
+        and out_shapes[0][:2] == [1, 4 + n_classes]
+        and isinstance(out_shapes[0][2], int)
+        and out_shapes[0][2] > 0
+    )
+    if not ok:
+        raise ValueError(
+            f"{onnx_path} has output shapes {out_shapes}, expected one output of shape [1, {4 + n_classes}, N] with a fixed N > 0"
+        )
 
 
 def export_onnx(
@@ -68,11 +87,11 @@ def export_onnx(
     exported = Path(
         model.export(format="onnx", imgsz=(in_height, in_width), opset=17, simplify=False, dynamic=False, nms=False, device="cpu")
     )
-    _check_onnx_io(exported, in_width, in_height)
+    classes = [model.names[i] for i in sorted(model.names)]
+    _check_onnx_io(exported, in_width, in_height, len(classes))
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / MODEL_ONNX
     shutil.move(str(exported), target)
-    classes = [model.names[i] for i in sorted(model.names)]
     meta = {
         "name": name or out_dir.name,
         "classes": classes,
@@ -91,13 +110,40 @@ def read_model_json(out_dir: Path) -> dict:
 
 @dataclass(frozen=True)
 class ConsistencyReport:
+    """PyTorch vs onnxruntime on the same tensors; unmatched boxes are split by score like vc_eval.consistency does."""
+
     images: int
-    boxes: int
+    boxes: int  # boxes the PyTorch run found
+    matched: int
     max_diff_px: float
-    unmatched: int
+    unmatched_confident: int  # unmatched boxes (either side) with score >= CONFIDENT: these fail the check
+    unmatched_low: int  # unmatched boxes below CONFIDENT: reported, tolerated (a score next to the threshold may flip)
 
     def passed(self, tol_px: float = 1.0) -> bool:
-        return self.images > 0 and self.unmatched == 0 and self.max_diff_px < tol_px
+        # no images or no matched boxes is no evidence of agreement, however empty the unmatched counts are
+        return self.images > 0 and self.matched > 0 and self.unmatched_confident == 0 and self.max_diff_px < tol_px
+
+
+def match_boxes(a: list[Box], b: list[Box]) -> tuple[int, int, int, float]:
+    """(matched, unmatched_confident, unmatched_low, worst corner difference in px) for the boxes of one image.
+
+    Each box of `a` takes the best-overlapping unused box of `b` with the same class, if the IoU is at least MATCH_IOU.
+    """
+    matched = confident = low = 0
+    worst = 0.0
+    remaining = list(b)
+    for box in a:
+        same = [o for o in remaining if o.cls == box.cls]
+        match = max(same, key=lambda o: iou(o, box), default=None)
+        if match is None or iou(match, box) < MATCH_IOU:
+            confident, low = (confident + 1, low) if box.score >= CONFIDENT else (confident, low + 1)
+            continue
+        remaining.remove(match)
+        matched += 1
+        worst = max(worst, *(abs(p - q) for p, q in zip((box.x1, box.y1, box.x2, box.y2), (match.x1, match.y1, match.x2, match.y2))))
+    for box in remaining:
+        confident, low = (confident + 1, low) if box.score >= CONFIDENT else (confident, low + 1)
+    return matched, confident, low, worst
 
 
 def check_consistency(
@@ -117,7 +163,8 @@ def check_consistency(
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     inp = session.get_inputs()[0]
     in_height, in_width = inp.shape[2], inp.shape[3]
-    total, unmatched, worst = 0, 0, 0.0
+    total = matched = confident = low = 0
+    worst = 0.0
     for path in images:
         bgr = cv2.imread(str(path))
         if bgr is None:
@@ -130,15 +177,12 @@ def check_consistency(
         ort_pred = session.run(None, {inp.name: arr})[0]
         a = decode_yolov8(torch_pred, r, classes, width, height, score_threshold, iou_threshold)
         b = decode_yolov8(ort_pred, r, classes, width, height, score_threshold, iou_threshold)
+        image_matched, image_confident, image_low, image_worst = match_boxes(a, b)
         total += len(a)
-        remaining = list(b)
-        for box in a:
-            same = [o for o in remaining if o.cls == box.cls]
-            match = max(same, key=lambda o: iou(o, box), default=None)
-            if match is None or iou(match, box) < 0.5:
-                unmatched += 1
-                continue
-            remaining.remove(match)
-            worst = max(worst, *(abs(p - q) for p, q in zip((box.x1, box.y1, box.x2, box.y2), (match.x1, match.y1, match.x2, match.y2))))
-        unmatched += len(remaining)
-    return ConsistencyReport(images=len(images), boxes=total, max_diff_px=worst, unmatched=unmatched)
+        matched += image_matched
+        confident += image_confident
+        low += image_low
+        worst = max(worst, image_worst)
+    return ConsistencyReport(
+        images=len(images), boxes=total, matched=matched, max_diff_px=worst, unmatched_confident=confident, unmatched_low=low
+    )

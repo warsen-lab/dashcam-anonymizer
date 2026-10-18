@@ -115,7 +115,10 @@ def _export(args) -> int:
     if images is None:
         return 0
     report = check_consistency(weights, onnx_path, images)
-    print(f"check: {report.images} images, {report.boxes} boxes, max diff {report.max_diff_px:.3f} px, {report.unmatched} unmatched")
+    print(
+        f"check: {report.images} images, {report.boxes} boxes, {report.matched} matched, max diff {report.max_diff_px:.3f} px, "
+        f"{report.unmatched_confident} unmatched confident, {report.unmatched_low} unmatched low"
+    )
     return 0 if report.passed() else 1
 
 

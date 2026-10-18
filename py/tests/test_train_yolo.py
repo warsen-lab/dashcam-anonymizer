@@ -168,27 +168,41 @@ def test_export_requires_input_sizes_that_are_multiples_of_32(tmp_path):
     assert not (tmp_path / "model").exists()
 
 
+def _write_onnx(path, in_shape, out_shape, elem_type="FLOAT"):
+    """input -> Reshape -> output; the Reshape keeps the graph valid when the two shapes differ (same element count)."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    dtype = getattr(TensorProto, elem_type)
+    x = helper.make_tensor_value_info("images", dtype, in_shape)
+    y = helper.make_tensor_value_info("output0", dtype, out_shape)
+    target = numpy_helper.from_array(np.array(out_shape, np.int64), name="target")
+    node = helper.make_node("Reshape", ["images", "target"], ["output0"])
+    graph = helper.make_graph([node], "reshape", [x], [y], initializer=[target])
+    # onnx 1.23 defaults to IR 14, which the pinned onnxruntime cannot load
+    onnx.save(helper.make_model(graph, ir_version=11, opset_imports=[helper.make_opsetid("", 17)]), path)
+
+
 @pytest.mark.parametrize(
-    ("shape", "elem_type", "expected"),
+    ("in_shape", "out_shape", "elem_type", "expected"),
     [
-        ([1, 3, 32, 64], "FLOAT", "[1, 3, 64, 64]"),
-        ([1, 3, 64, 64], "INT64", "tensor(float)"),
+        ([1, 3, 32, 64], [1, 6, 1024], "FLOAT", "[1, 3, 64, 64]"),
+        ([1, 3, 64, 64], [1, 6, 2048], "INT64", "tensor(float)"),
+        ([1, 3, 64, 64], [1, 3, 4096], "FLOAT", "[1, 6, N]"),  # 3 channels: 4 + 2 classes expected
+        ([1, 3, 64, 64], [1, 12288], "FLOAT", "[1, 6, N]"),  # rank 2
+        ([1, 3, 64, 64], [2, 6, 1024], "FLOAT", "[1, 6, N]"),  # batch 2
     ],
 )
-def test_export_rejects_onnx_that_is_not_static_float_nchw(tmp_path, monkeypatch, shape, elem_type, expected):
-    import onnx
+def test_export_rejects_onnx_that_is_not_static_float_nchw_with_a_yolov8_output(
+    tmp_path, monkeypatch, in_shape, out_shape, elem_type, expected
+):
     import torch
-    from onnx import TensorProto, helper
 
     from vc_train import export as export_mod
 
-    dtype = getattr(TensorProto, elem_type)
     bad = tmp_path / "bad.onnx"
-    x = helper.make_tensor_value_info("images", dtype, shape)
-    y = helper.make_tensor_value_info("output0", dtype, shape)
-    graph = helper.make_graph([helper.make_node("Identity", ["images"], ["output0"])], "identity", [x], [y])
-    # onnx 1.23 defaults to IR 14, which the pinned onnxruntime cannot load
-    onnx.save(helper.make_model(graph, ir_version=11, opset_imports=[helper.make_opsetid("", 17)]), bad)
+    _write_onnx(bad, in_shape, out_shape, elem_type)
     weights = tmp_path / "best.pt"
     torch.save({"train_metrics": {"metrics/mAP50(B)": 0.5}}, weights)
     monkeypatch.setattr(export_mod, "load_yolo", lambda _weights: _ExportStub(bad))
@@ -198,11 +212,19 @@ def test_export_rejects_onnx_that_is_not_static_float_nchw(tmp_path, monkeypatch
     assert not (tmp_path / "model").exists()
 
 
-def test_consistency_needs_at_least_one_image_to_pass():
-    from vc_train.export import ConsistencyReport
+def test_export_accepts_a_static_yolov8_shaped_output(tmp_path, monkeypatch):
+    import torch
 
-    assert not ConsistencyReport(images=0, boxes=0, max_diff_px=0.0, unmatched=0).passed()
-    assert ConsistencyReport(images=1, boxes=0, max_diff_px=0.0, unmatched=0).passed()
+    from vc_train import export as export_mod
+
+    good = tmp_path / "good.onnx"
+    _write_onnx(good, [1, 3, 64, 64], [1, 6, 2048])
+    weights = tmp_path / "best.pt"
+    torch.save({"train_metrics": {"metrics/mAP50(B)": 0.5}}, weights)
+    monkeypatch.setattr(export_mod, "load_yolo", lambda _weights: _ExportStub(good))
+
+    onnx_path = export_mod.export_onnx(weights, tmp_path / "model", 64, 64)
+    assert onnx_path.is_file() and (tmp_path / "model" / "model.json").is_file()
 
 
 def test_pytorch_and_onnxruntime_agree(tiny_run):
@@ -214,5 +236,5 @@ def test_pytorch_and_onnxruntime_agree(tiny_run):
     # threshold 0 keeps every anchor, so a score sitting on the threshold cannot make the two runtimes disagree
     report = check_consistency(best, onnx_path, images, score_threshold=0.0)
     assert report.images == len(images)
-    assert report.boxes > 0
+    assert report.boxes > 0 and report.matched > 0
     assert report.passed(1.0), report
