@@ -85,6 +85,34 @@ def test_run_teach_drops_output_of_unfinished_frames(tmp_path):
     assert "crashed" not in {d.box.src for d in read_jsonl(labels / "raw.jsonl")}
 
 
+def test_run_teach_leaves_complete_output_untouched(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    raw = labels / "raw.jsonl"
+    inode, mtime, text = raw.stat().st_ino, raw.stat().st_mtime_ns, raw.read_text(encoding="utf-8")
+
+    assert run_teach(frames, labels, teachers(), CFG, log=lambda _: None) == 0
+
+    assert raw.stat().st_ino == inode
+    assert raw.stat().st_mtime_ns == mtime  # an in-place truncate-and-rewrite would bump mtime
+    assert raw.read_text(encoding="utf-8") == text
+    assert not (labels / "raw.jsonl.tmp").exists()
+
+
+def test_run_teach_recovers_from_a_torn_last_line(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    labels.mkdir()
+    (labels / "processed.txt").write_text("0\n")
+    write_jsonl(labels / "raw.jsonl", [Detection("trip.mp4", 0, 0.0, Box("face", 1, 2, 3, 4, score=0.9, src="kept"))])
+    with (labels / "raw.jsonl").open("a", encoding="utf-8") as f:
+        f.write('{"video": "trip.mp4", "fr')
+
+    assert run_teach(frames, labels, teachers(), CFG, log=lambda _: None) == 1
+
+    assert read_processed(labels) == {0, 12}
+    assert "kept" in {d.box.src for d in read_jsonl(labels / "raw.jsonl")}
+
+
 def test_run_fuse_writes_merged_flags_and_yolo(tmp_path):
     frames, labels = make_frames(tmp_path, 3), tmp_path / "labels"
     run_teach(frames, labels, teachers(), CFG, log=lambda _: None)

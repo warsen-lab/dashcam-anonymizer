@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -59,11 +60,28 @@ def read_processed(labels_dir: Path) -> set[int]:
 
 
 def _drop_unfinished(labels_dir: Path, done: set[int]) -> None:
-    """Removes detections of frames a crashed run wrote but never marked processed."""
+    """Drops detections of frames a crashed run never marked processed, and a torn last line
+    (an append cut short by a crash). Rewrites via a temp file and os.replace, and only when needed."""
     for name in (RAW, AUX):
         path = labels_dir / name
-        kept = [d for d in read_jsonl(path) if d.frame in done]
-        write_jsonl(path, kept)
+        if not path.exists():
+            continue
+        lines = [line for line in path.read_bytes().split(b"\n") if line.strip()]
+        kept: list[bytes] = []
+        for i, line in enumerate(lines):
+            try:
+                frame = int(json.loads(line.decode("utf-8"))["frame"])
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                if i == len(lines) - 1:
+                    continue  # torn last line: drop it
+                raise
+            if frame in done:
+                kept.append(line)
+        if len(kept) == len(lines):
+            continue
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(b"".join(line + b"\n" for line in kept))
+        os.replace(tmp, path)
 
 
 def run_teach(
