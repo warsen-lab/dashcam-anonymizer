@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 import shutil
 from dataclasses import dataclass, replace
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import cv2
 
-from vc_label.contracts import LABEL_CLASSES, Box, from_yolo_lines, read_frames_csv, to_yolo_lines
+from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, from_yolo_lines, read_frames_csv, to_yolo_lines
 from vc_label.pipeline import check_labels_match_frames, read_processed
 from vc_label.review import image_size
 from vc_train.geometry import letterbox_scale
@@ -30,14 +31,31 @@ class DatasetSummary:
     boxes: int
 
 
+@dataclass(frozen=True)
+class _Frame:
+    """A labelled frame whose inputs phase 1 has read and checked."""
+
+    stem: str
+    ref: FrameRef
+    width: int
+    height: int
+    boxes: list[Box]
+    split: str
+
+
+def _round_half_up(x: float) -> int:
+    # Python's round() is half to even (2.5 -> 2); C++ std::lround and vc_train.geometry round half up
+    return math.floor(x + 0.5)
+
+
 def _positions(size: int, window: int) -> list[int]:
     return sorted({0, size - window})
 
 
 def crop_windows(width: int, height: int, scale: float, crop: int = 1280) -> list[Window]:
     """Windows that become crop x crop samples at `scale`; together they contain every box of width <= W - w."""
-    w = min(width, round(crop / scale))
-    h = min(height, round(crop / scale))
+    w = min(width, _round_half_up(crop / scale))
+    h = min(height, _round_half_up(crop / scale))
     return [(x0, y0, w, h) for y0 in _positions(height, h) for x0 in _positions(width, w)]
 
 
@@ -71,19 +89,119 @@ def _link_full_frame(src: Path, dst: Path) -> None:
         shutil.copyfile(src, dst)
 
 
-def _prepare_out_dir(out_dir: Path) -> None:
-    if out_dir.exists() and any(out_dir.iterdir()):
-        raise ValueError(f"dataset dir {out_dir} is not empty; choose a new --out")
-    for kind in ("images", "labels"):
-        for split in ("train", "val"):
-            (out_dir / kind / split).mkdir(parents=True, exist_ok=True)
-
-
 def _write_data_yaml(out_dir: Path) -> None:
     names = "".join(f"  {i}: {c}\n" for i, c in enumerate(LABEL_CLASSES))
     (out_dir / DATA_YAML).write_text(
         f"path: {out_dir.resolve()}\ntrain: images/train\nval: images/val\nnames:\n{names}"
     )
+
+
+def _check_out_dir(out_dir: Path) -> None:
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise ValueError(f"dataset dir {out_dir} is not empty; choose a new --out")
+
+
+def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]:
+    """Phase 1: reads and checks every segment, writes nothing."""
+    frames: list[_Frame] = []
+    owner: dict[str, int] = {}  # video stem -> index of the segment that writes its samples
+    for index, (frames_dir, labels_dir) in enumerate(segments):
+        refs = read_frames_csv(frames_dir)
+        check_labels_match_frames(frames_dir, labels_dir, refs)
+        done = read_processed(labels_dir)
+        used = [r for r in refs if r.frame in done]
+        if not used:
+            continue
+        val_from = max(r.pts_ms for r in used) - val_tail_ms
+        for ref in used:
+            stem = Path(ref.video).stem
+            if owner.setdefault(stem, index) != index:
+                raise ValueError(
+                    f"video stem {stem!r} is in two segments; their samples would overwrite each other"
+                )
+            label_file = labels_dir / "yolo" / f"{ref.frame:06d}.txt"
+            if not label_file.exists():
+                raise ValueError(f"{label_file} is missing; run vc_label fuse for {labels_dir} first")
+            width, height = image_size(ref.image)
+            boxes = from_yolo_lines(label_file.read_text().splitlines(), width, height)
+            split = "val" if ref.pts_ms >= val_from else "train"
+            frames.append(_Frame(stem, ref, width, height, boxes, split))
+    return frames
+
+
+def _manifest_row(
+    name: str, frame: _Frame, x0: int, y0: int, w: int, h: int, scale: float, boxes: int
+) -> dict:
+    return {
+        "sample": f"{name}.jpg",
+        "split": frame.split,
+        "video": frame.ref.video,
+        "frame": frame.ref.frame,
+        "x0": x0,
+        "y0": y0,
+        "w": w,
+        "h": h,
+        "scale": scale,
+        "boxes": boxes,
+    }
+
+
+def _write_frame(out_dir: Path, frame: _Frame, in_width: int, in_height: int, crop: int) -> list[dict]:
+    image = cv2.imread(str(frame.ref.image))
+    if image is None:
+        raise ValueError(f"cannot read {frame.ref.image}")
+    s = letterbox_scale(frame.width, frame.height, in_width, in_height)
+    rows = []
+    for i, (x0, y0, w, h) in enumerate(crop_windows(frame.width, frame.height, s, crop)):
+        part = image[y0 : y0 + h, x0 : x0 + w]
+        part_boxes = crop_boxes(frame.boxes, (x0, y0, w, h))
+        if s != 1.0:
+            part = cv2.resize(part, (_round_half_up(w * s), _round_half_up(h * s)), interpolation=cv2.INTER_AREA)
+            part_boxes = [_scaled(b, s) for b in part_boxes]
+        name = f"{frame.stem}_{frame.ref.frame:06d}_c{i}"
+        _write_sample(out_dir, frame.split, name, part, part_boxes)
+        rows.append(_manifest_row(name, frame, x0, y0, w, h, s, len(part_boxes)))
+    full = f"{frame.stem}_{frame.ref.frame:06d}_full"
+    _link_full_frame(frame.ref.image, out_dir / "images" / frame.split / f"{full}.jpg")
+    lines = to_yolo_lines(frame.boxes, frame.width, frame.height)
+    (out_dir / "labels" / frame.split / f"{full}.txt").write_text("".join(f"{line}\n" for line in lines))
+    rows.append(_manifest_row(full, frame, 0, 0, frame.width, frame.height, 1.0, len(frame.boxes)))
+    return rows
+
+
+def _write_dataset(out_dir: Path, frames: list[_Frame], in_width: int, in_height: int, crop: int) -> DatasetSummary:
+    """Phase 2: writes the samples, the manifest and data.yaml."""
+    for kind in ("images", "labels"):
+        for split in ("train", "val"):
+            (out_dir / kind / split).mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for frame in frames:
+        rows.extend(_write_frame(out_dir, frame, in_width, in_height, crop))
+    rows.sort(key=lambda r: (r["split"] != "train", r["sample"]))
+    with (out_dir / MANIFEST).open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_MANIFEST_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    _write_data_yaml(out_dir)
+    return DatasetSummary(
+        train_samples=sum(r["split"] == "train" for r in rows),
+        val_samples=sum(r["split"] == "val" for r in rows),
+        train_frames=sum(f.split == "train" for f in frames),
+        val_frames=sum(f.split == "val" for f in frames),
+        boxes=sum(r["boxes"] for r in rows),
+    )
+
+
+def _remove_partial_output(out_dir: Path, created: bool) -> None:
+    """After a failed write: remove the dir if this call created it, otherwise empty it again."""
+    if created:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return
+    for child in out_dir.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def build_dataset(
@@ -94,54 +212,16 @@ def build_dataset(
     val_tail_ms: float = 20000.0,
     crop: int = 1280,
 ) -> DatasetSummary:
-    """segments: (frames_dir, labels_dir) pairs; only frames in processed.txt are used."""
-    _prepare_out_dir(out_dir)
-    counts = {"train_samples": 0, "val_samples": 0, "train_frames": 0, "val_frames": 0, "boxes": 0}
-    rows = []
-    for frames_dir, labels_dir in segments:
-        refs = read_frames_csv(frames_dir)
-        check_labels_match_frames(frames_dir, labels_dir, refs)
-        done = read_processed(labels_dir)
-        used = [r for r in refs if r.frame in done]
-        if not used:
-            continue
-        val_from = max(r.pts_ms for r in used) - val_tail_ms
-        for ref in used:
-            label_file = labels_dir / "yolo" / f"{ref.frame:06d}.txt"
-            if not label_file.exists():
-                raise ValueError(f"{label_file} is missing; run vc_label fuse for {labels_dir} first")
-            width, height = image_size(ref.image)
-            boxes = from_yolo_lines(label_file.read_text().splitlines(), width, height)
-            split = "val" if ref.pts_ms >= val_from else "train"
-            stem = Path(ref.video).stem
-            s = letterbox_scale(width, height, in_width, in_height)
-            image = cv2.imread(str(ref.image))
-            if image is None:
-                raise ValueError(f"cannot read {ref.image}")
-            samples = []
-            for i, (x0, y0, w, h) in enumerate(crop_windows(width, height, s, crop)):
-                part = image[y0 : y0 + h, x0 : x0 + w]
-                part_boxes = crop_boxes(boxes, (x0, y0, w, h))
-                if s != 1.0:
-                    part = cv2.resize(part, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
-                    part_boxes = [_scaled(b, s) for b in part_boxes]
-                name = f"{stem}_{ref.frame:06d}_c{i}"
-                _write_sample(out_dir, split, name, part, part_boxes)
-                samples.append((name, x0, y0, w, h, s, len(part_boxes)))
-            full = f"{stem}_{ref.frame:06d}_full"
-            _link_full_frame(ref.image, out_dir / "images" / split / f"{full}.jpg")
-            lines = to_yolo_lines(boxes, width, height)
-            (out_dir / "labels" / split / f"{full}.txt").write_text("".join(f"{line}\n" for line in lines))
-            samples.append((full, 0, 0, width, height, 1.0, len(boxes)))
-            for name, x0, y0, w, h, scale, n in samples:
-                rows.append([f"{name}.jpg", split, ref.video, ref.frame, x0, y0, w, h, scale, n])
-                counts["boxes"] += n
-            counts[f"{split}_samples"] += len(samples)
-            counts[f"{split}_frames"] += 1
-    rows.sort(key=lambda r: (r[1] != "train", r[0]))
-    with (out_dir / MANIFEST).open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(_MANIFEST_FIELDS)
-        writer.writerows(rows)
-    _write_data_yaml(out_dir)
-    return DatasetSummary(**counts)
+    """segments: (frames_dir, labels_dir) pairs; only frames in processed.txt are used.
+
+    Every input is checked before anything is written. If writing fails, the output dir is removed
+    (or emptied, when it existed empty), so the same --out can be used again after the fix.
+    """
+    _check_out_dir(out_dir)
+    frames = _plan(segments, val_tail_ms)
+    created = not out_dir.exists()
+    try:
+        return _write_dataset(out_dir, frames, in_width, in_height, crop)
+    except BaseException:
+        _remove_partial_output(out_dir, created)
+        raise
