@@ -13,10 +13,10 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 11> kKeys = {
+constexpr std::array<std::string_view, 12> kKeys = {
     "detect_fps",         "max_detect_fps",  "motion_threshold",       "score_threshold",
-    "nms_iou",            "match_max_distance", "expand_fraction",     "motion_expand_fraction",
-    "min_box_px",         "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
+    "nms_iou",            "match_max_distance", "match_max_distance_loose", "expand_fraction",
+    "motion_expand_fraction", "min_box_px",   "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
 
 // Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
 constexpr double kMaxMosaicSetting = 4096;
@@ -61,6 +61,7 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.decode.scoreThreshold), "score_threshold must be finite");
   require(std::isfinite(c.decode.nmsIou), "nms_iou must be finite");
   require(std::isfinite(c.timeline.matchMaxDistance), "match_max_distance must be finite");
+  require(std::isfinite(c.timeline.matchMaxDistanceLoose), "match_max_distance_loose must be finite");
   require(std::isfinite(c.timeline.expandFraction), "expand_fraction must be finite");
   require(std::isfinite(c.timeline.motionExpandFraction), "motion_expand_fraction must be finite");
   require(std::isfinite(c.timeline.minBoxPx), "min_box_px must be finite");
@@ -70,6 +71,7 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
   require(c.decode.nmsIou > 0 && c.decode.nmsIou <= 1, "nms_iou must be in (0, 1]");
   require(c.timeline.matchMaxDistance > 0, "match_max_distance must be > 0");
+  require(c.timeline.matchMaxDistanceLoose > 0, "match_max_distance_loose must be > 0");
   require(c.timeline.expandFraction >= 0, "expand_fraction must be >= 0");
   require(c.timeline.motionExpandFraction >= 0, "motion_expand_fraction must be >= 0");
   require(c.timeline.minBoxPx >= 0, "min_box_px must be >= 0");
@@ -100,6 +102,7 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
     c.decode.scoreThreshold = j.value("score_threshold", c.decode.scoreThreshold);
     c.decode.nmsIou = j.value("nms_iou", c.decode.nmsIou);
     c.timeline.matchMaxDistance = j.value("match_max_distance", c.timeline.matchMaxDistance);
+    c.timeline.matchMaxDistanceLoose = j.value("match_max_distance_loose", c.timeline.matchMaxDistanceLoose);
     c.timeline.expandFraction = j.value("expand_fraction", c.timeline.expandFraction);
     c.timeline.motionExpandFraction = j.value("motion_expand_fraction", c.timeline.motionExpandFraction);
     c.timeline.minBoxPx = j.value("min_box_px", c.timeline.minBoxPx);
@@ -128,6 +131,7 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["score_threshold"] = jsonFloat(c.decode.scoreThreshold);
   j["nms_iou"] = jsonFloat(c.decode.nmsIou);
   j["match_max_distance"] = c.timeline.matchMaxDistance;
+  j["match_max_distance_loose"] = c.timeline.matchMaxDistanceLoose;
   j["expand_fraction"] = c.timeline.expandFraction;
   j["motion_expand_fraction"] = c.timeline.motionExpandFraction;
   j["min_box_px"] = c.timeline.minBoxPx;

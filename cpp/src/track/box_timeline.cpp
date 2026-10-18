@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace vc {
 namespace {
@@ -11,6 +12,9 @@ namespace {
 // A box may be missed at this many keyframes in a row and still be matched later (it lives on as a
 // ghost track); one more miss drops it.
 constexpr int kMaxMissedKeyframes = 1;
+
+// The second matching pass pairs boxes only when each side is within this factor of the other's.
+constexpr double kMaxLooseSizeRatio = 3.0;
 
 struct Point {
   double x = 0;
@@ -50,6 +54,21 @@ Box lerp(const Box& a, const Box& b, double t) {
   out.y2 = mix(a.y2, b.y2);
   out.score = std::max(a.score, b.score);
   return out;
+}
+
+// The bounding box of both boxes; class and score of `a`.
+Box unionOf(const Box& a, const Box& b) {
+  Box out = a;
+  out.x1 = std::min(a.x1, b.x1);
+  out.y1 = std::min(a.y1, b.y1);
+  out.x2 = std::max(a.x2, b.x2);
+  out.y2 = std::max(a.y2, b.y2);
+  return out;
+}
+
+bool similarSizes(const Box& a, const Box& b) {
+  const auto within = [](double p, double q) { return p <= kMaxLooseSizeRatio * q && q <= kMaxLooseSizeRatio * p; };
+  return within(widthOf(a), widthOf(b)) && within(heightOf(a), heightOf(b));
 }
 
 void growTo(double& lo, double& hi, double minimum) {
@@ -101,7 +120,8 @@ void requireFinite(const Keyframe& key) {
 bool validConfig(const TimelineConfig& c) {
   return std::isfinite(c.matchMaxDistance) && c.matchMaxDistance > 0 && std::isfinite(c.expandFraction) &&
          c.expandFraction >= 0 && std::isfinite(c.motionExpandFraction) && c.motionExpandFraction >= 0 &&
-         std::isfinite(c.minBoxPx) && c.minBoxPx >= 0;
+         std::isfinite(c.minBoxPx) && c.minBoxPx >= 0 && std::isfinite(c.matchMaxDistanceLoose) &&
+         c.matchMaxDistanceLoose > 0;
 }
 
 }  // namespace
@@ -124,53 +144,80 @@ BoxTimeline::BoxTimeline(const TimelineConfig& config, int frameWidth, int frame
   if (!validConfig(config)) throw std::invalid_argument("BoxTimeline: invalid config");
 }
 
-std::vector<std::pair<size_t, size_t>> BoxTimeline::match(const Keyframe& next, double steps) const {
+std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double steps) const {
   struct Candidate {
     double cost;
     size_t i;
     size_t j;
   };
-  std::vector<Candidate> candidates;
+  // The cheaper of "stayed put" and "kept its velocity" (a target that stops still matches).
+  const auto cheapest = [&](const Track& track, const auto& costFrom) {
+    const Point from = centerOf(track.box);
+    double cost = costFrom(from);
+    if (const auto& v = track.velocity) {
+      cost = std::min(cost, costFrom(Point{from.x + v->x * steps, from.y + v->y * steps}));
+    }
+    return cost;
+  };
+  std::vector<bool> usedTrack(tracks_.size(), false);
+  std::vector<bool> usedNext(next.boxes.size(), false);
+  std::vector<Match> pairs;
+  const auto takeGreedily = [&](std::vector<Candidate> candidates, bool loose) {
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& p, const Candidate& q) { return p.cost < q.cost; });
+    for (const Candidate& c : candidates) {
+      if (usedTrack[c.i] || usedNext[c.j]) continue;
+      usedTrack[c.i] = true;
+      usedNext[c.j] = true;
+      pairs.push_back(Match{c.i, c.j, loose});
+    }
+  };
+
+  // First pass: centre distance in mean box sides.
+  std::vector<Candidate> strict;
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Box& a = tracks_[i].box;
-    const Point from = centerOf(a);
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       const Box& b = next.boxes[j];
       if (a.cls != b.cls) continue;
       const Point actual = centerOf(b);
-      // A target that stops still matches: take the better of "keeps moving" and "stayed put".
-      double distance = std::hypot(actual.x - from.x, actual.y - from.y);
-      if (const auto& v = tracks_[i].velocity) {
-        distance = std::min(distance, std::hypot(actual.x - (from.x + v->x * steps),
-                                                 actual.y - (from.y + v->y * steps)));
-      }
       const double size = std::max(1.0, (widthOf(a) + heightOf(a) + widthOf(b) + heightOf(b)) / 4.0);
-      const double cost = distance / size;
-      if (cost <= config_.matchMaxDistance) candidates.push_back({cost, i, j});
+      const double cost =
+          cheapest(tracks_[i], [&](Point p) { return std::hypot(actual.x - p.x, actual.y - p.y) / size; });
+      if (cost <= config_.matchMaxDistance) strict.push_back({cost, i, j});
     }
   }
-  std::stable_sort(candidates.begin(), candidates.end(),
-                   [](const Candidate& p, const Candidate& q) { return p.cost < q.cost; });
-  std::vector<bool> usedTrack(tracks_.size(), false);
-  std::vector<bool> usedNext(next.boxes.size(), false);
-  std::vector<std::pair<size_t, size_t>> pairs;
-  for (const Candidate& c : candidates) {
-    if (usedTrack[c.i] || usedNext[c.j]) continue;
-    usedTrack[c.i] = true;
-    usedNext[c.j] = true;
-    pairs.emplace_back(c.i, c.j);
+  takeGreedily(std::move(strict), false);
+
+  // Second pass, over what is left: each axis in the larger box size along it, similar sizes only.
+  std::vector<Candidate> loose;
+  for (size_t i = 0; i < tracks_.size(); ++i) {
+    if (usedTrack[i]) continue;
+    const Box& a = tracks_[i].box;
+    for (size_t j = 0; j < next.boxes.size(); ++j) {
+      const Box& b = next.boxes[j];
+      if (usedNext[j] || a.cls != b.cls || !similarSizes(a, b)) continue;
+      const Point actual = centerOf(b);
+      const double w = std::max(1.0, std::max(widthOf(a), widthOf(b)));
+      const double h = std::max(1.0, std::max(heightOf(a), heightOf(b)));
+      const double cost = cheapest(tracks_[i], [&](Point p) {
+        return std::max(std::abs(actual.x - p.x) / w, std::abs(actual.y - p.y) / h);
+      });
+      if (cost <= config_.matchMaxDistanceLoose) loose.push_back({cost, i, j});
+    }
   }
+  takeGreedily(std::move(loose), true);
   return pairs;
 }
 
-void BoxTimeline::add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY,
-                      MaskOrigin origin) const {
-  const double mx = config_.expandFraction * widthOf(box) + config_.motionExpandFraction * motionX;
-  const double my = config_.expandFraction * heightOf(box) + config_.motionExpandFraction * motionY;
-  double x1 = box.x1 - mx;
-  double x2 = box.x2 + mx;
-  double y1 = box.y1 - my;
-  double y2 = box.y2 + my;
+void BoxTimeline::add(std::vector<MaskBox>& out, const Box& region, const Box& sized, double motionX,
+                      double motionY, MaskOrigin origin) const {
+  const double mx = config_.expandFraction * widthOf(sized) + config_.motionExpandFraction * motionX;
+  const double my = config_.expandFraction * heightOf(sized) + config_.motionExpandFraction * motionY;
+  double x1 = region.x1 - mx;
+  double x2 = region.x2 + mx;
+  double y1 = region.y1 - my;
+  double y2 = region.y2 + my;
   growTo(x1, x2, config_.minBoxPx);
   growTo(y1, y2, config_.minBoxPx);
   x1 = std::clamp(x1, 0.0, static_cast<double>(width_));
@@ -178,8 +225,15 @@ void BoxTimeline::add(std::vector<MaskBox>& out, const Box& box, double motionX,
   y1 = std::clamp(y1, 0.0, static_cast<double>(height_));
   y2 = std::clamp(y2, 0.0, static_cast<double>(height_));
   if (!(x2 > x1) || !(y2 > y1)) return;
-  out.push_back(MaskBox{box.cls, static_cast<float>(x1), static_cast<float>(y1), static_cast<float>(x2),
+  out.push_back(MaskBox{region.cls, static_cast<float>(x1), static_cast<float>(y1), static_cast<float>(x2),
                         static_cast<float>(y2), origin});
+}
+
+void BoxTimeline::sweep(std::vector<MaskBox>& out, const Track& track, double since, double span,
+                        MaskOrigin origin) const {
+  const Velocity v = track.velocity.value_or(Velocity{});
+  const Box moved = shifted(track.box, v.x * since, v.y * since);
+  add(out, unionOf(track.anchor, moved), track.box, std::abs(v.x) * span, std::abs(v.y) * span, origin);
 }
 
 std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTime>& frames,
@@ -202,13 +256,13 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
     throw std::invalid_argument("BoxTimeline: the next keyframe must follow the frames");
   }
   const double steps = static_cast<double>(next.time.index - prevTime.index);
-  const std::vector<std::pair<size_t, size_t>> pairs = match(next, steps);
-  // Per track, the box it was matched with (or none), and per next box whether it was claimed.
-  std::vector<std::optional<size_t>> matched(tracks_.size());
+  const std::vector<Match> pairs = match(next, steps);
+  // Per track, its match (or none), and per next box whether it was claimed.
+  std::vector<std::optional<Match>> matched(tracks_.size());
   std::vector<bool> nextUsed(next.boxes.size(), false);
-  for (const auto& [i, j] : pairs) {
-    matched[i] = j;
-    nextUsed[j] = true;
+  for (const Match& m : pairs) {
+    matched[m.track] = m;
+    nextUsed[m.next] = true;
   }
   const std::vector<double> t = fractions(frames, prevTime, next.time);
   std::vector<std::vector<MaskBox>> masks(frames.size());
@@ -218,20 +272,20 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
     for (size_t i = 0; i < tracks_.size(); ++i) {
       const Track& track = tracks_[i];
       const MaskOrigin keyOrigin = track.missed == 0 ? MaskOrigin::Detected : MaskOrigin::Extended;
-      if (matched[i]) {
-        const Box& to = next.boxes[*matched[i]];
-        const Point a = centerOf(track.box);
-        const Point b = centerOf(to);
-        add(masks[k], lerp(track.box, to, t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
-            atKey ? keyOrigin : MaskOrigin::Interpolated);
-        // A ghost's position was a guess: hold the box it was matched with over the whole interval too,
-        // so a target that stopped after the missed keyframe is covered where it really is.
-        if (track.missed > 0) add(masks[k], to, 0.0, 0.0, MaskOrigin::Extended);
-      } else {
-        const Velocity v = track.velocity.value_or(Velocity{});
-        add(masks[k], shifted(track.box, v.x * since, v.y * since), std::abs(v.x) * steps,
-            std::abs(v.y) * steps, atKey ? keyOrigin : MaskOrigin::Extended);
+      if (!matched[i]) {
+        sweep(masks[k], track, since, steps, atKey ? keyOrigin : MaskOrigin::Extended);
+        continue;
       }
+      const Box& to = next.boxes[matched[i]->next];
+      const Point a = centerOf(track.box);
+      const Point b = centerOf(to);
+      add(masks[k], lerp(track.box, to, t[k]), std::abs(b.x - a.x), std::abs(b.y - a.y),
+          atKey ? keyOrigin : MaskOrigin::Interpolated);
+      // A loose pairing may be wrong: keep what the track would have masked unmatched.
+      if (matched[i]->loose) sweep(masks[k], track, since, steps, MaskOrigin::Extended);
+      // A ghost's position was a guess, and a loose pairing may be wrong: hold the box it was matched
+      // with over the whole interval too, so a target that stopped is covered where it really is.
+      if (track.missed > 0 || matched[i]->loose) add(masks[k], to, 0.0, 0.0, MaskOrigin::Extended);
     }
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       if (!nextUsed[j]) add(masks[k], next.boxes[j], 0.0, 0.0, MaskOrigin::Extended);
@@ -242,12 +296,12 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
   std::vector<Track> tracks;
   tracks.reserve(next.boxes.size());
   for (const Box& box : next.boxes) tracks.push_back({box, std::nullopt, 0, box, 0.0});
-  for (const auto& [i, j] : pairs) {
-    const Track& track = tracks_[i];
+  for (const Match& m : pairs) {
+    const Track& track = tracks_[m.track];
     const Point a = centerOf(track.anchor);
-    const Point b = centerOf(next.boxes[j]);
+    const Point b = centerOf(next.boxes[m.next]);
     const double span = track.anchorSteps + steps;
-    tracks[j].velocity = Velocity{(b.x - a.x) / span, (b.y - a.y) / span};
+    tracks[m.next].velocity = Velocity{(b.x - a.x) / span, (b.y - a.y) / span};
   }
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Track& track = tracks_[i];
@@ -279,10 +333,8 @@ std::vector<std::vector<MaskBox>> BoxTimeline::finish(const std::vector<FrameTim
     const bool atKey = frames[k].index == prevTime.index;
     const double since = std::min(static_cast<double>(frames[k].index - prevTime.index), cap);
     for (const Track& track : tracks_) {
-      const Velocity v = track.velocity.value_or(Velocity{});
       const MaskOrigin keyOrigin = track.missed == 0 ? MaskOrigin::Detected : MaskOrigin::Extended;
-      add(masks[k], shifted(track.box, v.x * since, v.y * since), std::abs(v.x) * cap, std::abs(v.y) * cap,
-          atKey ? keyOrigin : MaskOrigin::Extended);
+      sweep(masks[k], track, since, cap, atKey ? keyOrigin : MaskOrigin::Extended);
     }
   }
   keyTime_.reset();

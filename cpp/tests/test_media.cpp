@@ -80,6 +80,12 @@ fs::path noisyVideoWithAudio() {
                    "-c:a aac -shortest");
 }
 
+fs::path checkerboardVideo() {
+  return makeMedia("checkerboard.mp4",
+                   "-f lavfi -i \"nullsrc=s=640x360:r=30:d=2,geq=lum='255*mod(floor(X/2)+floor(Y/2),2)':cb=128:cr=128,"
+                   "format=yuv420p\" -c:v libx264 -qp 0 -pix_fmt yuv420p -g 30");
+}
+
 fs::path copyCutVideo() {
   return makeMedia("cut_copy.mp4", "-ss 0.7 -i \"" + videoWithAudio().string() + "\" -c copy");
 }

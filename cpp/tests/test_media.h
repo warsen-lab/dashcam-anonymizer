@@ -29,6 +29,9 @@ std::filesystem::path videoWithAudio();
 // 2 s, 640x360 @ 30 fps H.264 (4 Mb/s) of testsrc2 with strong temporal noise, plus AAC audio:
 // every region has detail, so pixelation is measurable.
 std::filesystem::path noisyVideoWithAudio();
+// 2 s, 640x360 @ 30 fps lossless H.264 of a still 2 px luma checkerboard (0 / 255): half of all
+// neighbouring pixel pairs differ by 255 on every frame, so any region left unpixelated shows.
+std::filesystem::path checkerboardVideo();
 // basicVideo() with the length prefix of its first NAL unit overwritten, so the decoder rejects the
 // first access unit and the rest of the stream still decodes.
 std::filesystem::path corruptFirstNalVideo();

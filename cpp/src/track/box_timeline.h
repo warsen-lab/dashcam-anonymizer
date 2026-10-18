@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <utility>
 #include <vector>
 
 #include "detect/box.h"
@@ -35,20 +34,34 @@ struct Keyframe {
 };
 
 struct TimelineConfig {
-  double matchMaxDistance = 1.0;      // max |predicted centre - centre| / mean box side
+  double matchMaxDistance = 1.0;      // first pass: max |predicted centre - centre| / mean box side
   double expandFraction = 0.15;       // margin per side, fraction of the box width / height
   double motionExpandFraction = 0.5;  // extra margin per side, fraction of the displacement per interval
   double minBoxPx = 16.0;             // masks grow to at least this width and height
+  double matchMaxDistanceLoose = 6.0; // second pass: max |dx| / larger width and |dy| / larger height
 };
 
 // Turns detections on keyframes into masks for every frame (main spec §7.2): boxes matched across
-// keyframes are interpolated, unmatched ones are extended, and every mask is expanded. A box missed
-// at one keyframe is kept for one more interval as a ghost track (moved along its velocity, masked
-// as `extended`) and can still be matched at the next keyframe; a second miss drops it. A ghost
-// that is matched also gets the new box held in place over the whole interval (`extended`, next to
-// the interpolated mask): its position was a guess, and a target that stopped after the missed
-// keyframe must stay covered. The velocity of such a match is measured from the target's last real
-// detection. Feed keyframes in order; frames are identified by decode index.
+// keyframes are interpolated, unmatched ones are extended, and every mask is expanded.
+//
+// Matching runs in two greedy, one-to-one passes over same-class pairs, cheapest first; both try the
+// target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
+// matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar
+// size (each side within a factor of 3 of the other's) whose centres are at most
+// matchMaxDistanceLoose of the larger width apart in x and of the larger height in y: a target that
+// moves several box widths between keyframes. A loose match is interpolated AND keeps the masks the
+// track and the box would have had unmatched (over the whole interval), so a wrong loose pairing can
+// add masks but never remove one; it gives the next interval a velocity like any match.
+//
+// An unmatched track with a velocity masks the region it sweeps: on each frame the bounding box of
+// where the target was last detected and where the velocity takes it, so a target that stopped or
+// turned back stays covered. A box missed at one keyframe is kept for one more interval as a ghost
+// track (moved along its velocity, masked as `extended`, swept from its last real detection) and can
+// still be matched at the next keyframe; a second miss drops it. A ghost that is matched also gets
+// the new box held in place over the whole interval (`extended`, next to the interpolated mask): its
+// position was a guess, and a target that stopped after the missed keyframe must stay covered. The
+// velocity of a match is measured from the target's last real detection. Feed keyframes in order;
+// frames are identified by decode index.
 class BoxTimeline {
  public:
   // Throws std::invalid_argument for a non-positive frame size or invalid config.
@@ -63,8 +76,8 @@ class BoxTimeline {
   std::vector<std::vector<MaskBox>> advance(const std::vector<FrameTime>& frames, const Keyframe& next);
 
   // Masks for the frames from the last keyframe (inclusive) to the end, extending every box
-  // (ghosts included) forward along its velocity; the shift stops growing after one keyframe
-  // interval. Resets the timeline.
+  // (ghosts included) forward along its velocity as the region it sweeps; the shift stops growing
+  // after one keyframe interval. Resets the timeline.
   std::vector<std::vector<MaskBox>> finish(const std::vector<FrameTime>& frames);
 
  private:
@@ -82,9 +95,22 @@ class BoxTimeline {
     double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 when missed == 0)
   };
 
-  std::vector<std::pair<size_t, size_t>> match(const Keyframe& next, double steps) const;
-  void add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY,
+  struct Match {
+    size_t track = 0;
+    size_t next = 0;
+    bool loose = false;  // found by the second pass
+  };
+
+  std::vector<Match> match(const Keyframe& next, double steps) const;
+  // Masks `region`, grown by the margins of a box of `sized`'s width and height plus the motion margins.
+  void add(std::vector<MaskBox>& out, const Box& region, const Box& sized, double motionX, double motionY,
            MaskOrigin origin) const;
+  void add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY, MaskOrigin origin) const {
+    add(out, box, box, motionX, motionY, origin);
+  }
+  // The swept region of an unmatched track `since` frames after the keyframe: from its last real
+  // detection to the box moved along its velocity; motion margins for `span` frames of velocity.
+  void sweep(std::vector<MaskBox>& out, const Track& track, double since, double span, MaskOrigin origin) const;
 
   TimelineConfig config_;
   int width_;

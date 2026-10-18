@@ -5,6 +5,7 @@
   "score_threshold": 0.15,
   "nms_iou": 0.5,
   "match_max_distance": 1.0,
+  "match_max_distance_loose": 6.0,
   "expand_fraction": 0.15,
   "motion_expand_fraction": 0.5,
   "min_box_px": 16.0,

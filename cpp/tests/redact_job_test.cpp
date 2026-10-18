@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -75,6 +76,28 @@ double lumaStd(const AVFrame& f, int x1, int y1, int x2, int y2) {
   return std::sqrt(sq / ((x2 - x1) * (y2 - y1)));
 }
 
+// Fraction of neighbouring pixel pairs (left-right and top-bottom) inside the pixel box [x1, x2) x
+// [y1, y2) whose luma differs by more than 12 levels: one half on test::checkerboardVideo(), close to
+// none inside a mosaic (its blocks all average the checkerboard to the same grey).
+double roughness(const AVFrame& f, int x1, int y1, int x2, int y2) {
+  int pairs = 0;
+  int rough = 0;
+  const auto at = [&](int x, int y) { return static_cast<int>(f.data[0][y * f.linesize[0] + x]); };
+  for (int y = y1; y < y2; ++y) {
+    for (int x = x1; x < x2; ++x) {
+      if (x + 1 < x2) {
+        ++pairs;
+        rough += std::abs(at(x + 1, y) - at(x, y)) > 12 ? 1 : 0;
+      }
+      if (y + 1 < y2) {
+        ++pairs;
+        rough += std::abs(at(x, y + 1) - at(x, y)) > 12 ? 1 : 0;
+      }
+    }
+  }
+  return pairs == 0 ? 0.0 : static_cast<double>(rough) / pairs;
+}
+
 TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
   const RedactOptions o = baseOptions("redact_basic");
   const RedactStats s = runRedact(o);
@@ -112,6 +135,82 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
     // Far from the mask the picture is kept: same brightness, still detailed.
     EXPECT_NEAR(lumaMean(*out[i], 400, 220, 560, 330), lumaMean(*in[i], 400, 220, 560, 330), 3.0) << "frame " << i;
     EXPECT_GT(lumaStd(*out[i], 400, 220, 560, 330), 10.0) << "frame " << i;
+  }
+}
+
+// A face and a plate moving 2.5 and 2 box widths per keyframe interval (200 ms = 6 frames), turning
+// round at frame 30 and coming back. The fake detections list every frame (the pipeline asks only
+// for the keyframes), so they are also the ground truth: the box is pixelated on every output frame.
+TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
+  struct Target {
+    const char* cls;
+    double x0;
+    double y0;
+    double w;
+    double h;
+    double vx;  // px per frame
+  };
+  const std::vector<Target> targets = {{"face", 100, 60, 24, 24, 2.5 * 24 / 6},
+                                       {"plate", 560, 250, 40, 16, -2.0 * 40 / 6}};
+  // Integer pixel bounds of the target on frame f (out to the next pixel edge).
+  struct Rect {
+    int x1, y1, x2, y2;
+  };
+  const auto rectAt = [](const Target& t, int f) {
+    const double x = t.x0 + t.vx * (f <= 30 ? f : 60 - f);
+    return Rect{static_cast<int>(std::floor(x)), static_cast<int>(t.y0), static_cast<int>(std::ceil(x + t.w)),
+                static_cast<int>(t.y0 + t.h)};
+  };
+
+  RedactOptions o = baseOptions("redact_fast_movers");
+  o.input = test::checkerboardVideo();
+  o.config.maxDetectFps = o.config.detectFps;  // keyframes exactly every 200 ms, motion or not
+  const fs::path fake = test::tmpDir() / "redact_fast_movers.jsonl";
+  {
+    std::ofstream out(fake);
+    for (int f = 0; f < 60; ++f) {
+      for (const Target& t : targets) {
+        const Rect r = rectAt(t, f);
+        out << R"({"video":"checkerboard.mp4","frame":)" << f << R"(,"pts_ms":0,"cls":")" << t.cls << R"(","x1":)"
+            << r.x1 << R"(,"y1":)" << r.y1 << R"(,"x2":)" << r.x2 << R"(,"y2":)" << r.y2
+            << R"(,"score":0.9,"src":"fake"})" << '\n';
+      }
+    }
+  }
+  o.fakeDetections = fake;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 10);
+  EXPECT_EQ(s.maskedFrames, 60);
+
+  const auto in = decodeAll(o.input);
+  const auto out = decodeAll(s.video);
+  ASSERT_EQ(out.size(), 60u);
+  ASSERT_EQ(in.size(), 60u);
+  for (int f = 0; f < 60; ++f) {
+    for (const Target& t : targets) {
+      const Rect r = rectAt(t, f);
+      const double before = roughness(*in[f], r.x1, r.y1, r.x2, r.y2);
+      const double after = roughness(*out[f], r.x1, r.y1, r.x2, r.y2);
+      EXPECT_GT(before, 0.45) << t.cls << " frame " << f;
+      EXPECT_LT(after, 0.1) << t.cls << " frame " << f;
+    }
+    // Away from both paths the checkerboard survives the encoder, so a leak would show.
+    EXPECT_GT(roughness(*out[f], 300, 150, 340, 200), 0.4) << "frame " << f;
+  }
+  // Both targets are tracked: every frame between two keyframes (0, 6, ..., 54; the frames after the
+  // last one are extended) has an interpolated box of each class.
+  std::ifstream masks(s.outputDir / "masks.jsonl");
+  for (std::string line; std::getline(masks, line);) {
+    const nlohmann::json record = nlohmann::json::parse(line);
+    const int frame = record.at("frame").get<int>();
+    if (frame % 6 == 0 || frame > 54) continue;
+    for (const Target& t : targets) {
+      bool interpolated = false;
+      for (const auto& box : record.at("boxes")) {
+        interpolated = interpolated || (box.at("cls") == t.cls && box.at("origin") == "interpolated");
+      }
+      EXPECT_TRUE(interpolated) << t.cls << " frame " << frame;
+    }
   }
 }
 

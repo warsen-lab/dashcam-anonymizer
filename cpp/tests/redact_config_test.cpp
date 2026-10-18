@@ -20,8 +20,8 @@ namespace {
 // The keys of configs/redact.json (and of redactConfigToJson).
 const std::set<std::string> kAllKeys = {
     "detect_fps",         "max_detect_fps",       "motion_threshold",    "score_threshold",
-    "nms_iou",            "match_max_distance",   "expand_fraction",     "motion_expand_fraction",
-    "min_box_px",         "mosaic_min_block_px",  "mosaic_blocks_per_long_side"};
+    "nms_iou",            "match_max_distance",   "match_max_distance_loose", "expand_fraction",
+    "motion_expand_fraction", "min_box_px",       "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -31,6 +31,7 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.decode.scoreThreshold, d.decode.scoreThreshold);
   EXPECT_FLOAT_EQ(c.decode.nmsIou, d.decode.nmsIou);
   EXPECT_DOUBLE_EQ(c.timeline.matchMaxDistance, d.timeline.matchMaxDistance);
+  EXPECT_DOUBLE_EQ(c.timeline.matchMaxDistanceLoose, d.timeline.matchMaxDistanceLoose);
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, d.timeline.expandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.motionExpandFraction, d.timeline.motionExpandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.minBoxPx, d.timeline.minBoxPx);
@@ -50,6 +51,7 @@ RedactConfig nonDefaultConfig() {
   c.decode.scoreThreshold = 0.25f;
   c.decode.nmsIou = 0.375f;
   c.timeline.matchMaxDistance = 1.5;
+  c.timeline.matchMaxDistanceLoose = 4.5;
   c.timeline.expandFraction = 0.2;
   c.timeline.motionExpandFraction = 0.75;
   c.timeline.minBoxPx = 24.0;
@@ -86,11 +88,18 @@ TEST(RedactConfig, EmptyObjectGivesDefaultsAndKeysOverride) {
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.2);
 }
 
+TEST(RedactConfig, ReadsTheLooseMatchingDistance) {
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.matchMaxDistanceLoose, 6.0);
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"match_max_distance_loose": 3.5})", "t").timeline.matchMaxDistanceLoose, 3.5);
+}
+
 TEST(RedactConfig, RejectsBadInput) {
   const std::vector<std::string> bad = {
       R"({"detect_fps": 4})",          R"({"detect_fps": 20, "max_detect_fps": 10})",
       R"({"score_threshold": 1.5})",   R"({"nms_iou": 0})",
       R"({"match_max_distance": 0})",  R"({"expand_fraction": -0.1})",
+      R"({"match_max_distance_loose": 0})", R"({"match_max_distance_loose": -1})",
+      R"({"match_max_distance_loose": "6"})", R"({"match_max_distance_loose": 1e400})",
       R"({"mosaic_min_block_px": 0})", R"({"unknown_key": 1})",
       R"({"detect_fps": "5"})",        "[]",
       "{",
@@ -118,6 +127,7 @@ TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
       R"({"detect_fps": null})",       R"({"max_detect_fps": null})",
       R"({"motion_threshold": null})", R"({"score_threshold": null})",
       R"({"nms_iou": null})",          R"({"match_max_distance": null})",
+      R"({"match_max_distance_loose": null})",
       R"({"expand_fraction": null})",  R"({"motion_expand_fraction": null})",
       R"({"min_box_px": null})",       R"({"mosaic_blocks_per_long_side": null})",
   };
@@ -158,6 +168,7 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"score_threshold", [](RedactConfig& c, double v) { c.decode.scoreThreshold = static_cast<float>(v); }},
       {"nms_iou", [](RedactConfig& c, double v) { c.decode.nmsIou = static_cast<float>(v); }},
       {"match_max_distance", [](RedactConfig& c, double v) { c.timeline.matchMaxDistance = v; }},
+      {"match_max_distance_loose", [](RedactConfig& c, double v) { c.timeline.matchMaxDistanceLoose = v; }},
       {"expand_fraction", [](RedactConfig& c, double v) { c.timeline.expandFraction = v; }},
       {"motion_expand_fraction", [](RedactConfig& c, double v) { c.timeline.motionExpandFraction = v; }},
       {"min_box_px", [](RedactConfig& c, double v) { c.timeline.minBoxPx = v; }},
@@ -191,7 +202,8 @@ TEST(RedactConfig, DetectFpsMessageFormatsTheMinimum) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 11u);
+  EXPECT_EQ(j.size(), 12u);
+  EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 5.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
 }
