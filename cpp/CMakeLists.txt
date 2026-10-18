@@ -53,7 +53,9 @@ target_link_libraries(vc_extract_lib PUBLIC vc_core)
 find_package(Threads REQUIRED)
 
 add_library(vc_redact_lib STATIC
+  apps/vc_detect/detect_images.cpp
   apps/vc_redact/records.cpp
+  apps/vc_redact/redact_cli.cpp
   apps/vc_redact/redact_config.cpp
   apps/vc_redact/redact_job.cpp
 )
@@ -62,6 +64,12 @@ target_link_libraries(vc_redact_lib PUBLIC vc_detect_lib Threads::Threads)
 
 add_executable(vc_extract apps/vc_extract/main.cpp)
 target_link_libraries(vc_extract PRIVATE vc_extract_lib)
+
+add_executable(vc_redact apps/vc_redact/main.cpp)
+target_link_libraries(vc_redact PRIVATE vc_redact_lib)
+
+add_executable(vc_detect apps/vc_detect/main.cpp)
+target_link_libraries(vc_detect PRIVATE vc_redact_lib)
 
 option(VC_BUILD_TESTS "Build the GoogleTest suite" ON)
 if(VC_BUILD_TESTS)

@@ -5,6 +5,12 @@
 
 namespace vc {
 
+// Invalid command line.
+class UsageError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 // Failure while reading, decoding or writing media.
 class VcError : public std::runtime_error {
  public:

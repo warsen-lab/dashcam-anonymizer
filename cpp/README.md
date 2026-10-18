@@ -1,13 +1,30 @@
 # C++ 模块
 
-行车记录仪视频脱敏的 C++ 部分。当前包含抽帧工具 `vc_extract`（设计见
-`docs/superpowers/specs/2026-10-17-dashcam-redaction-mvp-design.md` §4）。
+行车记录仪视频脱敏的 C++ 部分。当前包含三个命令行工具（设计见
+`docs/superpowers/specs/2026-10-17-dashcam-redaction-mvp-design.md`，以下简称主设计；
+`vc_redact` 的命令行和组件另见 `docs/superpowers/specs/2026-10-18-redaction-proxy-validation-design.md` §5）：
+
+- `vc_extract`：从行车记录仪视频里抽帧，供标注和训练使用（主设计 §4）
+- `vc_redact`：给视频里的人脸和车牌打马赛克，输出脱敏后的视频（主设计 §7）
+- `vc_detect`：用 ONNX 学生模型批量检测 `vc_extract` 抽出的图片，用来核对 C++ 与 Python 的推理结果是否一致
 
 ## 依赖
 
 - CMake ≥ 3.24，支持 C++20 的编译器
 - FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux `libavformat-dev libavcodec-dev libswscale-dev libavutil-dev`。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
 - GoogleTest：macOS `brew install googletest`；Linux `libgtest-dev`
+- onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
+
+  ```bash
+  C=~/.cache/video-compliance/third_party && mkdir -p "$C/nlohmann_json-3.12.0/include/nlohmann"
+  curl -L -o /tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz
+  shasum -a 256 /tmp/ort.tgz   # 6ebb5062a934537c352937821f9fe9718e7de1a2db1122a93dd363ffd53a7012
+  tar -xzf /tmp/ort.tgz -C "$C"
+  curl -L -o "$C/nlohmann_json-3.12.0/include/nlohmann/json.hpp" https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
+  shasum -a 256 "$C/nlohmann_json-3.12.0/include/nlohmann/json.hpp"   # aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
+  ```
+
+  这两步会联网（合计约 43MB），只需做一次。**在计费流量的网络上先征得同意再下载**；校验和对不上就不要解压。其他机器或 worktree 直接复用同一份缓存，不必重复下载。
 
 ## 构建
 
@@ -18,17 +35,22 @@ cmake --build build/cpp -j 4
 
 不指定 `CMAKE_BUILD_TYPE` 时，单配置生成器（Makefile、Ninja）默认按 Release 构建。
 
+产物：`build/cpp/vc_extract`、`build/cpp/vc_redact`、`build/cpp/vc_detect` 和测试程序 `build/cpp/tests/vc_tests`。
+
 ## 测试
 
 测试视频由本机 `ffmpeg` 现场生成到 `build/cpp/tests/tmp/`，不需要联网。本机请按模块过滤运行：
 
 ```bash
 ./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*'
-./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*'
+./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
+./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*'
+./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:BoundedQueue.*:RedactConfig.*:Records.*'
+./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectImages.*'
 ```
 
-仓库目前没有配置 CI；上面三组过滤命令合起来覆盖全部测试，本机不需要跑 `ctest` 或不带过滤的全量。
+仓库目前没有配置 CI；上面六组过滤命令合起来覆盖全部测试，本机不需要跑 `ctest` 或不带过滤的全量。新增测试套件时把它加进其中一组，保证六组之并等于全部。
 
 ## vc_extract
 
@@ -66,3 +88,70 @@ cmake --build build/cpp -j 4
 `motion_score` 会写进 CSV，阈值可以在拿到真实视频后按分布调整。
 
 退出码：0 成功，1 处理失败，2 参数错误，3 输出目录已存在。
+
+## vc_redact
+
+```bash
+./build/cpp/vc_redact --input data/videos/sg_drive_2100s.mp4 --out data/redacted --model data/models/r1 --config configs/redact.json
+```
+
+输出写到 `data/redacted/sg_drive_2100s/`（目录名取视频文件名去掉扩展名的部分，规则同 `vc_extract`）：
+
+- `<视频名>.redacted.mp4`：打码后的视频。先写成 `.redacted.mp4.partial`，全部成功后才改名，所以不会出现写了一半的成品
+- `detections.jsonl`：关键帧上检测器的原始输出，每个框一行（格式见主设计 §3.2），`src` 为 `student`（回放时为 `fake`）
+- `masks.jsonl`：每一帧一行，列出这一帧实际打码的框及其来源 `origin`（`detected` 为关键帧上检测到的，`interpolated` 为前后两个关键帧上匹配到的同一目标之间插值出来的，`extended` 为没有匹配上、保守地延长或原地保持的框）
+- `stats.json`：帧数、关键帧数、检测与打码数量、实际使用的检测后端和编码器、音频与被丢弃的流、本次生效的完整配置，以及各阶段（decode / detect / track / mosaic / encode）的耗时和帧率
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--input` | 必填 | 输入视频 |
+| `--out` | 必填 | 输出根目录 |
+| `--model <dir>` | | 含 `model.onnx` 和 `model.json` 的目录（`vc_train export` 的产物）；与 `--fake-detections` 恰好给一个 |
+| `--fake-detections <jsonl>` | | 回放一份现成的 `detections.jsonl`，不跑模型；用于冒烟和复现 |
+| `--config <json>` | 内置默认值 | 参数文件，格式见 `configs/redact.json`；省略的键取默认值，未知键、类型不对或越界的值会报错（退出码 2） |
+| `--detect-fps <n>` | 5 | 基础关键帧检测频率，不能低于 5，覆盖配置里的 `detect_fps`；比 `max_detect_fps` 大时后者同步提高 |
+| `--detect-every-frame` | 关闭 | 每一帧都检测，用来做时间覆盖率评测的对照 |
+| `--ep` | coreml | `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者 |
+| `--hwaccel` | none | 解码方式：`none` / `auto` / `videotoolbox`（与 `vc_extract` 不同，默认不用硬解） |
+| `--encoder` | auto | `auto` 先试 VideoToolbox 再退到软编；`software` 直接用 libx264 / libx265 |
+| `--overwrite` | 关闭 | 覆盖上一次 `vc_redact` 的输出目录，见下方 |
+
+要点：
+
+- **检测器出错整段失败**：模型无法加载、推理报错、输出里有非有限的框等都会让整次运行失败，并删除本次已写出的所有文件，不留半成品；而不是悄悄少打几个码。
+- **音频直接拷贝**（不重编码）；GPS / 字幕 / 额外视频流等其他流会被丢弃，丢了哪些会列在运行结束的统计行和 `stats.json` 的 `dropped_streams` 里。
+- **编码格式跟随原片**：HEVC 仍是 HEVC，其他一律输出 H.264，容器固定为 MP4，码率取原片视频流的码率（读不到时 8 Mb/s）。VideoToolbox 不可用时退到 libx264 / libx265，实际用的编码器写在统计行 `encoder`。
+- **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或 CoreML 无法使用、已回退，回退时 stderr 会有提示）；`fake` 表示回放。
+- **模型必须是 float32**：`model.onnx` 的输入输出是 float16 或其他类型时会直接报错，不会静默转换。`model.json` 与 ONNX 的输入尺寸、类别数不一致也会报错。
+- **`--detect-every-frame`** 只是评测对照用的开关，会让检测耗时随帧数线性增长，日常处理不要打开。
+- **`--overwrite` 的安全规则**：只会替换空目录或含有 `masks.jsonl` 的目录（即上一次 `vc_redact` 的输出），其余一律拒绝；输出目录会包含输入视频时也拒绝（退出码 1，换一个 `--out`）。所有检查都在创建或删除任何东西之前完成。
+
+运行结束打印的统计行依次是输出文件、帧数与检测/打码数量、检测后端、编码器、音频与被丢弃的流、各阶段帧率、解码错误数和总耗时。
+
+退出码：0 成功，1 处理失败，2 参数错误（含无法读取或非法的 `--config`），3 输出目录已存在（或存在但不是 `vc_redact` 的输出）。
+
+不需要模型的冒烟运行（几秒钟）：
+
+```bash
+printf '{"video":"basic.mp4","frame":0,"pts_ms":0,"cls":"face","x1":100,"y1":100,"x2":200,"y2":180,"score":0.9,"src":"fake"}\n' > build/cpp/tests/tmp/smoke.jsonl
+./build/cpp/vc_redact --input build/cpp/tests/tmp/basic.mp4 --out build/cpp/tests/tmp/smoke --fake-detections build/cpp/tests/tmp/smoke.jsonl --overwrite
+```
+
+## vc_detect
+
+```bash
+./build/cpp/vc_extract --input data/videos/trip01_0003.mp4 --out data/frames
+./build/cpp/vc_detect --model data/models/r1 --frames data/frames/trip01_0003 --out data/frames/trip01_0003/cpp_detections.jsonl --ep cpu
+```
+
+用与 `vc_redact` 相同的 C++ 推理路径（onnxruntime + 同一套 letterbox 和解码）检测 `vc_extract` 输出目录里 `frames.csv` 列出的每一张 JPEG，把检测结果写成 `detections.jsonl`（`src` 为 `student`），方便与 Python 端对同一批图片的推理结果逐条比较，确认 C++ 与 Python 的推理一致。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--model <dir>` | 必填 | `model.onnx` + `model.json` |
+| `--frames <dir>` | 必填 | `vc_extract` 的输出目录（`frames.csv` 和 `<帧号:06d>.jpg`） |
+| `--out <jsonl>` | 必填 | 要写的检测文件；先写 `.partial` 再改名，失败时不留文件 |
+| `--ep` | cpu | `cpu` / `coreml`；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
+| `--score <x>` | 0.15 | 分数阈值，取值 [0, 1]；比较时应与 Python 端一致 |
+
+退出码：0 成功，1 处理失败，2 参数错误。

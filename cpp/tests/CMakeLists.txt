@@ -6,6 +6,7 @@ add_executable(vc_tests
   box_test.cpp
   box_timeline_test.cpp
   bounded_queue_test.cpp
+  detect_images_test.cpp
   extract_cli_test.cpp
   extract_job_test.cpp
   fake_detector_test.cpp
@@ -17,6 +18,7 @@ add_executable(vc_tests
   mosaic_test.cpp
   onnx_yolo_detector_test.cpp
   records_test.cpp
+  redact_cli_test.cpp
   redact_config_test.cpp
   redact_job_test.cpp
   video_reader_test.cpp
