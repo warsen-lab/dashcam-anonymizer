@@ -22,6 +22,7 @@ struct RedactConfig {
 };
 
 // Keys may be omitted; unknown keys, wrong types and out-of-range values throw VcError("<origin>: …").
+// mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in [1, 4096].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);

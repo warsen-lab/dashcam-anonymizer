@@ -46,6 +46,14 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"mosaic_min_block_px": 0})", R"({"unknown_key": 1})",
       R"({"detect_fps": "5"})",        "[]",
       "{",
+      // The mosaic settings are JSON integers in [1, 4096]: no fractions, no overflow, no bounds missed.
+      R"({"mosaic_min_block_px": 16.5})",           R"({"mosaic_min_block_px": 1e10})",
+      R"({"mosaic_min_block_px": 10000000000})",    R"({"mosaic_min_block_px": 4097})",
+      R"({"mosaic_min_block_px": -3})",             R"({"mosaic_min_block_px": 16.0})",
+      R"({"mosaic_min_block_px": null})",           R"({"mosaic_min_block_px": true})",
+      R"({"mosaic_blocks_per_long_side": 16.5})",   R"({"mosaic_blocks_per_long_side": 1e10})",
+      R"({"mosaic_blocks_per_long_side": 10000000000})", R"({"mosaic_blocks_per_long_side": 4097})",
+      R"({"mosaic_blocks_per_long_side": 0})",      R"({"mosaic_blocks_per_long_side": "8"})",
   };
   for (const std::string& text : bad) {
     try {
@@ -55,6 +63,26 @@ TEST(RedactConfig, RejectsBadInput) {
       EXPECT_EQ(std::string(e.what()).rfind("cfg: ", 0), 0u) << e.what();
     }
   }
+}
+
+TEST(RedactConfig, AcceptsTheMosaicSettingBounds) {
+  const RedactConfig low = parseRedactConfig(R"({"mosaic_min_block_px": 1, "mosaic_blocks_per_long_side": 1})", "t");
+  EXPECT_EQ(low.mosaic.minBlockPx, 1);
+  EXPECT_EQ(low.mosaic.blocksPerLongSide, 1);
+  const RedactConfig high =
+      parseRedactConfig(R"({"mosaic_min_block_px": 4096, "mosaic_blocks_per_long_side": 4096})", "t");
+  EXPECT_EQ(high.mosaic.minBlockPx, 4096);
+  EXPECT_EQ(high.mosaic.blocksPerLongSide, 4096);
+}
+
+TEST(RedactConfig, ValidateAppliesTheSameMosaicBounds) {
+  RedactConfig c;
+  c.mosaic.minBlockPx = 4097;
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+  c = RedactConfig{};
+  c.mosaic.blocksPerLongSide = 4097;
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+  EXPECT_NO_THROW(validateRedactConfig(RedactConfig{}, "cli"));
 }
 
 TEST(RedactConfig, SerialisesEveryKey) {

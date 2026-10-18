@@ -4,6 +4,8 @@
 #include <cmath>
 #include <utility>
 
+#include "common/vc_error.h"
+
 namespace vc {
 
 std::vector<Box> decodeYolov8(const float* pred, int numClasses, int64_t numAnchors,
@@ -36,6 +38,10 @@ std::vector<Box> decodeYolov8(const float* pred, int numClasses, int64_t numAnch
     const float cy = value(1, a);
     const float w = value(2, a);
     const float h = value(3, a);
+    // A kept anchor with a broken box is a broken model (or output): stop rather than mask less.
+    if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(w) || !std::isfinite(h)) {
+      throw VcError("model output has non-finite box coordinates");
+    }
     Box b;
     b.cls = best;
     b.score = score;

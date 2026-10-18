@@ -17,7 +17,8 @@ struct DecodeParams {
 // output): rows cx, cy, w, h in model-input pixels, then one score row per class. Each anchor
 // takes its best class; anchors with any NaN class score or a best score below the threshold are
 // dropped; boxes are divided by lb.r, clipped to the frame and suppressed per class. Same rules as
-// vc_train.geometry.decode_yolov8.
+// vc_train.geometry.decode_yolov8. Throws VcError when an anchor that passes the threshold has a
+// non-finite cx, cy, w or h (a broken model must stop the run, not lose a mask).
 //
 // Preconditions (not checked here; the caller checks the ONNX output shape against model.json):
 // numClasses >= 1, and pred holds (4 + numClasses) * numAnchors floats in the layout above.

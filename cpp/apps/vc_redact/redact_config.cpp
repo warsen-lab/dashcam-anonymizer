@@ -17,6 +17,21 @@ constexpr std::array<std::string_view, 11> kKeys = {
     "nms_iou",            "match_max_distance", "expand_fraction",     "motion_expand_fraction",
     "min_box_px",         "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
 
+// Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
+constexpr double kMaxMosaicSetting = 4096;
+
+// The setting as an int: `key` must be a JSON integer in [1, kMaxMosaicSetting] (a fraction or an
+// out-of-range number must not be truncated or overflow into a different value); absent: `fallback`.
+int mosaicSetting(const nlohmann::json& j, const char* key, int fallback, const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end()) return fallback;
+  const std::string rule = origin + ": " + key + " must be an integer in [1, 4096]";
+  if (!it->is_number_integer()) throw VcError(rule);
+  const double value = it->get<double>();  // exact for every value that can pass the range test
+  if (!(value >= 1 && value <= kMaxMosaicSetting)) throw VcError(rule);
+  return static_cast<int>(value);
+}
+
 }  // namespace
 
 void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
@@ -32,8 +47,10 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.timeline.expandFraction >= 0, "expand_fraction must be >= 0");
   require(c.timeline.motionExpandFraction >= 0, "motion_expand_fraction must be >= 0");
   require(c.timeline.minBoxPx >= 0, "min_box_px must be >= 0");
-  require(c.mosaic.minBlockPx >= 1, "mosaic_min_block_px must be >= 1");
-  require(c.mosaic.blocksPerLongSide >= 1, "mosaic_blocks_per_long_side must be >= 1");
+  require(c.mosaic.minBlockPx >= 1 && c.mosaic.minBlockPx <= kMaxMosaicSetting,
+          "mosaic_min_block_px must be in [1, 4096]");
+  require(c.mosaic.blocksPerLongSide >= 1 && c.mosaic.blocksPerLongSide <= kMaxMosaicSetting,
+          "mosaic_blocks_per_long_side must be in [1, 4096]");
 }
 
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin) {
@@ -60,11 +77,11 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
     c.timeline.expandFraction = j.value("expand_fraction", c.timeline.expandFraction);
     c.timeline.motionExpandFraction = j.value("motion_expand_fraction", c.timeline.motionExpandFraction);
     c.timeline.minBoxPx = j.value("min_box_px", c.timeline.minBoxPx);
-    c.mosaic.minBlockPx = j.value("mosaic_min_block_px", c.mosaic.minBlockPx);
-    c.mosaic.blocksPerLongSide = j.value("mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide);
   } catch (const nlohmann::json::exception& e) {
     throw VcError(origin + ": " + e.what());
   }
+  c.mosaic.minBlockPx = mosaicSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, origin);
+  c.mosaic.blocksPerLongSide = mosaicSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, origin);
   validateRedactConfig(c, origin);
   return c;
 }

@@ -6,6 +6,8 @@
 #include <limits>
 #include <vector>
 
+#include "common/vc_error.h"
+
 namespace vc {
 namespace {
 
@@ -67,6 +69,30 @@ TEST(YoloDecode, ClipsEachAxisToItsOwnFrameSize) {
   EXPECT_FLOAT_EQ(boxes[0].y1, 13);
   EXPECT_FLOAT_EQ(boxes[0].x2, 40);
   EXPECT_FLOAT_EQ(boxes[0].y2, 20);
+}
+
+TEST(YoloDecode, StopsOnNonFiniteBoxCoordinatesOfAnAnchorThatPassesTheThreshold) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  for (const float bad : {nan, inf, -inf}) {
+    const std::vector<std::array<float, 6>> broken = {{bad, 10, 4, 4, 0.9f, 0.0f},
+                                                      {10, bad, 4, 4, 0.9f, 0.0f},
+                                                      {10, 10, bad, 4, 0.9f, 0.0f},
+                                                      {10, 10, 4, bad, 0.9f, 0.0f}};
+    for (size_t i = 0; i < broken.size(); ++i) {
+      // A good anchor next to it does not rescue the run: the model output is broken.
+      const std::vector<float> p = pred({{5, 5, 4, 4, 0.9f, 0.0f}, broken[i]});
+      EXPECT_THROW(decodeYolov8(p.data(), 2, 2, makeLetterbox(20, 20, 20, 20), {}), VcError)
+          << "bad value " << bad << " in column " << i;
+    }
+  }
+}
+
+TEST(YoloDecode, IgnoresNonFiniteBoxesOfAnchorsBelowTheThreshold) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  const std::vector<float> p = pred({{nan, nan, nan, nan, 0.05f, 0.0f}, {inf, 10, -inf, 4, 0.0f, 0.1f}});
+  EXPECT_TRUE(decodeYolov8(p.data(), 2, 2, makeLetterbox(20, 20, 20, 20), {}).empty());
 }
 
 }  // namespace
