@@ -1,4 +1,9 @@
-"""Final coverage of the redacted video against the held-out teacher labels (proxy-validation spec §6.1)."""
+"""Final coverage of the redacted video against the held-out teacher labels (proxy-validation spec §3.3, §6.1).
+
+The reference has two tiers. A merged box that flags.csv marks `low_score` or `face_single_source` is *uncertain*
+(teachers unsure: many are false positives, some are real blurry plates); every other box is *confident*. P1, P2, the
+size bins and the temporal-fill rate are computed on the confident tier only; the uncertain tier is reported on its own.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +31,9 @@ from vc_eval.metrics import (
     size_bin_labels,
     stray_mask_fraction,
 )
-from vc_eval.records import detections_by_frame, read_masks
+from vc_eval.records import detections_by_frame, fused_file, read_masks, read_uncertain
+
+UNCERTAIN_TOL_PX = 0.05  # flags.csv and merged.jsonl both round to 0.1 px; a flagged box matches its target to within this
 
 
 @dataclass(frozen=True)
@@ -38,11 +45,15 @@ class Miss:
 
 @dataclass
 class ClassCoverage:
+    """`rate`, `bins`, `heatmap` and `temporal_fill` count confident must-mask targets, `uncertain` the flagged must-mask
+    ones, `best_effort` the small targets of both tiers."""
+
     rate: Rate
     bins: dict[str, Rate]
     heatmap: list[list[Rate]]
     temporal_fill: Rate
     best_effort: Rate
+    uncertain: Rate
 
 
 def _empty_class(frame_height: int) -> ClassCoverage:
@@ -52,6 +63,7 @@ def _empty_class(frame_height: int) -> ClassCoverage:
         heatmap=[[Rate() for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)],
         temporal_fill=Rate(),
         best_effort=Rate(),
+        uncertain=Rate(),
     )
 
 
@@ -62,7 +74,8 @@ class CoverageReport:
     width: int
     height: int
     classes: dict[str, ClassCoverage]
-    misses: list[Miss] = field(default_factory=list)
+    misses: list[Miss] = field(default_factory=list)  # confident must-mask targets that were not covered
+    uncertain_misses: list[Miss] = field(default_factory=list)  # the same for the uncertain tier
     stray_max: float = 0.0
     stray_mean: float = 0.0
     stray_p95: float = 0.0
@@ -89,32 +102,25 @@ class CoverageReport:
         return all(self.class_passed(c) for c in LABEL_CLASSES) and self.heatmap_passed()
 
 
-def _fused_labels(labels_dir: Path) -> Path:
-    """merged.jsonl, which vc_label fuse writes after processed.txt; a missing or stale copy is refused."""
-    merged = labels_dir / MERGED
-    if not merged.exists():
-        raise ValueError(f"{merged} does not exist; run vc_label fuse on {labels_dir} first")
-    if merged.stat().st_mtime < (labels_dir / PROCESSED).stat().st_mtime:
-        raise ValueError(f"{merged} is older than processed.txt; rerun vc_label fuse")
-    return merged
-
-
 @dataclass(frozen=True)
 class LabelInputs:
-    """The checked reference side of a coverage evaluation: labelled frames, their video and size, the fused targets."""
+    """The checked reference side of a coverage evaluation: labelled frames, their video and size, the fused targets and
+    the boxes among them that flags.csv marks uncertain."""
 
     used: list[FrameRef]
     video: str
     width: int
     height: int
     targets: dict[int, list[Box]]
+    uncertain: dict[int, list[Box]]
 
 
 def load_label_inputs(frames_dir: Path, labels_dir: Path) -> LabelInputs:
     """Reads and checks everything evaluate_coverage needs from the reference side.
 
     Raises ValueError for labels taught on other frames, a missing processed.txt, no labelled frames, a missing or
-    stale merged.jsonl, or merged labels of another video; OSError if frames.csv or a frame image cannot be read.
+    stale merged.jsonl or flags.csv, or merged labels of another video; OSError if frames.csv or a frame image cannot
+    be read.
     The sweep calls this for every segment before its first vc_redact run, which takes minutes.
     """
     refs = read_frames_csv(frames_dir)
@@ -126,12 +132,21 @@ def load_label_inputs(frames_dir: Path, labels_dir: Path) -> LabelInputs:
     if not used:
         raise ValueError(f"{labels_dir} has no labelled frames")
     video = used[0].video
-    merged = _fused_labels(labels_dir)
+    merged = fused_file(labels_dir, MERGED)
     merged_videos, targets = detections_by_frame(merged)
     if merged_videos - {video}:
         raise ValueError(f"{merged} holds labels for {', '.join(sorted(merged_videos - {video}))}, not {video}")
+    uncertain = read_uncertain(labels_dir)
     width, height = image_size(used[0].image)
-    return LabelInputs(used, video, width, height, targets)
+    return LabelInputs(used, video, width, height, targets, uncertain)
+
+
+def _is_uncertain(target: Box, flagged: list[Box]) -> bool:
+    """True when a flagged box of the target's class matches it within UNCERTAIN_TOL_PX on every coordinate."""
+    return any(
+        f.cls == target.cls and all(abs(getattr(f, k) - getattr(target, k)) <= UNCERTAIN_TOL_PX + 1e-9 for k in ("x1", "y1", "x2", "y2"))
+        for f in flagged
+    )
 
 
 def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
@@ -147,13 +162,19 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
             raise ValueError(f"{masks_path} has no line for frame {ref.frame}")
         frame_targets = [b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES]
         frame_masks = masks[ref.frame]
-        stray.append(stray_mask_fraction(frame_masks, frame_targets, width, height))
+        frame_flagged = labels.uncertain.get(ref.frame, [])
+        stray.append(stray_mask_fraction(frame_masks, frame_targets, width, height))  # references of both tiers
         for t in frame_targets:
             cc = report.classes[t.cls]
             covered = covered_fraction(t, frame_masks)
             hit = covered >= COVERED_FRACTION
             if not must_mask(t, height):
                 cc.best_effort = cc.best_effort.add(hit)
+                continue
+            if _is_uncertain(t, frame_flagged):
+                cc.uncertain = cc.uncertain.add(hit)
+                if not hit:
+                    report.uncertain_misses.append(Miss(ref.frame, t, covered))
                 continue
             cc.rate = cc.rate.add(hit)
             label = size_bin(t, height)
@@ -177,9 +198,10 @@ def _sum(rates: list[Rate]) -> Rate:
 def pool(reports: list[CoverageReport]) -> CoverageReport:
     """One report over all segments: the rates are summed, so P1 and P2 are judged on the pooled counts.
 
-    Misses are concatenated (their frame numbers belong to their own segment), `stray_max` and `stray_p95` are the
-    worst of the segments, `stray_mean` is weighted by the number of labelled frames, `video` joins the names with
-    commas. Reports of different frame sizes are refused: their size bins and heatmap cells do not line up.
+    The uncertain rates are summed too. Misses, confident and uncertain, are concatenated (their frame numbers belong
+    to their own segment), `stray_max` and `stray_p95` are the worst of the segments, `stray_mean` is weighted by the
+    number of labelled frames, `video` joins the names with commas. Reports of different frame sizes are refused:
+    their size bins and heatmap cells do not line up.
     """
     if not reports:
         raise ValueError("no coverage reports to pool")
@@ -197,6 +219,7 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
             heatmap=[[_sum([c.heatmap[row][col] for c in parts]) for col in range(GRID_COLS)] for row in range(GRID_ROWS)],
             temporal_fill=_sum([c.temporal_fill for c in parts]),
             best_effort=_sum([c.best_effort for c in parts]),
+            uncertain=_sum([c.uncertain for c in parts]),
         )
     frames = sum(r.frames for r in reports)
     return CoverageReport(
@@ -206,6 +229,7 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
         height=first.height,
         classes=classes,
         misses=[m for r in reports for m in r.misses],
+        uncertain_misses=[m for r in reports for m in r.uncertain_misses],
         stray_max=max(r.stray_max for r in reports),
         stray_mean=sum(r.stray_mean * r.frames for r in reports) / frames if frames else 0.0,
         stray_p95=max(r.stray_p95 for r in reports),

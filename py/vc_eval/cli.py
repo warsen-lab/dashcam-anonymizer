@@ -68,7 +68,9 @@ def _coverage(args) -> int:
         else f"weakest {weakest[0]} r{weakest[1]}c{weakest[2]} {_rate_text(weakest[3])}"
     )
     print(f"coverage {r.video}: " + ", ".join(f"{c} {_rate_text(r.classes[c].rate)}" for c in LABEL_CLASSES)
-          + f"; {len(r.misses)} misses; {cell}; {'PASS' if r.passed() else 'FAIL'}")
+          + f"; {len(r.misses)} misses; {cell}"
+          + "; low-confidence (report only): " + ", ".join(f"{c} {_rate_text(r.classes[c].uncertain)}" for c in LABEL_CLASSES)
+          + f"; {'PASS' if r.passed() else 'FAIL'}")
     _write_json(args.json, coverage_json(r))
     return 0 if r.passed() else 1
 

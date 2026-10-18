@@ -20,6 +20,7 @@ from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnai
 from vc_eval.temporal import TemporalReport, evaluate_temporal
 
 MAX_MISS_TILES = 60
+MAX_UNCERTAIN_TILES = 60
 MAX_TEMPORAL_TILES = 30
 STDERR_TAIL_LINES = 20
 STAGES = ("decode", "detect", "track", "mosaic", "encode")
@@ -105,6 +106,8 @@ def coverage_json(c: CoverageReport) -> dict:
     out["p2"] = "n/a" if weakest is None else ("pass" if c.heatmap_passed() else "fail")
     out["temporal_fill"] = {cls: rate_json(c.classes[cls].temporal_fill) for cls in LABEL_CLASSES}
     out["best_effort"] = {cls: rate_json(c.classes[cls].best_effort) for cls in LABEL_CLASSES}
+    # the rates above are the confident tier; the flagged (low-confidence) reference boxes are reported here and never gate
+    out["uncertain"] = {cls: rate_json(c.classes[cls].uncertain) for cls in LABEL_CLASSES}
     out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
     out["passed"] = c.passed()
     return out
@@ -172,20 +175,28 @@ def _href(path: str | Path) -> str:
 def _spot_sections(cfg: RunConfig, fps: float, reports: dict[str, tuple[CoverageReport, TemporalReport]]) -> list[Section]:
     img = cfg.out / "img"
     rng = random.Random(cfg.seed)
-    misses, temporal, random_items, links = [], [], [], []
+    misses, uncertain, temporal, random_items, links = [], [], [], [], []
     for stem, (coverage, tempo) in reports.items():
         video = _fps_dir(cfg, fps) / stem / f"{stem}.redacted.mp4"
         links.append((f"{stem} 打码视频（{fps:g} fps 检测）", _href(os.path.relpath(video, cfg.out))))
         chosen_misses = _spread(coverage.misses, MAX_MISS_TILES)
+        chosen_uncertain = _spread(coverage.uncertain_misses, MAX_UNCERTAIN_TILES)
         chosen_temporal = _spread(tempo.misses, MAX_TEMPORAL_TILES)
         frames = probe(video).video.frames or 0
         pick = sorted(rng.sample(range(frames), min(cfg.spot_frames, frames)))
-        decoded = extract_frames(video, [m.frame for m in chosen_misses] + [m.frame for m in chosen_temporal] + pick, img / stem / "redacted")
+        wanted = [m.frame for m in chosen_misses] + [m.frame for m in chosen_uncertain] + [m.frame for m in chosen_temporal] + pick
+        decoded = extract_frames(video, wanted, img / stem / "redacted")
         for n, m in enumerate(chosen_misses):
             original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
             box = m.box.clipped(coverage.width, coverage.height)  # miss_tile needs a box at least partly inside the image
             tile = miss_tile(original, decoded[m.frame], box, img / stem / f"miss_{m.frame:06d}_{n}.jpg")
             misses.append(Item(_href(tile.relative_to(cfg.out)), f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}（左原帧，右打码）"))
+        for n, m in enumerate(chosen_uncertain):
+            original = cfg.frames_root / stem / f"{m.frame:06d}.jpg"
+            box = m.box.clipped(coverage.width, coverage.height)
+            tile = miss_tile(original, decoded[m.frame], box, img / stem / f"uncertain_{m.frame:06d}_{n}.jpg")
+            caption = f"{stem} 帧 {m.frame} {m.box.cls} 覆盖 {m.covered:.0%}，老师分数 {m.box.score:.2f}（左原帧，右打码）"
+            uncertain.append(Item(_href(tile.relative_to(cfg.out)), caption))
         for n, m in enumerate(chosen_temporal):
             box = m.box.clipped(coverage.width, coverage.height)
             tile = miss_tile(decoded[m.frame], None, box, img / stem / f"temporal_{m.frame:06d}_{n}.jpg")
@@ -195,7 +206,13 @@ def _spot_sections(cfg: RunConfig, fps: float, reports: dict[str, tuple[Coverage
             random_items.append(Item(_href(thumb.relative_to(cfg.out)), f"{stem} 帧 {frame}"))
     return [
         Section("打码视频", "请完整看一遍，留意是否有露出的人脸或车牌。", [], links),
-        Section("未遮住的参照目标", "老师标注里必须遮住、但打码框覆盖不足 80% 的目标。", misses),
+        Section("未遮住的参照目标", "老师标注里必须遮住、但打码框覆盖不足 80% 的高置信目标（P1 / P2 按这一层判定）。", misses),
+        Section(
+            "低置信参照里没遮住的目标",
+            "这些是老师自己拿不准的参照框（分数偏低，或只有一个人脸老师检出），打码框覆盖不足 80%。其中不少是老师误检"
+            "（路障、标志、贴纸、装饰物），也有一部分是真的模糊车牌，请逐个用眼睛判断该不该遮；它们不计入 P1 / P2。",
+            uncertain,
+        ),
         Section("逐帧检测有、稀疏打码漏掉", "同一模型逐帧检测到、但关键帧 + 补框没盖住的框（打码后画面）。", temporal),
         Section("随机打码帧", "随机抽取的打码后画面，检查漏打与误打。", random_items),
     ]
@@ -251,8 +268,9 @@ def _summary_md(summary: dict) -> str:
         f"- 模型：{summary['model']}；检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
         chosen_line,
         "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
+        "- 参照分两层：P1 / P2 只按高置信参照（没被 `low_score` / `face_single_source` 标记的框）判定；低置信参照单列，只报告，不设门槛。",
         "",
-        "## 最终覆盖率（P1 / P2）",
+        "## 最终覆盖率（P1 / P2，高置信参照）",
         "",
         "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） | 最弱热力格 | 通过 |",
         "|---|---|---|---|---|---|",
@@ -270,6 +288,22 @@ def _summary_md(summary: dict) -> str:
             "",
             f"n/a：没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，所以 P2 空洞满足（不阻止选定）；空间上的薄弱点只能靠用户的抽查（P4）把关。",
         ]
+    lines += [
+        "",
+        "## 低置信参照（只报告，不设门槛）",
+        "",
+        "被 `low_score` / `face_single_source` 标记的参照框，只算必须遮住的。其中不少是老师误检（路障、标志、贴纸、装饰物），"
+        "也有一部分是真的模糊车牌，所以不进 P1 / P2；没遮住的在抽查页的“低置信参照里没遮住的目标”一节，请用眼睛判断。",
+        "",
+        "| 段 | fps | 人脸（95% 区间） | 车牌（95% 区间） |",
+        "|---|---|---|---|",
+    ]
+    for fps in sorted({r["fps"] for r in runs}):
+        for r in (r for r in runs if r["fps"] == fps):
+            u = r["coverage"]["uncertain"]
+            lines.append(f"| {r['stem']} | {fps:g} | {_pct(u['face'])} | {_pct(u['plate'])} |")
+        u = next(p for p in pooled if p["fps"] == fps)["coverage"]["uncertain"]
+        lines.append(f"| 合计 | {fps:g} | {_pct(u['face'])} | {_pct(u['plate'])} |")
     lines += ["", "## 时间覆盖率", "", "| 段 | fps | 人脸 | 车牌 |", "|---|---|---|---|"]
     lines += [f"| {r['stem']} | {r['fps']:g} | {_pct(r['temporal']['face'])} | {_pct(r['temporal']['plate'])} |" for r in runs]
     lines += ["", "## 输出完整性（P3）", "", "| 段 | fps | 可解码 | 帧数 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|"]

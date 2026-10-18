@@ -25,6 +25,8 @@ MASK = {"cls": "face", "x1": 35, "y1": 25, "x2": 65, "y2": 65, "origin": "detect
 PLATE_MASK = {"cls": "plate", "x1": 95, "y1": 75, "x2": 155, "y2": 105, "origin": "detected"}
 # both classes need reference targets or P1 cannot pass; the dense detector only ever sees the face
 TEACHERS = (Box("face", 40, 30, 60, 60, src="teacher_retinaface"), Box("plate", 100, 80, 150, 100, src="teacher_owlv2"))
+# a teacher box the fuse step flagged (low_score) in every labelled frame: an uncertain reference, away from MASK and PLATE_MASK
+UNCERTAIN = Box("face", 100, 10, 130, 50, score=0.35, src="teacher_yunet")
 GRID_FRAMES = list(range(0, N, 3))  # 10 labelled frames x 10 faces and 10 plates = 100 targets per class and segment
 
 
@@ -49,7 +51,8 @@ def _grid_masks(missed):
     return masks
 
 
-def _setup(root, stem=STEM, labelled=range(0, N, 6), teachers=TEACHERS):
+def _setup(root, stem=STEM, labelled=range(0, N, 6), teachers=TEACHERS, flagged=()):
+    """Reference side of one segment; `flagged` are boxes of `teachers` that flags.csv marks low_score in every labelled frame."""
     videos = root / "videos"
     videos.mkdir(exist_ok=True)
     video = videos / f"{stem}.mp4"
@@ -71,6 +74,12 @@ def _setup(root, stem=STEM, labelled=range(0, N, 6), teachers=TEACHERS):
     done = list(labelled)
     (labels / "processed.txt").write_text("".join(f"{fr}\n" for fr in done))
     write_jsonl(labels / "merged.jsonl", [Detection(f"{stem}.mp4", fr, fr * 33.3, box) for fr in done for box in teachers])
+    with (labels / "flags.csv").open("w", newline="") as f:  # after merged.jsonl, like vc_label fuse; just the header with no flags
+        w = csv.writer(f)
+        w.writerow(["video", "frame", "rule", "cls", "x1", "y1", "x2", "y2", "score", "detail"])
+        for fr in done:
+            for b in flagged:
+                w.writerow([f"{stem}.mp4", fr, "low_score", b.cls, b.x1, b.y1, b.x2, b.y2, b.score, f"score {b.score:.2f}"])
     return video
 
 
@@ -292,6 +301,11 @@ def _break_labels(labels, kind):
         os.utime(labels / "merged.jsonl", (t, t))
     elif kind == "missing merged":
         (labels / "merged.jsonl").unlink()
+    elif kind == "missing flags":
+        (labels / "flags.csv").unlink()
+    elif kind == "stale flags":
+        t = (labels / "processed.txt").stat().st_mtime - 100
+        os.utime(labels / "flags.csv", (t, t))
     elif kind == "missing processed":
         (labels / "processed.txt").unlink()
     elif kind == "labels for other frames":
@@ -306,6 +320,8 @@ def _break_labels(labels, kind):
     [
         ("stale merged", "older than processed.txt"),
         ("missing merged", "vc_label fuse"),
+        ("stale flags", r"flags\.csv is older than processed\.txt"),
+        ("missing flags", r"flags\.csv does not exist; run vc_label fuse"),
         ("missing processed", "processed.txt does not exist"),
         ("labels for other frames", "does not match"),
     ],
@@ -318,6 +334,77 @@ def test_bad_label_inputs_of_any_segment_are_refused_before_any_run(tmp_path, ki
     with pytest.raises(ValueError, match=message):
         run_all(_cfg(tmp_path, stems=[STEM, "seg2"]), runner=_fake_runner(calls))
     assert calls == []
+
+
+def _section(page, title):
+    """The part of the spot-check page under the <h2> `title`."""
+    return page.split(f"<h2>{title}</h2>")[1].split("<h2>")[0]
+
+
+def test_uncertain_misses_never_gate_but_are_reported_and_shown_on_their_own(tmp_path, monkeypatch):
+    _setup(tmp_path, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+
+    assert summary["chosen_fps"] == 5  # the confident tier is fully masked; the uncovered flagged face does not gate
+    coverage = summary["runs"][0]["coverage"]
+    assert (coverage["face"]["hits"], coverage["face"]["total"]) == (5, 5)  # P1 counts the confident face only
+    assert (coverage["uncertain"]["face"]["hits"], coverage["uncertain"]["face"]["total"]) == (0, 5)
+    assert coverage["uncertain"]["plate"]["total"] == 0 and coverage["uncertain"]["plate"]["value"] is None
+    assert coverage["passed"] is True and summary["pooled"][0]["coverage"]["uncertain"] == coverage["uncertain"]
+
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "P1 / P2 只按高置信参照" in md
+    low = md.split("## 低置信参照")[1].split("##")[0]
+    assert "只报告" in low and "不设门槛" in low
+    row = _row(low, "| seg | 5 |")
+    assert "0.0%" in row and "n=5" in row and row.split("|")[4].strip() == "—"  # no flagged plate: a dash
+    assert "n=5" in _row(low, "| 合计 | 5 |")
+    table = md.split("## 最终覆盖率")[1].split("##")[0]
+    assert "100.0%" in _row(table, "| seg | 5 |") and _row(table, "| 合计 | 5 |").rstrip().endswith("| 是 |")
+
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    titles = re.findall(r"<h2>(.*?)</h2>", page)
+    assert titles.index("低置信参照里没遮住的目标") == titles.index("未遮住的参照目标") + 1  # right after the confident misses
+    assert "<figure>" not in _section(page, "未遮住的参照目标")  # no confident miss
+    uncertain = _section(page, "低置信参照里没遮住的目标")
+    assert uncertain.count("<figure>") == 5 and "误检" in uncertain and "模糊" in uncertain  # the note: false positives and real plates
+    assert "帧 12 face 覆盖 0%" in uncertain and "分数 0.35" in uncertain
+    assert len(list((tmp_path / "report" / "img" / STEM).glob("uncertain_*.jpg"))) == 5
+
+
+def test_pooled_uncertain_rates_add_up_over_the_segments(tmp_path, monkeypatch):
+    for stem in ("sega", "segb"):
+        _setup(tmp_path, stem, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))
+    _python_dets(monkeypatch)
+    covers_flagged = {"cls": "face", "x1": 95, "y1": 5, "x2": 135, "y2": 55, "origin": "detected"}
+    masks = lambda stem, frame: [MASK, PLATE_MASK] + ([covers_flagged] if stem == "sega" else [])  # noqa: E731
+    summary = run_all(_cfg(tmp_path, stems=["sega", "segb"], fps_values=[5]), runner=_fake_runner([], masks=masks))
+
+    by_stem = {r["stem"]: r["coverage"]["uncertain"]["face"] for r in summary["runs"]}
+    assert (by_stem["sega"]["hits"], by_stem["sega"]["total"]) == (5, 5)
+    assert (by_stem["segb"]["hits"], by_stem["segb"]["total"]) == (0, 5)
+    pooled = summary["pooled"][0]["coverage"]["uncertain"]["face"]
+    assert (pooled["hits"], pooled["total"]) == (5, 10)
+    assert summary["chosen_fps"] == 5
+    low = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 低置信参照")[1].split("##")[0]
+    assert "n=10" in _row(low, "| 合计 | 5 |")
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    assert _section(page, "低置信参照里没遮住的目标").count("<figure>") == 5  # only segb's misses
+
+
+def test_uncertain_tiles_are_capped_at_sixty_and_spread_over_the_segment(tmp_path, monkeypatch):
+    flagged = tuple(Box("face", 5 + 50 * k, 2, 25 + 50 * k, 22, score=0.3, src="teacher_yunet") for k in range(3))  # clear of both masks
+    _setup(tmp_path, labelled=range(N), teachers=(*TEACHERS, *flagged), flagged=flagged)  # 30 frames x 3 = 90 uncertain misses
+    _python_dets(monkeypatch)
+    run_all(_cfg(tmp_path, fps_values=[5]), runner=_fake_runner([]))
+
+    page = (tmp_path / "report" / "index.html").read_text(encoding="utf-8")
+    uncertain = _section(page, "低置信参照里没遮住的目标")
+    assert uncertain.count("<figure>") == 60
+    frames = [int(n) for n in re.findall(r"帧 (\d+) ", uncertain)]
+    assert min(frames) == 0 and max(frames) >= 28  # spread over the whole segment, not the first 20 frames
+    assert len(list((tmp_path / "report" / "img" / STEM).glob("uncertain_*.jpg"))) == 60
 
 
 def test_consistency_runs_before_the_sweeps(tmp_path, monkeypatch):
@@ -461,6 +548,21 @@ def test_cli_coverage_passes_with_covering_masks(tmp_path, capsys):
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "face 5/5" in out and "plate 5/5" in out and "PASS" in out
+
+
+def test_cli_coverage_reports_the_low_confidence_tier_without_judging_it(tmp_path, capsys):
+    _setup(tmp_path, teachers=(*TEACHERS, UNCERTAIN), flagged=(UNCERTAIN,))
+    masks = tmp_path / "masks.jsonl"
+    with masks.open("w") as f:
+        for fr in range(N):
+            f.write(json.dumps({"video": f"{STEM}.mp4", "frame": fr, "boxes": [MASK, PLATE_MASK]}) + "\n")
+    args = ["coverage", "--frames", str(tmp_path / "frames" / STEM), "--labels", str(tmp_path / "labels" / STEM), "--masks", str(masks)]
+    assert main([*args, "--json", str(tmp_path / "c.json")]) == 0  # the uncovered flagged face is not a failure
+    out = capsys.readouterr().out
+    assert "PASS" in out and "face 5/5" in out.split("low-confidence")[0]
+    assert "face 0/5" in out.split("low-confidence")[1]
+    data = json.loads((tmp_path / "c.json").read_text())
+    assert data["face"]["total"] == 5 and data["uncertain"]["face"]["total"] == 5 and data["uncertain"]["face"]["hits"] == 0
 
 
 def test_cli_temporal_and_integrity(tmp_path, capsys):

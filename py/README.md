@@ -129,24 +129,34 @@ PYTHONPATH=py .venv/bin/python -m vc_label import-review --frames data/frames/<s
 
 | # | 条件 | 谁判定 |
 |---|---|---|
-| P1 | 最终覆盖率：人脸、车牌各自 ≥ 99%，按所有留出段的目标数相加后的合并覆盖率判定（规格要的是每类一个最终召回；同时给 95% 区间；某一类一个必须遮住的目标都没有时不通过） | `vc_eval` |
-| P2 | 热力图（6×4，同样按合并后的计数）中样本 ≥ 30 的格子覆盖率均 ≥ 97%；**没有格子够 30 个样本时显示 `n/a`：没有热力格达到 30 个目标，所以 P2 空洞满足（不阻止选定），空间上的薄弱点只能靠用户的抽查（P4）把关** | `vc_eval` |
+| P1 | 最终覆盖率（高置信参照，见下）：人脸、车牌各自 ≥ 99%，按所有留出段的目标数相加后的合并覆盖率判定（规格要的是每类一个最终召回；同时给 95% 区间；某一类一个必须遮住的目标都没有时不通过） | `vc_eval` |
+| P2 | 热力图（6×4，高置信参照，同样按合并后的计数）中样本 ≥ 30 的格子覆盖率均 ≥ 97%；**没有格子够 30 个样本时显示 `n/a`：没有热力格达到 30 个目标，所以 P2 空洞满足（不阻止选定），空间上的薄弱点只能靠用户的抽查（P4）把关** | `vc_eval` |
 | P3 | 输出完整性：可解码、帧数 ±1、时长、音频保留、音画同步；**每一段**都要通过 | `vc_eval` |
 | P4 | 抽查页与打码视频里没有明显露出的人脸或车牌 | 用户看 `index.html` 后确认 |
 
+### 参照分两层
+
+老师融合标注里的框按 `data/labels/<stem>/flags.csv` 分成两层（规格 §3.3）：
+
+- **高置信**：没被标为 `low_score` 或 `face_single_source` 的框。P1（按类覆盖率）、P2（热力图）、尺寸档和 `temporal_fill` 覆盖率只按这一层算。
+- **低置信**：被这两条规则标记的框（分数偏低，或只有一个人脸老师检出）。单列“必须遮住”的覆盖率（`summary.md` 的“低置信参照”表、`summary.json` 里 `coverage.uncertain` 按类给出），**只报告，不设门槛**；没遮住的框放在抽查页的“低置信参照里没遮住的目标”一节（每段最多 60 张，均匀抽取，左原帧、右打码），供你用眼睛判断。
+- **为什么要分**：低分车牌和单老师人脸里有大量老师自己的误检（路障、标志、贴纸、装饰物），全算进 P1 会把正常的打码判成漏打；但其中也有一部分是真的模糊小车牌，所以不能丢掉，只能交给抽查页和将来的人工金标准把关。
+- 判层方式：同一帧、同一类的 `flags.csv` 框与参照框的四个坐标各差不超过 0.05 px（两个文件都按 0.1 px 取整）就算同一个框。太小、算“尽力遮挡”的目标两层都计入 `best_effort`；误打面积（`stray`）以两层所有参照框为准。
+- `flags.csv` 必须在、且不比 `processed.txt` 旧，否则和 `merged.jsonl` 一样直接退出（重跑 `vc_label fuse`）。
+
 ### run：检测频率扫描
 
-在仓库根目录运行。前提：每段留出视频有 `data/videos/<stem>.mp4`、`data/frames/<stem>/`、`data/labels/<stem>/`（已跑过 `vc_label fuse`，`merged.jsonl` 不能比 `processed.txt` 旧），`--model` 是含 `model.onnx` 和 `model.json` 的目录，`build/cpp-release/` 下有 `vc_redact` 和 `vc_detect`。
+在仓库根目录运行。前提：每段留出视频有 `data/videos/<stem>.mp4`、`data/frames/<stem>/`、`data/labels/<stem>/`（已跑过 `vc_label fuse`，`merged.jsonl` 和 `flags.csv` 都不能比 `processed.txt` 旧），`--model` 是含 `model.onnx` 和 `model.json` 的目录，`build/cpp-release/` 下有 `vc_redact` 和 `vc_detect`。
 
 ```bash
 PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <模型目录> --out data/reports/<run>
 ```
 
 - `--fps 5,10,15,30`（默认）：要扫描的检测频率；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。
-- 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 在且不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（缺 `vc_detect` 或模型坏了在这里就停），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
+- 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 和 `flags.csv` 在且都不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（缺 `vc_detect` 或模型坏了在这里就停），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
 - 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
-- 选定频率 = 合并覆盖率（所有留出段的目标数相加后判 P1 / P2）通过、且每一段的输出完整性（P3）都通过的最小频率；没有就显示“无满足 P1–P3 的频率”，抽查页改用最小的频率。`summary.md` 的覆盖率表每个频率先列各段、再列一行“合计”，“通过”一栏只在“合计”行，各段行仅供参考；`summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed` 和 `passed`）。
-- 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、时间覆盖率、完整性、误打面积、速度（标题注明段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。`--out` 不能在任何 `data/frames/<stem>/` 里面。
+- 选定频率 = 合并覆盖率（所有留出段的目标数相加后判 P1 / P2）通过、且每一段的输出完整性（P3）都通过的最小频率；没有就显示“无满足 P1–P3 的频率”，抽查页改用最小的频率。`summary.md` 的覆盖率表每个频率先列各段、再列一行“合计”，“通过”一栏只在“合计”行，各段行仅供参考；紧接着的“低置信参照”表同样先各段后合计，只报告；`summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed` 和 `passed`）。
+- 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、时间覆盖率、完整性、误打面积、速度（标题注明段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。`--out` 不能在任何 `data/frames/<stem>/` 里面。
 - 退出码：0 选出了频率；1 没有频率通过；2 输入或运行错误（stderr 打印 `vc_eval: <原因>`）。
 
 ### 单项子命令
@@ -163,7 +173,7 @@ PYTHONPATH=py .venv/bin/python -m vc_eval temporal --dense data/redacted/dense/<
 PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source data/videos/<stem>.mp4 --redacted data/redacted/fps5/<stem>/<stem>.redacted.mp4 [--json out.json]
 ```
 
-各打印一行摘要，`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
+各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
 
 ### vc_eval 的测试
 

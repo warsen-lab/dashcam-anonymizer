@@ -9,7 +9,7 @@ import pytest
 from vc_label.contracts import Box, Detection, write_jsonl
 from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, pool
 from vc_eval.metrics import Rate
-from vc_eval.records import detections_by_frame, read_masks
+from vc_eval.records import detections_by_frame, read_masks, read_uncertain
 from vc_eval.temporal import evaluate_temporal
 
 W, H = 1920, 1080
@@ -27,12 +27,29 @@ def _frames(root, stem, frames):
     return d
 
 
-def _labels(root, stem, boxes_by_frame):
+FLAG_HEADER = ["video", "frame", "rule", "cls", "x1", "y1", "x2", "y2", "score", "detail"]
+
+
+def _write_flags(labels, stem, flags):
+    """flags.csv as vc_label fuse writes it; `flags` lists (frame, rule, Box), an empty list leaves just the header.
+
+    The coordinates are written as they are (fuse rounds them to 0.1) so a test can put a flagged box a few
+    hundredths of a pixel away from its target.
+    """
+    with (labels / "flags.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(FLAG_HEADER)
+        for frame, rule, b in flags:
+            w.writerow([f"{stem}.mp4", frame, rule, b.cls, b.x1, b.y1, b.x2, b.y2, b.score, ""])
+
+
+def _labels(root, stem, boxes_by_frame, flags=()):
     d = root / "labels" / stem
     d.mkdir(parents=True)
-    # processed.txt first, then merged.jsonl, so merged is never older than processed (the fuse order)
+    # processed.txt first, then merged.jsonl and flags.csv, so neither is ever older than processed (the fuse order)
     (d / "processed.txt").write_text("".join(f"{fr}\n" for fr in boxes_by_frame))
     write_jsonl(d / "merged.jsonl", [Detection(f"{stem}.mp4", fr, fr * 16.7, b) for fr, bs in boxes_by_frame.items() for b in bs])
+    _write_flags(d, stem, flags)
     return d
 
 
@@ -284,6 +301,195 @@ def test_coverage_refuses_a_missing_processed_file(tmp_path):
         evaluate_coverage(frames, labels, masks)
 
 
+def _labels_dir(tmp_path):
+    d = tmp_path / "labels"
+    d.mkdir()
+    (d / "processed.txt").write_text("0\n")
+    return d
+
+
+def _shape(boxes):
+    return [(b.cls, b.x1, b.y1, b.x2, b.y2) for b in boxes]
+
+
+def test_read_uncertain_keeps_low_score_and_single_source_boxes_once(tmp_path):
+    labels = _labels_dir(tmp_path)
+    face = Box("face", 100, 100, 130, 140, score=0.4)
+    plate = Box("plate", 300, 300, 340, 310, score=0.3)
+    other = Box("face", 500, 500, 530, 540, score=0.6)
+    flags = [
+        (3, "low_score", face),
+        (3, "face_single_source", face),  # the same box under both rules: once
+        (3, "low_score", plate),
+        (7, "face_single_source", other),
+        (3, "temporal_fill", Box("face", 700, 100, 730, 140)),  # other rules are not uncertainty
+        (3, "person_without_face", Box("person", 10, 10, 90, 400)),
+        (7, "vehicle_without_plate", Box("vehicle", 10, 10, 900, 400)),
+    ]
+    _write_flags(labels, "a", flags)
+    got = read_uncertain(labels)
+    assert sorted(got) == [3, 7]
+    assert _shape(got[3]) == [("face", 100, 100, 130, 140), ("plate", 300, 300, 340, 310)]
+    assert _shape(got[7]) == [("face", 500, 500, 530, 540)]
+    assert got[3][1].score == 0.3
+
+
+def test_read_uncertain_of_a_header_only_file_is_empty(tmp_path):
+    labels = _labels_dir(tmp_path)
+    _write_flags(labels, "a", [])
+    assert read_uncertain(labels) == {}
+
+
+def test_read_uncertain_refuses_a_missing_flags_file(tmp_path):
+    labels = _labels_dir(tmp_path)
+    with pytest.raises(ValueError, match=r"flags\.csv does not exist; run vc_label fuse"):
+        read_uncertain(labels)
+
+
+def test_read_uncertain_refuses_a_flags_file_older_than_processed(tmp_path):
+    labels = _labels_dir(tmp_path)
+    _write_flags(labels, "a", [])
+    processed_mtime = (labels / "processed.txt").stat().st_mtime
+    os.utime(labels / "flags.csv", (processed_mtime - 100, processed_mtime - 100))
+    with pytest.raises(ValueError, match=r"flags\.csv is older than processed\.txt; rerun vc_label fuse"):
+        read_uncertain(labels)
+
+
+def test_read_uncertain_names_the_file_and_line_of_a_bad_row_or_header(tmp_path):
+    labels = _labels_dir(tmp_path)
+    _write_flags(labels, "a", [])
+    with (labels / "flags.csv").open("a") as f:
+        f.write("a.mp4,3,low_score,face,1,2,3,4,0.5,\n")
+        f.write("a.mp4,x,low_score,face,1,2,3,4,0.5,\n")  # line 3: the frame is not a number
+    with pytest.raises(ValueError, match=r"flags\.csv line 3"):
+        read_uncertain(labels)
+    (labels / "flags.csv").write_text("video,frame\n")
+    with pytest.raises(ValueError, match=r"flags\.csv.*rule"):
+        read_uncertain(labels)
+
+
+def test_a_target_is_uncertain_when_a_flagged_box_of_its_class_matches_every_coordinate_within_0_05_px(tmp_path):
+    frames = _frames(tmp_path, "a", [0, 10])
+    exact = Box("face", 100, 100, 130, 140, src="teacher_retinaface")  # flagged with the same coordinates
+    near = Box("face", 300, 100, 330, 140, src="teacher_retinaface")  # flagged 0.04 px off on every coordinate
+    off = Box("face", 500, 100, 530, 140, src="teacher_retinaface")  # flagged 0.06 px off on one coordinate: not it
+    plate = Box("plate", 700, 100, 760, 120, src="teacher_owlv2")  # flagged, but as a face
+    elsewhere = Box("face", 900, 100, 930, 140, src="teacher_retinaface")  # flagged in frame 10, which has no targets
+    flags = [
+        (0, "low_score", exact),
+        (0, "face_single_source", Box("face", 300.04, 100.04, 329.96, 139.96)),
+        (0, "low_score", Box("face", 500.06, 100, 530, 140)),
+        (0, "low_score", Box("face", 700, 100, 760, 120)),
+        (10, "low_score", elsewhere),
+    ]
+    labels = _labels(tmp_path, "a", {0: [exact, near, off, plate, elsewhere], 10: []}, flags)
+    covering = [Box(t.cls, t.x1 - 5, t.y1 - 5, t.x2 + 5, t.y2 + 5) for t in (exact, off, elsewhere)]
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: covering}, [0, 10])
+    r = evaluate_coverage(frames, labels, masks)
+    faces, plates = r.classes["face"], r.classes["plate"]
+    assert (faces.uncertain.hits, faces.uncertain.total) == (1, 2)  # exact is covered, near is not
+    assert (faces.rate.hits, faces.rate.total) == (2, 2)  # off and elsewhere, both covered
+    assert (plates.uncertain.hits, plates.uncertain.total) == (0, 0)
+    assert (plates.rate.hits, plates.rate.total) == (0, 1)  # a face flag does not make a plate uncertain
+    assert [(m.frame, m.box.cls) for m in r.misses] == [(0, "plate")]
+    assert [(m.frame, m.box) for m in r.uncertain_misses] == [(0, near)]
+    assert r.uncertain_misses[0].covered == 0.0
+
+
+def test_bins_heatmap_and_temporal_fill_count_the_confident_tier_only(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    confident = Box("face", 100, 100, 130, 140, src="teacher_retinaface")  # 40 px high: bin 24-48, cell (0, 0)
+    flagged = Box("face", 1000, 700, 1030, 740, src="teacher_retinaface")  # bin 24-48, cell (2, 3)
+    filled = Box("face", 1500, 100, 1530, 140, src="temporal_fill")
+    labels = _labels(tmp_path, "a", {0: [confident, flagged, filled]}, [(0, "low_score", flagged)])
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: [Box("face", 95, 95, 135, 145)]}, [0])
+    faces = evaluate_coverage(frames, labels, masks).classes["face"]
+    assert (faces.rate.hits, faces.rate.total) == (1, 2)
+    assert (faces.uncertain.hits, faces.uncertain.total) == (0, 1)
+    assert (faces.bins["24-48"].hits, faces.bins["24-48"].total) == (1, 2)
+    assert faces.heatmap[0][0] == Rate(1, 1) and faces.heatmap[2][3] == Rate() and faces.heatmap[0][4] == Rate(0, 1)
+    assert (faces.temporal_fill.hits, faces.temporal_fill.total) == (0, 1)
+
+
+def test_best_effort_counts_small_targets_of_both_tiers_and_uncertain_only_must_mask_ones(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    small = Box("face", 500, 500, 505, 508, src="teacher_yunet")  # 8 px high: best effort
+    small_flagged = Box("face", 600, 500, 605, 508, src="teacher_yunet")
+    big_flagged = Box("face", 100, 100, 130, 140, src="teacher_yunet")
+    flags = [(0, "face_single_source", small_flagged), (0, "face_single_source", big_flagged)]
+    labels = _labels(tmp_path, "a", {0: [small, small_flagged, big_flagged]}, flags)
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: [Box("face", 595, 495, 610, 512)]}, [0])
+    r = evaluate_coverage(frames, labels, masks)
+    faces = r.classes["face"]
+    assert (faces.best_effort.hits, faces.best_effort.total) == (1, 2)
+    assert (faces.uncertain.hits, faces.uncertain.total) == (0, 1)  # only the 40 px face
+    assert (faces.rate.hits, faces.rate.total) == (0, 0)
+    assert r.misses == [] and [m.box for m in r.uncertain_misses] == [big_flagged]
+
+
+def test_an_uncertain_miss_fails_neither_p1_nor_p2(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    confident = _cell_targets()  # 30 faces in heatmap cell (0, 0)
+    flagged = [Box("face", 303, 10 + 50 * r, 333, 50 + 50 * r, src="teacher_yunet") for r in range(5)]  # same cell, clear of the others
+    plate = Box("plate", 1000, 600, 1040, 610, src="teacher_owlv2")
+    labels = _labels(tmp_path, "a", {0: [*confident, *flagged, plate]}, [(0, "face_single_source", b) for b in flagged])
+    masks = _masks(
+        tmp_path / "m.jsonl", "a.mp4",
+        {0: [Box(b.cls, b.x1 - 2, b.y1 - 2, b.x2 + 2, b.y2 + 2) for b in [*confident, plate]]},
+        [0],
+    )
+    r = evaluate_coverage(frames, labels, masks)
+    faces = r.classes["face"]
+    assert (faces.rate.hits, faces.rate.total) == (30, 30)
+    assert (faces.uncertain.hits, faces.uncertain.total) == (0, 5)
+    assert r.class_passed("face") and r.heatmap_passed() and r.passed()
+    assert r.weakest_cell()[:3] == ("face", 0, 0) and r.weakest_cell()[3] == Rate(30, 30)
+    assert r.misses == [] and len(r.uncertain_misses) == 5
+    assert all(m.frame == 0 and m.box.cls == "face" and m.covered == 0.0 for m in r.uncertain_misses)
+
+
+def test_a_confident_miss_still_fails_whatever_the_uncertain_tier_does(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    missed = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    flagged = Box("face", 300, 100, 330, 140, src="teacher_yunet")
+    plate = Box("plate", 1000, 600, 1040, 610, src="teacher_owlv2")
+    labels = _labels(tmp_path, "a", {0: [missed, flagged, plate]}, [(0, "low_score", flagged)])
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: [Box("face", 295, 95, 335, 145), Box("plate", 990, 590, 1050, 620)]}, [0])
+    r = evaluate_coverage(frames, labels, masks)
+    assert (r.classes["face"].uncertain.hits, r.classes["face"].uncertain.total) == (1, 1)
+    assert not r.class_passed("face") and not r.passed()
+    assert [m.box for m in r.misses] == [missed] and r.uncertain_misses == []
+
+
+def test_stray_area_treats_the_boxes_of_both_tiers_as_references(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    confident = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    flagged = Box("face", 300, 100, 330, 140, src="teacher_yunet")
+    labels = _labels(tmp_path, "a", {0: [confident, flagged]}, [(0, "low_score", flagged)])
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: [confident, flagged]}, [0])
+    r = evaluate_coverage(frames, labels, masks)
+    assert r.stray_max == 0.0  # a mask on a flagged box is not a false positive
+
+
+def test_coverage_refuses_a_missing_flags_file(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [Box("face", 100, 100, 130, 140)]})
+    (labels / "flags.csv").unlink()
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0])
+    with pytest.raises(ValueError, match=r"flags\.csv does not exist; run vc_label fuse"):
+        evaluate_coverage(frames, labels, masks)
+
+
+def test_coverage_refuses_a_flags_file_older_than_processed(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [Box("face", 100, 100, 130, 140)]})
+    processed_mtime = (labels / "processed.txt").stat().st_mtime
+    os.utime(labels / "flags.csv", (processed_mtime - 100, processed_mtime - 100))
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0])
+    with pytest.raises(ValueError, match=r"flags\.csv is older than processed\.txt"):
+        evaluate_coverage(frames, labels, masks)
+
+
 def _pool_inputs(tmp_path):
     """Two segments sharing one face position: `a` (2 frames: face and tiny face covered, plate and filled face missed)
     and `b` (1 frame: face covered, plate and filled face missed, plus a 50 x 50 px stray mask)."""
@@ -338,6 +544,35 @@ def test_pool_takes_the_worst_stray_and_weights_the_mean_by_frames(tmp_path):
     assert p.stray_p95 == max(a.stray_p95, b.stray_p95)
     assert p.stray_mean == pytest.approx((a.stray_mean * a.frames + b.stray_mean * b.frames) / (a.frames + b.frames))
     assert p.stray_mean != pytest.approx((a.stray_mean + b.stray_mean) / 2)  # 2 frames against 1: not a plain average
+
+
+def test_pool_adds_the_uncertain_rates_and_concatenates_the_uncertain_misses(tmp_path):
+    flagged_face = Box("face", 100, 100, 130, 140, src="teacher_yunet")
+    flagged_plate = Box("plate", 300, 300, 340, 310, src="teacher_owlv2")
+    confident = Box("face", 700, 100, 740, 150, src="teacher_retinaface")
+    frames_a = _frames(tmp_path, "a", [0, 10])
+    labels_a = _labels(
+        tmp_path, "a", {0: [flagged_face, confident], 10: [flagged_plate]},
+        [(0, "face_single_source", flagged_face), (10, "low_score", flagged_plate)],
+    )
+    masks_a = _masks(tmp_path / "ma.jsonl", "a.mp4", {0: [Box("face", 90, 90, 140, 150), Box("face", 690, 90, 750, 160)]}, [0, 10])
+    frames_b = _frames(tmp_path, "b", [0])
+    labels_b = _labels(
+        tmp_path, "b", {0: [flagged_face, flagged_plate]},
+        [(0, "low_score", flagged_face), (0, "low_score", flagged_plate)],
+    )
+    masks_b = _masks(tmp_path / "mb.jsonl", "b.mp4", {}, [0])
+    a = evaluate_coverage(frames_a, labels_a, masks_a)
+    b = evaluate_coverage(frames_b, labels_b, masks_b)
+    p = pool([a, b])
+    assert (a.classes["face"].uncertain, b.classes["face"].uncertain) == (Rate(1, 1), Rate(0, 1))
+    assert (a.classes["plate"].uncertain, b.classes["plate"].uncertain) == (Rate(0, 1), Rate(0, 1))
+    assert p.classes["face"].uncertain == Rate(1, 2) and p.classes["plate"].uncertain == Rate(0, 2)
+    assert p.classes["face"].rate == Rate(1, 1)  # the confident tier is pooled on its own
+    assert [(m.frame, m.box) for m in p.uncertain_misses] == [(10, flagged_plate), (0, flagged_face), (0, flagged_plate)]
+    assert p.uncertain_misses[:1] == a.uncertain_misses and p.uncertain_misses[1:] == b.uncertain_misses
+    assert p.misses == []
+    assert b.classes["face"].uncertain == Rate(0, 1)  # the originals are not touched
 
 
 def test_pool_judges_the_summed_counts_not_each_segment(tmp_path):
