@@ -41,6 +41,7 @@ def _frames_csv(frames_dir, count):
         w.writerow(["video", "frame", "pts_ms", "reason", "motion_score"])
         for i in range(count):
             w.writerow(["clip.mp4", i, i * 1000.0, "base", 0.0])
+            (frames_dir / f"{i:06d}.jpg").write_bytes(b"jpeg")  # export only checks that a chosen image exists
 
 
 def _trained_run(tmp_path):
@@ -174,6 +175,7 @@ def test_export_writes_onnx_and_passes_consistency_check(tmp_path, capsys, monke
     best = _trained_run(tmp_path)
     dataset = tmp_path / "ds"
     dataset.mkdir()
+    (dataset / "manifest.csv").write_text("sample\n")
     _frames_csv(tmp_path / "frames", 50)
     seen = {}
 
@@ -203,6 +205,52 @@ def test_export_writes_onnx_and_passes_consistency_check(tmp_path, capsys, monke
     assert [p.name for p in seen["images"]] == ["000000.jpg", "000012.jpg", "000025.jpg", "000037.jpg", "000049.jpg"]
     assert "export: " in out
     assert "check: 5 images, 7 boxes, 6 matched, max diff 0.250 px, 0 unmatched confident, 1 unmatched low" in out
+
+
+def test_export_name_flag_overrides_the_run_dir_name(tmp_path, monkeypatch):
+    _trained_run(tmp_path)
+    seen = {}
+
+    def fake_export(weights, out_dir, in_width, in_height, manifest=None, name=None):
+        seen.update(name=name, manifest=manifest)
+        return out_dir / "model.onnx"
+
+    monkeypatch.setattr(export_mod, "export_onnx", fake_export)
+    assert main(["export", "--run", str(tmp_path / "run"), "--name", "student-r2"]) == 0
+    assert seen == {"name": "student-r2", "manifest": None}
+
+
+def test_export_refuses_a_dataset_without_manifest_before_writing(tmp_path, capsys, monkeypatch):
+    _trained_run(tmp_path)
+    (tmp_path / "ds").mkdir()
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    code = main(["export", "--run", str(tmp_path / "run"), "--dataset", str(tmp_path / "ds")])
+    assert code == 2
+    assert "manifest.csv" in capsys.readouterr().err
+    assert sorted(p.name for p in (tmp_path / "run").iterdir()) == ["train"]
+
+
+def test_export_refuses_a_missing_check_image_before_writing(tmp_path, capsys, monkeypatch):
+    _trained_run(tmp_path)
+    _frames_csv(tmp_path / "frames", 4)
+    (tmp_path / "frames" / "000002.jpg").unlink()
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    code = main(["export", "--run", str(tmp_path / "run"), "--check-frames", str(tmp_path / "frames"), "--check-count", "10"])
+    assert code == 2
+    assert "000002.jpg" in capsys.readouterr().err
+    assert sorted(p.name for p in (tmp_path / "run").iterdir()) == ["train"]
+
+
+def test_export_checks_only_the_chosen_images_exist(tmp_path, monkeypatch):
+    _trained_run(tmp_path)
+    _frames_csv(tmp_path / "frames", 50)
+    (tmp_path / "frames" / "000001.jpg").unlink()  # not one of the two chosen frames, 0 and 49
+    monkeypatch.setattr(export_mod, "export_onnx", lambda weights, out_dir, *a, **k: out_dir / "model.onnx")
+    monkeypatch.setattr(
+        export_mod, "check_consistency",
+        lambda weights, onnx_path, images, **k: ConsistencyReport(len(images), 2, 2, 0.0, 0, 0),
+    )
+    assert main(["export", "--run", str(tmp_path / "run"), "--check-frames", str(tmp_path / "frames"), "--check-count", "2"]) == 0
 
 
 def test_export_exits_1_when_the_consistency_check_fails(tmp_path, capsys, monkeypatch):
@@ -291,6 +339,34 @@ def test_export_refuses_a_run_dir_inside_the_check_frames_dir(tmp_path, capsys, 
     assert code == 2
     assert "frames directory" in capsys.readouterr().err
     assert not run.exists()
+
+
+def test_train_refuses_a_run_dir_under_the_frames_root(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(train_mod, "train", lambda *a, **k: pytest.fail("train must not run"))
+    run = tmp_path / "frames" / "any_segment" / "run"
+    code = main(["train", "--data", str(tmp_path / "data.yaml"), "--run", str(run), "--frames-root", str(tmp_path / "frames")])
+    assert code == 2
+    assert "frames directory" in capsys.readouterr().err
+    assert not run.exists()
+
+
+def test_export_refuses_a_run_dir_under_the_frames_root(tmp_path, capsys, monkeypatch):
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"weights")
+    monkeypatch.setattr(export_mod, "export_onnx", lambda *a, **k: pytest.fail("export must not run"))
+    run = tmp_path / "frames" / "any_segment" / "run"
+    code = main(["export", "--run", str(run), "--weights", str(weights), "--frames-root", str(tmp_path / "frames")])
+    assert code == 2
+    assert "frames directory" in capsys.readouterr().err
+    assert not run.exists()
+
+
+def test_frames_root_defaults_to_data_frames_for_train_and_export(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(train_mod, "train", lambda *a, **k: pytest.fail("train must not run"))
+    assert main(["train", "--data", "d.yaml", "--run", "data/frames/seg/run"]) == 2
+    assert main(["export", "--run", "data/frames/seg/run", "--weights", "w.pt"]) == 2
+    assert capsys.readouterr().err.count("frames directory data/frames") == 2
 
 
 def test_python_dash_m_runs_the_cli(tmp_path):

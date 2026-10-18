@@ -27,6 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     t = sub.add_parser("train", help="fine-tune YOLOv8n offline")
     t.add_argument("--data", type=Path, required=True)
     t.add_argument("--run", type=Path, required=True)
+    t.add_argument("--frames-root", type=Path, default=Path("data/frames"), help="the run dir must not be under it")
     t.add_argument("--weights", type=Path, default=None, help="default: cached yolov8n.pt")
     t.add_argument("--hours", type=float, default=0.5)
     t.add_argument("--epochs", type=int, default=300)
@@ -36,6 +37,8 @@ def _parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("export", help="ONNX + model.json, optional consistency check")
     e.add_argument("--run", type=Path, required=True)
+    e.add_argument("--name", default=None, help="model name in model.json (default: the run dir name)")
+    e.add_argument("--frames-root", type=Path, default=Path("data/frames"), help="the run dir must not be under it")
     e.add_argument("--weights", type=Path, default=None, help="default: <run>/train/weights/best.pt")
     e.add_argument("--dataset", type=Path, default=None, help="dataset dir whose manifest.csv is hashed into model.json")
     e.add_argument("--width", type=int, default=1920)
@@ -80,6 +83,8 @@ def _dataset(args) -> int:
 
 
 def _train(args) -> int:
+    # vc_extract --overwrite deletes a whole frames dir, run dir included
+    ensure_outside(args.frames_root, args.run)
     from vc_train.offline import YOLO_WEIGHTS
     from vc_train.train import train
 
@@ -95,22 +100,30 @@ def _export(args) -> int:
     # everything is validated before anything is written
     if args.check_count < 1:
         raise ValueError(f"--check-count must be at least 1, got {args.check_count}")
+    # the model must not land inside a frames dir: vc_extract --overwrite deletes that whole dir
+    ensure_outside(args.frames_root, args.run)
     if args.check_frames is not None:
-        # the model must not land inside a frames dir: vc_extract --overwrite deletes that whole dir
         ensure_outside(args.check_frames, args.run)
     weights = args.weights or args.run / "train" / "weights" / "best.pt"
     if not weights.is_file():
         raise FileNotFoundError(f"{weights} does not exist; train first or pass --weights")
+    manifest = None
+    if args.dataset is not None:
+        manifest = args.dataset / "manifest.csv"
+        if not manifest.is_file():
+            raise FileNotFoundError(f"{manifest} does not exist; --dataset must be a directory written by vc_train dataset")
     images = None
     if args.check_frames is not None:
         refs = read_frames_csv(args.check_frames)
         if not refs:
             raise ValueError(f"{args.check_frames}/frames.csv lists no frames to check")
         images = [refs[i].image for i in _check_indices(len(refs), args.check_count)]
+        missing = [image for image in images if not image.is_file()]
+        if missing:
+            raise FileNotFoundError(f"check frame {missing[0]} does not exist ({len(missing)} of {len(images)} chosen frames are missing)")
     from vc_train.export import check_consistency, export_onnx
 
-    manifest = args.dataset / "manifest.csv" if args.dataset else None
-    onnx_path = export_onnx(weights, args.run, args.width, args.height, manifest=manifest, name=args.run.name)
+    onnx_path = export_onnx(weights, args.run, args.width, args.height, manifest=manifest, name=args.name or args.run.name)
     print(f"export: {onnx_path}")
     if images is None:
         return 0
