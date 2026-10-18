@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
+
+#include "io/av_ptr.h"
 
 // Fixture media generated on demand with the ffmpeg CLI (no downloads).
 namespace vc::test {
@@ -20,5 +23,12 @@ std::filesystem::path staticThenNoiseVideo();
 std::filesystem::path tenBitVideo();
 // 1 s AAC audio, no video stream.
 std::filesystem::path audioOnlyFile();
+
+// Frame whose luma bytes are all y and chroma bytes u / v (8-bit planar YUV or NV12), limited range.
+av::FramePtr makeFrame(int width, int height, AVPixelFormat format, uint8_t y, uint8_t u, uint8_t v);
+// Same layout filled with deterministic pseudo-random bytes.
+av::FramePtr makeNoiseFrame(int width, int height, AVPixelFormat format, unsigned seed);
+// Independent copy with its own writable buffers.
+av::FramePtr deepCopy(const AVFrame& frame);
 
 }  // namespace vc::test

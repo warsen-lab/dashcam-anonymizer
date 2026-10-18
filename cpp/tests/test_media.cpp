@@ -1,10 +1,16 @@
 #include "test_media.h"
 
 #include <cstdlib>
+#include <random>
 #include <stdexcept>
 #include <string>
 
 #include <unistd.h>
+
+extern "C" {
+#include <libavutil/common.h>
+#include <libavutil/pixdesc.h>
+}
 
 namespace vc::test {
 namespace fs = std::filesystem;
@@ -52,6 +58,66 @@ fs::path tenBitVideo() {
 
 fs::path audioOnlyFile() {
   return makeMedia("audio_only.m4a", "-f lavfi -i sine=f=440:d=1 -c:a aac");
+}
+
+namespace {
+
+av::FramePtr allocated(int width, int height, AVPixelFormat format) {
+  av::FramePtr frame = av::allocFrame();
+  frame->format = format;
+  frame->width = width;
+  frame->height = height;
+  frame->color_range = AVCOL_RANGE_MPEG;
+  if (av_frame_get_buffer(frame.get(), 0) < 0) throw std::runtime_error("av_frame_get_buffer failed");
+  return frame;
+}
+
+// fill(plane, x, y) gives the byte for luma (plane 0) or chroma U (1) / V (2) sample (x, y).
+template <typename Fill>
+void fillPlanes(AVFrame& frame, Fill fill) {
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
+  const int cw = AV_CEIL_RSHIFT(frame.width, desc->log2_chroma_w);
+  const int ch = AV_CEIL_RSHIFT(frame.height, desc->log2_chroma_h);
+  for (int y = 0; y < frame.height; ++y) {
+    for (int x = 0; x < frame.width; ++x) frame.data[0][y * frame.linesize[0] + x] = fill(0, x, y);
+  }
+  for (int y = 0; y < ch; ++y) {
+    for (int x = 0; x < cw; ++x) {
+      if (frame.format == AV_PIX_FMT_NV12) {
+        frame.data[1][y * frame.linesize[1] + 2 * x] = fill(1, x, y);
+        frame.data[1][y * frame.linesize[1] + 2 * x + 1] = fill(2, x, y);
+      } else {
+        frame.data[1][y * frame.linesize[1] + x] = fill(1, x, y);
+        frame.data[2][y * frame.linesize[2] + x] = fill(2, x, y);
+      }
+    }
+  }
+}
+
+}  // namespace
+
+av::FramePtr makeFrame(int width, int height, AVPixelFormat format, uint8_t y, uint8_t u, uint8_t v) {
+  av::FramePtr frame = allocated(width, height, format);
+  const uint8_t values[3] = {y, u, v};
+  fillPlanes(*frame, [&](int plane, int, int) { return values[plane]; });
+  return frame;
+}
+
+av::FramePtr makeNoiseFrame(int width, int height, AVPixelFormat format, unsigned seed) {
+  av::FramePtr frame = allocated(width, height, format);
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<int> byte(0, 255);
+  fillPlanes(*frame, [&](int, int, int) { return static_cast<uint8_t>(byte(rng)); });
+  return frame;
+}
+
+av::FramePtr deepCopy(const AVFrame& source) {
+  av::FramePtr frame =
+      allocated(source.width, source.height, static_cast<AVPixelFormat>(source.format));
+  if (av_frame_copy(frame.get(), &source) < 0 || av_frame_copy_props(frame.get(), &source) < 0) {
+    throw std::runtime_error("av_frame_copy failed");
+  }
+  return frame;
 }
 
 }  // namespace vc::test

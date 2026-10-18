@@ -21,6 +21,8 @@ find_package(FFmpeg REQUIRED)
 
 add_library(vc_core STATIC
   src/common/vc_error.cpp
+  src/detect/box.cpp
+  src/detect/letterbox.cpp
   src/io/jpeg_writer.cpp
   src/io/video_reader.cpp
   src/sampler/frame_sampler.cpp

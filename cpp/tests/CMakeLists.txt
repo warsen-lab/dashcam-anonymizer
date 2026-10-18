@@ -3,10 +3,12 @@ find_program(VC_FFMPEG_EXECUTABLE ffmpeg REQUIRED)
 
 add_executable(vc_tests
   test_media.cpp
+  box_test.cpp
   extract_cli_test.cpp
   extract_job_test.cpp
   frame_sampler_test.cpp
   jpeg_writer_test.cpp
+  letterbox_test.cpp
   luma_thumb_test.cpp
   video_reader_test.cpp
 )
