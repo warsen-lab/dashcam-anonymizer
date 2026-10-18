@@ -491,6 +491,49 @@ TEST(RedactJob, ReportsDecoderErrorsInTheStatsAndAsAWarning) {
   EXPECT_TRUE(redactWarnings(clean).empty());
 }
 
+// detect, track and mosaic run one after another on the processing thread: together they are the
+// "main" stage, which runs in parallel with decode and encode. setup_s is the time before the first
+// frame reaches it.
+TEST(RedactJob, ReportsTheMainStageAndTheSetupTime) {
+  const RedactOptions o = baseOptions("redact_stages");
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.main.items, 60);
+  EXPECT_DOUBLE_EQ(s.main.busySec, s.detect.busySec + s.track.busySec + s.mosaic.busySec);
+  EXPECT_GT(s.setupSec, 0.0);
+  EXPECT_LT(s.setupSec, s.elapsedSec);
+
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  const nlohmann::json& main = stats.at("stages").at("main");
+  EXPECT_EQ(main.at("items").get<int>(), 60);
+  EXPECT_DOUBLE_EQ(main.at("busy_s").get<double>(), s.main.busySec);
+  EXPECT_DOUBLE_EQ(main.at("fps").get<double>(), s.main.fps());
+  EXPECT_DOUBLE_EQ(stats.at("setup_s").get<double>(), s.setupSec);
+  for (const char* stage : {"decode", "detect", "track", "mosaic", "encode"}) {
+    EXPECT_TRUE(stats.at("stages").contains(stage)) << stage;
+  }
+}
+
+TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
+  RedactStats s;
+  s.frames = 600;
+  s.elapsedSec = 3.0;
+  s.setupSec = 0.75;
+  s.decode = StageStat{0.5, 600};
+  s.main = StageStat{2.0, 600};
+  s.detect = StageStat{1.5, 50};
+  s.track = StageStat{0.25, 600};
+  s.mosaic = StageStat{0.25, 600};
+  s.encode = StageStat{2.4, 600};
+  const std::string summary = redactSummary(s);
+  EXPECT_NE(summary.find("setup:         0.75 s"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("stages (fps):  decode 1200.0, main 300.0 (detect 33.3, track 2400.0, mosaic 2400.0), "
+                         "encode 250.0"),
+            std::string::npos)
+      << summary;
+  EXPECT_NE(summary.find("elapsed:       3.00 s (200.0 fps)"), std::string::npos) << summary;
+}
+
 TEST(RedactJob, QueueCapacityIsBoundedByBytesPerFrame) {
   EXPECT_EQ(pipelineQueueCapacity(640, 360), 64u);
   EXPECT_EQ(pipelineQueueCapacity(1920, 1080), 43u);  // 256 MiB / (1920 x 1080 x 3 bytes)

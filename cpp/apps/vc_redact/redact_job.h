@@ -48,11 +48,18 @@ struct RedactStats {
   std::string detector;  // "student/CoreML", "student/CPU" or "fake"
   std::vector<std::string> droppedStreams;
   size_t audioStreams = 0;
+  // decode, main and encode run in parallel on three threads; main is the processing thread, which
+  // runs detect, track and mosaic one after another (its busy time is their sum).
   StageStat decode;
+  StageStat main;    // items = frames
   StageStat detect;  // items = keyframes
   StageStat track;   // keyframe selection + BoxTimeline; items = frames
   StageStat mosaic;
   StageStat encode;
+  // From the start of runRedact until the first frame reaches the processing thread: opening the
+  // input, the output checks, loading the model (CoreML compiles it here), starting the threads and
+  // decoding the first frame. The encoder is opened later, on the encode thread (in encode's time).
+  double setupSec = 0;
   double elapsedSec = 0;
 };
 
@@ -64,6 +71,10 @@ size_t pipelineQueueCapacity(int width, int height);
 // Lines for stderr after a successful run (empty when there is nothing to warn about): currently
 // decoder errors, i.e. corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
+
+// The summary printed after a successful run: one "name: value" line each for the output, the frame
+// and mask counts, detector, encoder, audio, setup time, stage rates, decode errors and elapsed time.
+std::string redactSummary(const RedactStats& stats);
 
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
 // renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json.

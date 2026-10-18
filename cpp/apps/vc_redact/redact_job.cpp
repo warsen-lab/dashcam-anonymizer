@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -43,6 +44,23 @@ constexpr const char* kStatsFile = "stats.json";
 
 double secondsSince(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+// printf-style formatting into a string of any length.
+template <typename... Args>
+std::string formatted(const char* format, Args... args) {
+  const int size = std::snprintf(nullptr, 0, format, args...);
+  if (size <= 0) return {};
+  std::string out(static_cast<size_t>(size), '\0');
+  std::snprintf(out.data(), out.size() + 1, format, args...);
+  return out;
+}
+
+std::string joined(const std::vector<std::string>& items) {
+  if (items.empty()) return "none";
+  std::string out;
+  for (const std::string& item : items) out += (out.empty() ? "" : ", ") + item;
+  return out;
 }
 
 struct VideoItem {
@@ -359,8 +377,9 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
   return c;
 }
 
+// `started`: the start of the run, for stats.setupSec.
 void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector, const fs::path& partial,
-                 RedactStats& stats) {
+                 Clock::time_point started, RedactStats& stats) {
   const fs::path dir = partial.parent_path();
   std::ofstream detections(dir / kDetectionsFile);
   std::ofstream masks(dir / kMasksFile);
@@ -405,8 +424,11 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
     threads.start([&] { guarded([&] { decodeStage(reader, decoded, decodeStat); }); });
     threads.start([&] { guarded([&] { encodeStage(processed, config, audio, encodeResult); }); });
     guarded([&] {
+      bool first = true;
       while (std::optional<Item> item = decoded.pop()) {
         if (auto* video = std::get_if<VideoItem>(&*item)) {
+          if (first) stats.setupSec = secondsSince(started);
+          first = false;
           processor.onVideo(std::move(*video));
         } else if (std::holds_alternative<AudioItem>(*item)) {
           if (!processed.push(std::move(*item))) throw PipelineAborted{};
@@ -460,11 +482,14 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["dropped_streams"] = s.droppedStreams;
   j["detect_every_frame"] = o.detectEveryFrame;
   j["config"] = redactConfigToJson(o.config);
+  // decode, main and encode run in parallel; main is detect + track + mosaic, one after another.
   j["stages"]["decode"] = stageJson(s.decode);
+  j["stages"]["main"] = stageJson(s.main);
+  j["stages"]["encode"] = stageJson(s.encode);
   j["stages"]["detect"] = stageJson(s.detect);
   j["stages"]["track"] = stageJson(s.track);
   j["stages"]["mosaic"] = stageJson(s.mosaic);
-  j["stages"]["encode"] = stageJson(s.encode);
+  j["setup_s"] = s.setupSec;
   j["elapsed_s"] = s.elapsedSec;
   std::ofstream out(path);
   out << j.dump(2) << '\n';
@@ -490,6 +515,27 @@ std::vector<std::string> redactWarnings(const RedactStats& stats) {
   return warnings;
 }
 
+std::string redactSummary(const RedactStats& s) {
+  const double fps = s.elapsedSec > 0 ? static_cast<double>(s.frames) / s.elapsedSec : 0;
+  std::string out = "output:        " + s.video.string() + "\n";
+  out += formatted("frames:        %lld (keyframes %lld, detections %lld, masked %lld frames / %lld boxes)\n",
+                   static_cast<long long>(s.frames), static_cast<long long>(s.keyframes),
+                   static_cast<long long>(s.detections), static_cast<long long>(s.maskedFrames),
+                   static_cast<long long>(s.maskBoxes));
+  out += "detector:      " + s.detector + "\n";
+  out += "encoder:       " + s.encoder + "\n";
+  out += formatted("audio:         %zu stream(s), %lld packets copied; dropped streams: ", s.audioStreams,
+                   static_cast<long long>(s.audioPackets)) +
+         joined(s.droppedStreams) + "\n";
+  out += formatted("setup:         %.2f s (input, output checks, model load / CoreML compile, first frame)\n",
+                   s.setupSec);
+  out += formatted("stages (fps):  decode %.1f, main %.1f (detect %.1f, track %.1f, mosaic %.1f), encode %.1f\n",
+                   s.decode.fps(), s.main.fps(), s.detect.fps(), s.track.fps(), s.mosaic.fps(), s.encode.fps());
+  out += formatted("decode errors: %lld\n", static_cast<long long>(s.decodeErrors));
+  out += formatted("elapsed:       %.2f s (%.1f fps)\n", s.elapsedSec, fps);
+  return out;
+}
+
 RedactStats runRedact(const RedactOptions& options) {
   const Clock::time_point started = Clock::now();
   checkOptions(options);
@@ -513,10 +559,11 @@ RedactStats runRedact(const RedactOptions& options) {
   try {
     fs::remove_all(stats.outputDir);
     fs::create_directories(stats.outputDir);
-    runPipeline(options, reader, *detector, partial, stats);
+    runPipeline(options, reader, *detector, partial, started, stats);
     fs::rename(partial, stats.video);
     stats.frames = stats.decode.items;
     stats.track.items = stats.frames;
+    stats.main = StageStat{stats.detect.busySec + stats.track.busySec + stats.mosaic.busySec, stats.frames};
     stats.decodeErrors = reader.decodeErrors();
     stats.droppedStreams = reader.droppedStreams();
     stats.audioStreams = reader.audioStreams().size();
