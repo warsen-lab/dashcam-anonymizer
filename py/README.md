@@ -148,15 +148,28 @@ PYTHONPATH=py .venv/bin/python -m vc_train train --data data/datasets/r1/data.ya
 ```
 
 ```bash
+# 2b. 接着训练：以上一轮的 best.pt 为起点，写进新的 run 目录（--hours 可另设时间预算，默认 0.5 小时）
+PYTHONPATH=py .venv/bin/python -m vc_train train --data data/datasets/r1/data.yaml \
+    --weights data/models/r1/train/weights/best.pt --run data/models/r2 --hours 1
+```
+
+```bash
 # 3. 导出 ONNX（1×3×1088×1920，图内无 NMS）+ model.json，并与 PyTorch 比对 20 张留出帧
 PYTHONPATH=py .venv/bin/python -m vc_train export --run data/models/r1 --dataset data/datasets/r1 \
     --check-frames data/frames/sg_drive_2100s
 ```
 
-- 验证集是每段视频最后 20 秒（以该段已处理帧中最晚的时间为准；`dataset --val-tail-ms` 可改），其余为训练集。
-- `dataset` 拒绝非空的 `--out`；`--out` 位于 `--frames-root`（抽帧根目录）之下的任何位置都会被拒绝，包括没有用 `--stem` 列出的段。`export --check-frames` 同样拒绝把 `--run` 放在那段抽帧目录里。labels、数据集和模型都不能写进抽帧目录，因为 `vc_extract --overwrite` 会删掉整个目录。重跑请换一个新目录。
+- 验证集是每段视频最后 20 秒（以该段已处理帧中最晚的时间为准；`dataset --val-tail-ms` 可改），其余为训练集。命令行会按段打印训练/验证帧数。
+- `dataset` 在写任何文件之前先检查每一段：labels 目录不存在或没有已处理的帧（还没跑 `vc_label teach` / `fuse`），或者整段都落在验证尾部、没有训练帧（段长不超过 `--val-tail-ms`），都会报错退出（退出码 2），不会悄悄跳过。`--width`/`--height` 必须是 32 的正整数倍，和 `export` 的规则一致。
+- 训练曲线在 `<run>/train/results.csv`（每个 epoch 一行，含 `metrics/mAP50(B)`）。`<run>/train/weights/` 里 `best.pt` 是验证集上最好的一轮，`last.pt` 是最后一轮。接着训练见上面的 2b：`--weights` 给上一轮的 `best.pt`，`--run` 必须是新目录（已有 `<run>/train` 会被拒绝）。
+- `export --name` 设定 `model.json` 里的 `name`，缺省取 `--run` 目录名。
+- `dataset` 拒绝非空的 `--out`；`--out` 位于 `--frames-root`（抽帧根目录，默认 `data/frames`）之下的任何位置都会被拒绝，包括没有用 `--stem` 列出的段。`train` 和 `export` 同样有 `--frames-root`，拒绝把 `--run` 放在它下面，`export --check-frames` 还拒绝把 `--run` 放在那段抽帧目录里。labels、数据集和模型都不能写进抽帧目录，因为 `vc_extract --overwrite` 会删掉整个目录。重跑请换一个新目录。
 - `export` 检查 ONNX 输入是静态的 `[1, 3, H, W]`、float32，且 H、W 都是 32 的倍数，不满足就报错。
 - `model.json` 里的 `metrics.val_map50` 是被导出 checkpoint 里保存的 `train_metrics["metrics/mAP50(B)"]`，不读取 `results.csv`，也不是命令行参数。checkpoint 里缺少这个字段时，export 在写出任何文件之前抛出 `ValueError`。
+- `export` 在往 `--run` 写任何文件之前先检查：`--dataset` 里有 `manifest.csv`、选中的检查帧图片都存在，缺任何一个就退出码 2。
+- 一致性检查（`--check-frames`）把 PyTorch 与 onnxruntime 在同一批张量上解码出的框按「同类、IoU ≥ 0.5」配对。没配上的框按得分分两类打印：得分 ≥ 0.3 的（`unmatched confident`）算失败，低于 0.3 的（`unmatched low`）只报告，因为贴着阈值的低分框可能在两个运行时之间翻转。通过还要求至少一张图、至少一个配对框，且配对框的最大角点差 < 1 px。解码时模型输出里只要有一个类别得分不是有限数（NaN/inf），就直接报错，不会丢掉那个框继续跑。
+- 导出的 ONNX 还要满足输出形状是 `[1, 4 + 类别数, N]`（N 为固定正整数），否则 `export` 报错并且不写 `--run`。
+- 所有子命令一开始就把 ultralytics 设成离线模式（`YOLO_OFFLINE=1` 等，见上），读 checkpoint 也不例外。
 - 退出码：0 成功；`export --check-frames` 的一致性检查不通过为 1；参数或输入错误为 2，错误信息写到 stderr，以 `vc_train:` 开头。
 
 测试：`.venv/bin/pytest -q py/tests/test_train_geometry.py py/tests/test_train_dataset.py py/tests/test_train_cli.py`；
