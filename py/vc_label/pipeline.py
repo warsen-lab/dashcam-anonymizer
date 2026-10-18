@@ -17,7 +17,7 @@ import numpy as np
 
 from vc_label.boxes import fuse
 from vc_label.config import LabelingConfig
-from vc_label.contracts import LABEL_CLASSES, Box, Detection, FrameRef, read_frames_csv, read_jsonl, to_yolo_lines, write_jsonl
+from vc_label.contracts import LABEL_CLASSES, Box, Detection, FrameRef, read_frames_csv, to_yolo_lines, write_jsonl
 from vc_label.review import image_size, labelme_document, write_review_queue
 from vc_label.rules import Flag, flag_frame, temporal_fill
 
@@ -199,9 +199,12 @@ class FuseSummary:
 
 
 def _by_frame(path: Path) -> dict[int, list[Box]]:
+    """Boxes per frame, read like teach reads them: a torn last line is dropped, any other bad line raises."""
     grouped: dict[int, list[Box]] = defaultdict(list)
-    for d in read_jsonl(path):
-        grouped[d.frame].append(d.box)
+    if path.exists():
+        for line in _read_records(path)[0]:
+            d = Detection.from_record(line.record)
+            grouped[d.frame].append(d.box)
     return grouped
 
 

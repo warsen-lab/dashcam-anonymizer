@@ -293,3 +293,19 @@ def test_run_fuse_fills_a_face_the_teachers_missed_between_two_neighbouring_fram
     doc = json.loads((review / "000012.json").read_text())
     [face] = [s for s in doc["shapes"] if s["label"] == "face"]
     assert "src=temporal_fill" in face["description"] and face["description"].endswith("temporal_fill")
+
+
+@pytest.mark.parametrize("name", ["raw.jsonl", "aux.jsonl"])
+def test_run_fuse_ignores_a_torn_last_line_like_a_resumed_teach_does(tmp_path, name):
+    frames, labels = make_frames(tmp_path, 3), tmp_path / "labels"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    expected, expected_sequence, _ = run_fuse(frames, labels, CFG)
+    with (labels / name).open("a", encoding="utf-8") as f:
+        f.write('{"video": "trip.mp4", "fr')  # a teach run killed in the middle of an append
+    torn = (labels / name).read_bytes()
+
+    summary, sequence, _ = run_fuse(frames, labels, CFG)
+
+    assert summary == expected
+    assert sequence == expected_sequence
+    assert (labels / name).read_bytes() == torn  # fuse only reads; the resumed teach does the repair
