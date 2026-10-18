@@ -30,7 +30,8 @@ class ConsistencyReport:
     unmatched_low: int
 
     def passed(self, tol_px: float = 1.0) -> bool:
-        return self.unmatched_confident == 0 and self.max_diff_px < tol_px
+        # no images or no matched boxes is no evidence of agreement, however empty the unmatched counts are
+        return self.images > 0 and self.matched > 0 and self.unmatched_confident == 0 and self.max_diff_px < tol_px
 
 
 def python_detections(model_dir: Path, refs: list[FrameRef], score: float = 0.15, iou_threshold: float = 0.5) -> dict[int, list[Box]]:
@@ -72,8 +73,13 @@ def compare_detections(cpp: dict[int, list[Box]], py: dict[int, list[Box]]) -> C
     return ConsistencyReport(len(frames), boxes, matched, worst, confident, low)
 
 
-def run_vc_detect(vc_detect: Path, model_dir: Path, refs: list[FrameRef], work_dir: Path, runner=subprocess.run) -> dict[int, list[Box]]:
-    """Runs the C++ detector on `refs` through a scratch frames dir holding only those frames."""
+def run_vc_detect(
+    vc_detect: Path, model_dir: Path, refs: list[FrameRef], work_dir: Path, runner=subprocess.run, score: float = 0.15
+) -> dict[int, list[Box]]:
+    """Runs the C++ detector on `refs` through a scratch frames dir holding only those frames.
+
+    `score` is forwarded as --score; a failed run raises ValueError carrying the detector's stderr.
+    """
     frames_dir = work_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     with (frames_dir / "frames.csv").open("w", newline="", encoding="utf-8") as f:
@@ -86,8 +92,13 @@ def run_vc_detect(vc_detect: Path, model_dir: Path, refs: list[FrameRef], work_d
             os.symlink(ref.image.resolve(), link)
             writer.writerow([ref.video, ref.frame, ref.pts_ms, "base", 0.0])
     out = work_dir / "cpp_detections.jsonl"
-    runner(
-        [str(vc_detect), "--model", str(model_dir), "--frames", str(frames_dir), "--out", str(out), "--ep", "cpu"],
-        check=True, capture_output=True, text=True,
-    )
+    out.unlink(missing_ok=True)  # a run that writes nothing must not be read as the previous run's result
+    command = [
+        str(vc_detect), "--model", str(model_dir), "--frames", str(frames_dir), "--out", str(out),
+        "--ep", "cpu", "--score", str(score),
+    ]
+    try:
+        runner(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"vc_detect failed (exit {exc.returncode}): {(exc.stderr or '').strip()}") from exc
     return detections_by_frame(out)[1]

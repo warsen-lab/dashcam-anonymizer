@@ -1,12 +1,14 @@
 import csv
 import json
+import subprocess
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
 from vc_label.contracts import Box, Detection, read_frames_csv, write_jsonl
-from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
+from vc_eval.consistency import ConsistencyReport, compare_detections, python_detections, run_vc_detect
 
 
 def _const_model(dir_path):
@@ -89,3 +91,59 @@ def test_run_vc_detect_builds_a_subset_frames_dir_and_reads_its_output(tmp_path)
     dets = run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "work", runner=fake_runner)
     assert list(dets) == [5] and dets[5][0].x2 == 3
     assert calls[0][calls[0].index("--ep") + 1] == "cpu"
+
+
+def test_zero_boxes_on_both_sides_is_not_a_pass():
+    assert not compare_detections({}, {}).passed()
+    assert not compare_detections({0: []}, {0: []}).passed()
+    assert not ConsistencyReport(0, 0, 0, 0.0, 0, 0).passed()
+
+
+def test_nothing_matched_is_not_a_pass_even_without_confident_misses():
+    r = compare_detections({0: [Box("face", 10, 10, 20, 20, score=0.2)]}, {0: []})
+    assert (r.images, r.matched, r.unmatched_confident) == (1, 0, 0)
+    assert not r.passed()
+
+
+def test_run_vc_detect_forwards_the_score_and_defaults_to_the_decoder_default(tmp_path):
+    refs = read_frames_csv(_frames(tmp_path))[:1]
+    calls = []
+
+    def fake_runner(cmd, check, capture_output, text):
+        calls.append(cmd)
+        write_jsonl(Path(cmd[cmd.index("--out") + 1]), [])
+
+    run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "w1", runner=fake_runner)
+    run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "w2", runner=fake_runner, score=0.3)
+    assert [c[c.index("--score") + 1] for c in calls] == ["0.15", "0.3"]
+
+
+def test_run_vc_detect_removes_a_stale_output_before_running(tmp_path):
+    refs = read_frames_csv(_frames(tmp_path))[:1]
+    work = tmp_path / "work"
+    work.mkdir()
+    stale = work / "cpp_detections.jsonl"
+    write_jsonl(stale, [Detection("t.mp4", 0, 0.0, Box("face", 9, 9, 19, 19, score=0.9, src="student"))])
+    seen = []
+
+    def fresh_runner(cmd, check, capture_output, text):
+        out = Path(cmd[cmd.index("--out") + 1])
+        seen.append(out.exists())
+        write_jsonl(out, [])
+
+    assert run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, work, runner=fresh_runner) == {}
+    assert seen == [False]
+
+    write_jsonl(stale, [Detection("t.mp4", 0, 0.0, Box("face", 9, 9, 19, 19, score=0.9, src="student"))])
+    with pytest.raises(ValueError):  # a run that writes nothing must not fall back to the stale file
+        run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, work, runner=lambda *a, **k: None)
+
+
+def test_run_vc_detect_turns_a_failed_run_into_a_value_error_with_its_stderr(tmp_path):
+    refs = read_frames_csv(_frames(tmp_path))[:1]
+
+    def failing_runner(cmd, check, capture_output, text):
+        raise subprocess.CalledProcessError(3, cmd, output="", stderr="model.onnx: bad magic number")
+
+    with pytest.raises(ValueError, match="bad magic number"):
+        run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "work", runner=failing_runner)

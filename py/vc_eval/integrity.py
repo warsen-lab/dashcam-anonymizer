@@ -26,6 +26,7 @@ class MediaInfo:
     audio: StreamInfo | None
     fps: float
     duration: float
+    errors: tuple[str, ...] = ()  # decode errors ffprobe printed to stderr while still exiting 0
 
 
 def _number(value, cast=float):
@@ -50,7 +51,11 @@ def _stream(s: dict) -> StreamInfo:
 
 
 def probe(path: Path) -> MediaInfo:
-    """Streams of a media file; decodes the video to count frames (ffprobe -count_frames)."""
+    """Streams of a media file; decodes them to count frames (ffprobe -count_frames).
+
+    A non-zero exit raises ValueError. Decode errors on an otherwise readable file come with exit 0, so the
+    stderr lines are kept in `MediaInfo.errors`.
+    """
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True, text=True, check=False,
@@ -68,6 +73,7 @@ def probe(path: Path) -> MediaInfo:
         audio=_stream(audio) if audio else None,
         fps=_rate(video.get("avg_frame_rate")),
         duration=_number(data.get("format", {}).get("duration")) or 0.0,
+        errors=tuple(line.strip() for line in out.stderr.splitlines() if line.strip()),
     )
 
 
@@ -81,12 +87,31 @@ class IntegrityReport:
         return bool(self.checks) and all(self.checks.values())
 
 
+_CHECKS = ("decodable", "frame_count", "duration", "audio_kept", "av_sync")
+
+
+def _unreadable(reason: str) -> IntegrityReport:
+    """Every check failed: the redacted file could not be probed at all."""
+    return IntegrityReport(
+        checks={name: False for name in _CHECKS},
+        details={name: reason if name == "decodable" else "not checked: output unreadable" for name in _CHECKS},
+    )
+
+
 def check_integrity(source: Path, redacted: Path) -> IntegrityReport:
-    s, r = probe(source), probe(redacted)
+    """Source and redacted must agree; a source that cannot be probed raises ValueError, a broken output fails."""
+    s = probe(source)
+    try:
+        r = probe(redacted)
+    except ValueError as exc:
+        return _unreadable(str(exc))
     frame = 1.0 / s.fps if s.fps > 0 else 1.0 / 30
     report = IntegrityReport()
-    report.checks["decodable"] = bool(r.video.frames)
-    report.details["decodable"] = f"{r.video.frames} frames decoded"
+    report.checks["decodable"] = bool(r.video.frames) and len(r.errors) <= len(s.errors)
+    report.details["decodable"] = (
+        f"{r.video.frames} frames decoded; decode errors: source {len(s.errors)}, redacted {len(r.errors)}"
+        + (f": {r.errors[0]}" if r.errors else "")
+    )
     report.checks["frame_count"] = (
         r.video.frames is not None and s.video.frames is not None and abs(r.video.frames - s.video.frames) <= 1
     )
@@ -99,17 +124,18 @@ def check_integrity(source: Path, redacted: Path) -> IntegrityReport:
         report.details["audio_kept"] = report.details["av_sync"] = "source has no audio"
         return report
     a = r.audio
-    report.checks["audio_kept"] = (
-        a is not None and a.codec == s.audio.codec and abs((a.duration or 0.0) - (s.audio.duration or 0.0)) <= frame
-    )
-    report.details["audio_kept"] = (
-        f"source {s.audio.codec} {s.audio.duration} s, redacted "
-        + (f"{a.codec} {a.duration} s" if a else "none")
-    )
     if a is None:
-        report.checks["av_sync"] = False
+        report.checks["audio_kept"] = report.checks["av_sync"] = False
+        report.details["audio_kept"] = f"source {s.audio.codec} {s.audio.duration} s, redacted none"
         report.details["av_sync"] = "redacted has no audio"
         return report
+    report.details["audio_kept"] = f"source {s.audio.codec} {s.audio.duration} s, redacted {a.codec} {a.duration} s"
+    if s.audio.duration is None or a.duration is None:
+        # a missing duration is no evidence of a match (mkv, damaged headers); never compare None with None
+        report.checks["audio_kept"] = False
+        report.details["audio_kept"] += " (unknown duration)"
+    else:
+        report.checks["audio_kept"] = a.codec == s.audio.codec and abs(a.duration - s.audio.duration) <= frame
     shift = (a.start - r.video.start) - (s.audio.start - s.video.start)
     report.checks["av_sync"] = abs(shift) <= frame
     report.details["av_sync"] = f"audio offset changed by {shift * 1000:.1f} ms (limit {frame * 1000:.1f} ms)"
