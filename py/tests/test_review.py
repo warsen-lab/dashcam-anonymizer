@@ -17,6 +17,7 @@ def test_ensure_outside_rejects_the_frames_dir_and_anything_below_it(tmp_path):
     with pytest.raises(ValueError):
         ensure_outside(frames, frames)
     ensure_outside(frames, tmp_path / "labels" / "trip")
+    ensure_outside(frames, tmp_path / "frames" / "trip2")
 
 
 def test_labelme_document_points_back_to_the_frame(tmp_path):
@@ -42,7 +43,8 @@ def test_review_queue_lists_most_flagged_frames_first(tmp_path):
 
     write_review_queue(path, flags)
 
-    rows = list(csv.reader(path.open()))
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
     assert rows[0] == ["video", "frame", "flags", "rules", "where"]
     assert rows[1] == ["v.mp4", "9", "2", "low_score;vehicle_without_plate", "low_score@1,2,3,4 vehicle_without_plate@1,2,3,4"]
     assert rows[2][:2] == ["v.mp4", "5"]
@@ -75,7 +77,9 @@ def test_import_review_writes_gold_yolo_and_scene_tags(tmp_path):
         "1 0.550000 0.550000 0.100000 0.100000",
         "0 0.050000 0.050000 0.100000 0.100000",
     ]
-    assert list(csv.reader((gold / "gold_meta.csv").open())) == [
+    with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    assert rows == [
         ["image", "video", "frame", "scene_tags"],
         ["000007.jpg", "trip.mp4", "7", "city;day"],
     ]
@@ -94,3 +98,49 @@ def test_import_review_rejects_bad_shapes(tmp_path, shape, message):
 
     with pytest.raises(ValueError, match=message):
         import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+
+def test_import_review_accepts_four_point_rectangles_and_clips(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    shapes = [{"label": "face", "points": [[150, 10], [250, 10], [250, 30], [150, 30]], "shape_type": "rectangle"}]
+    _review_json(review, shapes, {})
+
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+
+    assert (gold / "yolo" / "000007.txt").read_text(encoding="utf-8").splitlines() == [
+        "0 0.875000 0.200000 0.250000 0.200000",
+    ]
+
+
+@pytest.mark.parametrize(
+    "shape, message",
+    [
+        ({"label": "face", "points": [[0, 0]], "shape_type": "rectangle"}, "need at least 2"),
+        ({"label": "plate", "points": [[300, 10], [400, 20]], "shape_type": "rectangle"}, "empty after clipping"),
+    ],
+)
+def test_import_review_rejects_degenerate_shapes(tmp_path, shape, message):
+    frames, review = _frames_dir(tmp_path), tmp_path / "review"
+    _review_json(review, [shape], {})
+
+    with pytest.raises(ValueError, match=message):
+        import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+
+def test_export_then_import_round_trip(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    ref = FrameRef("trip.mp4", 7, 116.7, frames / "000007.jpg")
+    boxes = [
+        Box("face", 10, 20, 30, 50, score=0.9, src="teacher_retinaface+teacher_yunet"),
+        Box("plate", 100, 60, 140, 70, score=0.6, src="teacher_owlv2"),
+    ]
+    review.mkdir(parents=True)
+    doc = labelme_document(ref, boxes, [], review, 200, 100)
+    (review / "000007.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+
+    assert (gold / "yolo" / "000007.txt").read_text(encoding="utf-8").splitlines() == [
+        "0 0.100000 0.350000 0.100000 0.300000",
+        "1 0.600000 0.650000 0.200000 0.100000",
+    ]

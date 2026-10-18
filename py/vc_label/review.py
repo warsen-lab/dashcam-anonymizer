@@ -55,7 +55,7 @@ def write_review_queue(path: Path, flags: list[Flag]) -> None:
     for f in flags:
         per_frame[(f.video, f.frame)].append(f)
     rows = sorted(per_frame.items(), key=lambda item: (-len(item[1]), item[0][1]))
-    with path.open("w", newline="") as fh:
+    with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["video", "frame", "flags", "rules", "where"])
         for (video, frame), frame_flags in rows:
@@ -67,19 +67,27 @@ def write_review_queue(path: Path, flags: list[Flag]) -> None:
 
 
 def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], int, int]:
-    """(boxes, true scene flags, width, height). Non-rectangles or unknown labels are errors."""
-    doc = json.loads(path.read_text())
+    """(boxes, true scene flags, width, height). Non-rectangles, unknown labels and empty boxes are errors."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    width, height = int(doc["imageWidth"]), int(doc["imageHeight"])
     boxes = []
-    for shape in doc.get("shapes", []):
+    for i, shape in enumerate(doc.get("shapes", [])):
         label = shape.get("label")
         if label not in LABEL_CLASSES:
             raise ValueError(f"{path}: unknown label {label!r} (expected one of {LABEL_CLASSES})")
         if shape.get("shape_type") != "rectangle":
             raise ValueError(f"{path}: shape {label!r} is {shape.get('shape_type')!r}, not a rectangle")
-        (xa, ya), (xb, yb) = shape["points"]
-        boxes.append(Box(label, min(xa, xb), min(ya, yb), max(xa, xb), max(ya, yb), src="human"))
+        points = shape.get("points") or []
+        if len(points) < 2:
+            raise ValueError(f"{path}: shape {i} {label!r} has {len(points)} points, need at least 2")
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
+        box = Box(label, min(xs), min(ys), max(xs), max(ys), src="human").clipped(width, height)
+        if box.area <= 0:
+            raise ValueError(f"{path}: shape {i} {label!r} is empty after clipping to the image")
+        boxes.append(box)
     tags = sorted(name for name, on in doc.get("flags", {}).items() if on)
-    return boxes, tags, int(doc["imageWidth"]), int(doc["imageHeight"])
+    return boxes, tags, width, height
 
 
 def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path) -> int:
@@ -93,9 +101,10 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path) -> int
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")
         boxes, tags, width, height = read_labelme_boxes(path)
-        (yolo_dir / f"{path.stem}.txt").write_text("".join(f"{line}\n" for line in to_yolo_lines(boxes, width, height)))
+        yolo_text = "".join(f"{line}\n" for line in to_yolo_lines(boxes, width, height))
+        (yolo_dir / f"{path.stem}.txt").write_text(yolo_text, encoding="utf-8")
         rows.append([ref.image.name, ref.video, ref.frame, ";".join(tags)])
-    with (gold_dir / "gold_meta.csv").open("w", newline="") as fh:
+    with (gold_dir / "gold_meta.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["image", "video", "frame", "scene_tags"])
         writer.writerows(rows)
