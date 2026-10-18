@@ -31,6 +31,39 @@ def test_letterbox_without_resize_keeps_pixels_and_pads_bottom_rows():
     assert np.allclose(arr[0, :, 1080:, :], PAD_VALUE / 255.0)
 
 
+def test_letterbox_scale_is_limited_by_height_when_the_frame_is_tall():
+    assert letterbox_scale(100, 200, 64, 64) == pytest.approx(0.32)
+
+
+def test_letterbox_rounds_the_scaled_height_half_up_like_cpp():
+    # r = 0.5 and 721 * 0.5 = 360.5: C++ std::lround gives 361, Python round() would give 360
+    arr, r = letterbox(np.zeros((721, 1280, 3), np.uint8), 640, 640)
+    assert r == pytest.approx(0.5)
+    assert arr.shape == (1, 3, 640, 640)
+    assert np.allclose(arr[0, :, 360, :], 0.0)  # row 360 is image content (black)
+    assert np.allclose(arr[0, :, 361, :], PAD_VALUE / 255.0)  # row 361 is padding
+
+
+def test_letterbox_returns_a_c_contiguous_tensor():
+    arr, _ = letterbox(np.zeros((50, 100, 3), np.uint8), 64, 64)
+    assert arr.flags["C_CONTIGUOUS"]
+
+
+@pytest.mark.parametrize(
+    "shape, in_size",
+    [((0, 100, 3), (64, 64)), ((50, 0, 3), (64, 64)), ((50, 100, 3), (0, 64)), ((50, 100, 3), (64, -1))],
+)
+def test_letterbox_rejects_non_positive_sizes(shape, in_size):
+    with pytest.raises(ValueError, match="positive"):
+        letterbox(np.zeros(shape, np.uint8), *in_size)
+
+
+def test_letterbox_rejects_a_frame_that_scales_to_zero_width():
+    # a 1 x 10000 frame at r = 0.0064 rounds to 0 px wide
+    with pytest.raises(ValueError, match="empty"):
+        letterbox(np.zeros((10000, 1, 3), np.uint8), 64, 64)
+
+
 def _pred(columns):
     """columns: list of (cx, cy, w, h, face_score, plate_score) -> [1, 6, N]."""
     return np.array(columns, np.float32).T[None]
@@ -63,3 +96,9 @@ def test_decode_clips_to_the_frame_and_accepts_2d_input():
 def test_decode_rejects_a_class_count_mismatch():
     with pytest.raises(ValueError, match="classes"):
         decode_yolov8(_pred([(1, 1, 1, 1, 0.9, 0.1)]), 1.0, ("face",), 10, 10, 0.15, 0.5)
+
+
+def test_decode_keeps_a_score_exactly_at_the_threshold():
+    pred = _pred([(32, 16, 8, 4, 0.15, 0.0)])
+    boxes = decode_yolov8(pred, 1.0, ("face", "plate"), 100, 100, 0.15, 0.5)
+    assert len(boxes) == 1 and boxes[0].cls == "face"
