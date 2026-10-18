@@ -1024,10 +1024,13 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert cfg.stems == ["a", "b"] and cfg.fps_values == [5.0, 10.0, 15.0] and cfg.out == out
     assert cfg.overwrite is False
     assert cfg.vc_redact == Path("build/cpp-release/vc_redact") and cfg.config == Path("configs/redact.json")
+    assert cfg.redacted_root == Path("data/redacted")
     printed = capsys.readouterr().out
     assert "10 fps" in printed and str(out / "index.html") in printed
 
     assert main([*argv, "--overwrite"]) == 0 and seen[-1].overwrite is True
+    # a second config gets its own videos, or its run would overwrite the ones the first report links to
+    assert main([*argv, "--redacted-root", str(tmp_path / "tuned")]) == 0 and seen[-1].redacted_root == tmp_path / "tuned"
     capsys.readouterr()
 
     outcome["chosen_fps"] = None

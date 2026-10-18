@@ -36,6 +36,10 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--vc-redact", type=Path, default=Path("build/cpp-release/vc_redact"))
     r.add_argument("--vc-detect", type=Path, default=Path("build/cpp-release/vc_detect"))
     r.add_argument("--config", type=Path, default=Path("configs/redact.json"))
+    r.add_argument(
+        "--redacted-root", type=Path, default=Path("data/redacted"),
+        help="where the redacted runs go; give each --config its own, or a later run overwrites the videos an earlier report links to",
+    )
     r.add_argument("--overwrite", action="store_true", help="clear a non-empty --out first (it is refused otherwise)")
     return p
 
@@ -101,6 +105,7 @@ def _run(args) -> int:
     cfg = RunConfig(
         stems=[s.strip() for s in args.stems.split(",") if s.strip()], model=args.model, fps_values=_fps_values(args.fps),
         out=args.out, vc_redact=args.vc_redact, vc_detect=args.vc_detect, config=args.config, overwrite=args.overwrite,
+        redacted_root=args.redacted_root,
     )
     summary = run_all(cfg)
     chosen = summary["chosen_fps"]
