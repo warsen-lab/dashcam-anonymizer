@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from vc_label.contracts import LABEL_CLASSES, Box, read_frames_csv
-from vc_label.pipeline import MERGED, check_labels_match_frames, read_processed
+from vc_label.pipeline import MERGED, PROCESSED, check_labels_match_frames, read_processed
 from vc_label.review import image_size
 from vc_label.rules import TEMPORAL_SOURCE
 from vc_eval.metrics import (
@@ -89,6 +89,16 @@ class CoverageReport:
         return all(self.class_passed(c) for c in LABEL_CLASSES) and self.heatmap_passed()
 
 
+def _fused_labels(labels_dir: Path) -> Path:
+    """merged.jsonl, which vc_label fuse writes after processed.txt; a missing or stale copy is refused."""
+    merged = labels_dir / MERGED
+    if not merged.exists():
+        raise ValueError(f"{merged} does not exist; run vc_label fuse on {labels_dir} first")
+    if merged.stat().st_mtime < (labels_dir / PROCESSED).stat().st_mtime:
+        raise ValueError(f"{merged} is older than processed.txt; rerun vc_label fuse")
+    return merged
+
+
 def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
     refs = read_frames_csv(frames_dir)
     check_labels_match_frames(frames_dir, labels_dir, refs)
@@ -97,10 +107,13 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
     if not used:
         raise ValueError(f"{labels_dir} has no labelled frames")
     video = used[0].video
+    merged = _fused_labels(labels_dir)
+    merged_videos, targets = detections_by_frame(merged)
+    if merged_videos - {video}:
+        raise ValueError(f"{merged} holds labels for {', '.join(sorted(merged_videos - {video}))}, not {video}")
     mask_videos, masks = read_masks(masks_path)
     if mask_videos - {video}:
         raise ValueError(f"{masks_path} is for {', '.join(sorted(mask_videos))}, not {video}")
-    _, targets = detections_by_frame(labels_dir / MERGED)
     width, height = image_size(used[0].image)
     report = CoverageReport(video, len(used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES})
     stray = []

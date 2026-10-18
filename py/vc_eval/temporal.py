@@ -23,12 +23,17 @@ def evaluate_temporal(dense_detections: Path, sparse_masks: Path, frame_height: 
     """Every must-mask box of the --detect-every-frame run must be >= 80 % under that frame's sparse masks."""
     dense_videos, dense = detections_by_frame(dense_detections)
     mask_videos, masks = read_masks(sparse_masks)
+    if not masks:
+        raise ValueError(f"{sparse_masks} has no frames")
+    if len(mask_videos) > 1:
+        raise ValueError(f"{sparse_masks} is for several videos: {', '.join(sorted(mask_videos))}")
     if dense_videos and dense_videos != mask_videos:
         raise ValueError(
             f"{dense_detections} ({', '.join(sorted(dense_videos))}) and {sparse_masks} "
             f"({', '.join(sorted(mask_videos))}) are for different videos"
         )
-    report = TemporalReport(next(iter(mask_videos), ""), len(masks), {c: Rate() for c in LABEL_CLASSES})
+    video = next(iter(mask_videos))
+    report = TemporalReport(video, len(masks), {c: Rate() for c in LABEL_CLASSES})
     for frame in sorted(dense):
         if frame not in masks:
             raise ValueError(f"{sparse_masks} has no line for frame {frame}")
