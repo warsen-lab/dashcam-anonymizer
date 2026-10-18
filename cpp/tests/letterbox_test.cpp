@@ -31,6 +31,16 @@ TEST(Letterbox, ScaleFitsTheLimitingSide) {
   EXPECT_THROW(makeLetterbox(0, 10, 64, 64), std::invalid_argument);
 }
 
+// A frame this wide scales to 64 x 0.0064 px: a zero-height tensor would only fail later, inside sws.
+TEST(Letterbox, RejectsAScaledSizeThatRoundsToZero) {
+  EXPECT_THROW(makeLetterbox(10000, 1, 64, 64), std::invalid_argument);
+  EXPECT_THROW(makeLetterbox(1, 10000, 64, 64), std::invalid_argument);
+  // The narrowest size that still rounds to one pixel is accepted.
+  const Letterbox thin = makeLetterbox(10000, 100, 64, 64);  // 64 x 0.64 -> 64 x 1
+  EXPECT_EQ(thin.scaledWidth, 64);
+  EXPECT_EQ(thin.scaledHeight, 1);
+}
+
 TEST(Letterbox, FillsRgbAtTheTopLeftAndPadsWith114) {
   // BT.601 limited-range red
   const auto red = test::makeFrame(128, 64, AV_PIX_FMT_YUV420P, 81, 90, 240);

@@ -25,6 +25,12 @@ Letterbox makeLetterbox(int frameWidth, int frameHeight, int inputWidth, int inp
                   static_cast<double>(inputHeight) / frameHeight);
   lb.scaledWidth = std::min(inputWidth, static_cast<int>(std::lround(frameWidth * lb.r)));
   lb.scaledHeight = std::min(inputHeight, static_cast<int>(std::lround(frameHeight * lb.r)));
+  if (lb.scaledWidth <= 0 || lb.scaledHeight <= 0) {
+    throw std::invalid_argument("a " + std::to_string(frameWidth) + "x" + std::to_string(frameHeight) +
+                                " frame scales to " + std::to_string(lb.scaledWidth) + "x" +
+                                std::to_string(lb.scaledHeight) + " in a " + std::to_string(inputWidth) + "x" +
+                                std::to_string(inputHeight) + " model input");
+  }
   return lb;
 }
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace vc {
@@ -16,19 +17,32 @@ struct Point {
   double y = 0;
 };
 
-Point centerOf(const Box& b) { return {(b.x1 + b.x2) / 2.0, (b.y1 + b.y2) / 2.0}; }
+Point centerOf(const Box& b) { return {(static_cast<double>(b.x1) + b.x2) / 2.0, (static_cast<double>(b.y1) + b.y2) / 2.0}; }
+
+// Box sizes are computed in double: the float difference of two finite coordinates can overflow to
+// inf, and inf later turns into a NaN margin (0 * inf) that would drop the mask silently.
+double widthOf(const Box& b) { return b.x2 > b.x1 ? static_cast<double>(b.x2) - b.x1 : 0.0; }
+double heightOf(const Box& b) { return b.y2 > b.y1 ? static_cast<double>(b.y2) - b.y1 : 0.0; }
+
+// The nearest float, saturating instead of overflowing to inf.
+float toFloat(double v) {
+  constexpr double kMax = std::numeric_limits<float>::max();
+  return static_cast<float>(std::clamp(v, -kMax, kMax));
+}
 
 Box shifted(const Box& b, double dx, double dy) {
   Box s = b;
-  s.x1 = static_cast<float>(b.x1 + dx);
-  s.x2 = static_cast<float>(b.x2 + dx);
-  s.y1 = static_cast<float>(b.y1 + dy);
-  s.y2 = static_cast<float>(b.y2 + dy);
+  s.x1 = toFloat(b.x1 + dx);
+  s.x2 = toFloat(b.x2 + dx);
+  s.y1 = toFloat(b.y1 + dy);
+  s.y2 = toFloat(b.y2 + dy);
   return s;
 }
 
 Box lerp(const Box& a, const Box& b, double t) {
-  const auto mix = [t](float p, float q) { return static_cast<float>(p + (q - p) * t); };
+  const auto mix = [t](float p, float q) {
+    return toFloat(static_cast<double>(p) + (static_cast<double>(q) - static_cast<double>(p)) * t);
+  };
   Box out = a;
   out.x1 = mix(a.x1, b.x1);
   out.y1 = mix(a.y1, b.y1);
@@ -130,7 +144,7 @@ std::vector<std::pair<size_t, size_t>> BoxTimeline::match(const Keyframe& next, 
         distance = std::min(distance, std::hypot(actual.x - (from.x + v->x * steps),
                                                  actual.y - (from.y + v->y * steps)));
       }
-      const double size = std::max(1.0, (a.width() + a.height() + b.width() + b.height()) / 4.0);
+      const double size = std::max(1.0, (widthOf(a) + heightOf(a) + widthOf(b) + heightOf(b)) / 4.0);
       const double cost = distance / size;
       if (cost <= config_.matchMaxDistance) candidates.push_back({cost, i, j});
     }
@@ -151,8 +165,8 @@ std::vector<std::pair<size_t, size_t>> BoxTimeline::match(const Keyframe& next, 
 
 void BoxTimeline::add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY,
                       MaskOrigin origin) const {
-  const double mx = config_.expandFraction * box.width() + config_.motionExpandFraction * motionX;
-  const double my = config_.expandFraction * box.height() + config_.motionExpandFraction * motionY;
+  const double mx = config_.expandFraction * widthOf(box) + config_.motionExpandFraction * motionX;
+  const double my = config_.expandFraction * heightOf(box) + config_.motionExpandFraction * motionY;
   double x1 = box.x1 - mx;
   double x2 = box.x2 + mx;
   double y1 = box.y1 - my;

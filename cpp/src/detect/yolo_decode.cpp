@@ -21,18 +21,18 @@ std::vector<Box> decodeYolov8(const float* pred, int numClasses, int64_t numAnch
   for (int64_t a = 0; a < numAnchors; ++a) {
     int best = 0;
     float score = value(4, a);
-    bool anyNan = std::isnan(score);
+    bool finite = std::isfinite(score);
     for (int c = 1; c < numClasses; ++c) {
       const float s = value(4 + c, a);
-      anyNan = anyNan || std::isnan(s);
+      finite = finite && std::isfinite(s);
       if (s > score) {
         score = s;
         best = c;
       }
     }
-    // numpy's max/argmax propagate NaN, so the Python decoder drops such an anchor; the negated
-    // comparison below also drops it, since NaN >= threshold is false.
-    if (anyNan) continue;
+    // A healthy model never emits a NaN / inf score. Such an anchor would fail every threshold test
+    // and silently vanish, and a run that loses all its detections this way is an unmasked video.
+    if (!finite) throw VcError("model output has non-finite scores");
     if (!(score >= params.scoreThreshold)) continue;
     const float cx = value(0, a);
     const float cy = value(1, a);

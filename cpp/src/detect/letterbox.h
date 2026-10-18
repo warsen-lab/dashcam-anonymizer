@@ -20,7 +20,8 @@ struct Letterbox {
   double r = 1.0;        // min(inputWidth / frameWidth, inputHeight / frameHeight)
 };
 
-// Throws std::invalid_argument for non-positive sizes.
+// Throws std::invalid_argument for non-positive sizes and when a scaled size rounds to 0 (an extreme
+// aspect ratio would otherwise fail late, inside the conversion).
 Letterbox makeLetterbox(int frameWidth, int frameHeight, int inputWidth, int inputHeight);
 
 // Converts 8-bit YUV frames of one size into the model's [1, 3, H, W] float input (RGB / 255).

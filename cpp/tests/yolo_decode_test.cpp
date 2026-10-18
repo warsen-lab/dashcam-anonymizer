@@ -4,6 +4,7 @@
 
 #include <array>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "common/vc_error.h"
@@ -54,11 +55,28 @@ TEST(YoloDecode, KeepsScoresEqualToTheThreshold) {
   EXPECT_EQ(decodeYolov8(p.data(), 2, 1, makeLetterbox(20, 20, 20, 20), {}).size(), 1u);
 }
 
-TEST(YoloDecode, DropsAnchorsWithNanScores) {
+// A healthy model never emits a non-finite class score. Dropping such an anchor could leave zero
+// detections, which is an unmasked video, so the run has to stop (vc_train.geometry.decode_yolov8
+// raises as well).
+TEST(YoloDecode, StopsOnANonFiniteClassScoreOfAnyAnchor) {
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  const std::vector<float> p = pred({{10, 10, 4, 4, nan, 0.9f},
-                                     {10, 10, 4, 4, 0.9f, nan}});
-  EXPECT_TRUE(decodeYolov8(p.data(), 2, 2, makeLetterbox(20, 20, 20, 20), {}).empty());
+  const float inf = std::numeric_limits<float>::infinity();
+  for (const float bad : {nan, inf, -inf}) {
+    for (const size_t column : {4u, 5u}) {
+      // The broken anchor sits next to a healthy one and may be far below the threshold otherwise.
+      for (const float other : {0.0f, 0.9f}) {
+        std::array<float, 6> broken = {10, 10, 4, 4, other, other};
+        broken[column] = bad;
+        const std::vector<float> p = pred({{5, 5, 4, 4, 0.9f, 0.0f}, broken});
+        try {
+          decodeYolov8(p.data(), 2, 2, makeLetterbox(20, 20, 20, 20), {});
+          ADD_FAILURE() << "no throw for score " << bad << " in column " << column << " next to " << other;
+        } catch (const VcError& e) {
+          EXPECT_NE(std::string(e.what()).find("non-finite scores"), std::string::npos) << e.what();
+        }
+      }
+    }
+  }
 }
 
 TEST(YoloDecode, ClipsEachAxisToItsOwnFrameSize) {

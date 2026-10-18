@@ -522,13 +522,37 @@ TEST(BoxTimeline, FallsBackToTheIndexWhenAFrameLiesOutsideTheKeyframeTimestamps)
 
 TEST(BoxTimeline, NeverEmitsAMaskWithNonFiniteCoordinates) {
   // Finite coordinates whose width overflows a float: with no expansion fraction the margin is
-  // 0 * inf = NaN, and a NaN mask would pass an `x2 <= x1` test.
+  // 0 * inf = NaN, and a NaN mask would pass an `x2 <= x1` test. The target must stay masked,
+  // not silently dropped, so every frame has to carry a (finite) mask.
   BoxTimeline timeline(exact(), 1000, 1000);
   timeline.advance({}, key(0, {face(-3e38f, 100, 3e38f, 120)}));
   const auto masks = timeline.advance(frames(0, 6), key(6, {face(-3e38f, 100, 3e38f, 120)}));
   ASSERT_EQ(masks.size(), 6u);
   expectFinite(masks);
-  expectFinite(timeline.finish(frames(6, 12)));
+  for (size_t k = 0; k < masks.size(); ++k) {
+    ASSERT_EQ(masks[k].size(), 1u) << "frame offset " << k;
+    expectBox(masks[k][0], 0, 100, 1000, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+  const auto tail = timeline.finish(frames(6, 12));
+  ASSERT_EQ(tail.size(), 6u);
+  expectFinite(tail);
+  for (size_t k = 0; k < tail.size(); ++k) {
+    ASSERT_EQ(tail[k].size(), 1u) << "frame offset " << k;
+    expectBox(tail[k][0], 0, 100, 1000, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Extended);
+  }
+}
+
+// Interpolating between two float-extreme boxes must not overflow either: (q - p) alone is 5.9e38.
+TEST(BoxTimeline, InterpolatesBoxesAtTheFloatLimitsWithoutOverflowing) {
+  // The centre moves 5.9e38 (118 box sizes), so the boxes only match with a huge matching distance.
+  BoxTimeline timeline(TimelineConfig{1000.0, 0.0, 0.0, 0.0}, 1000, 1000);
+  timeline.advance({}, key(0, {face(-3e38f, 100, -2.9e38f, 120)}));
+  const auto masks = timeline.advance(frames(0, 6), key(6, {face(2.9e38f, 100, 3e38f, 120)}));
+  ASSERT_EQ(masks.size(), 6u);
+  expectFinite(masks);
+  // Halfway the box spans [-5e36, 5e36], which covers the whole frame width.
+  ASSERT_EQ(masks[3].size(), 1u);
+  expectBox(masks[3][0], 0, 100, 1000, 120, MaskOrigin::Interpolated);
 }
 
 }  // namespace
