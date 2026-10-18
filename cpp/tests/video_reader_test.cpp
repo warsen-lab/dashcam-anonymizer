@@ -134,9 +134,30 @@ TEST(VideoReader, ForwardsAudioPacketsToTheSink) {
   int frames = 0;
   while (reader.next() != nullptr) ++frames;
   EXPECT_EQ(frames, 60);
-  EXPECT_GT(packets, 50);  // ~94 AAC packets in 2 s at 48 kHz
+  // Every audio packet of the file arrives: ~87 AAC packets of 1024 samples in 2 s at 44.1 kHz,
+  // counted here by demuxing the file separately.
+  const int expected = test::streamTiming(test::videoWithAudio(), AVMEDIA_TYPE_AUDIO).packets;
+  EXPECT_GE(expected, 86);
+  EXPECT_EQ(packets, expected);
   EXPECT_FALSE(otherStream);
   EXPECT_TRUE(reader.droppedStreams().empty());
+}
+
+TEST(VideoReader, AnExceptionFromTheAudioSinkPropagatesOutOfNext) {
+  VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
+  int calls = 0;
+  reader.setAudioSink([&](const AVPacket&) {
+    ++calls;
+    throw std::runtime_error("sink failed");
+  });
+  try {
+    while (reader.next() != nullptr) {
+    }
+    ADD_FAILURE() << "next() did not throw";
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "sink failed");
+  }
+  EXPECT_EQ(calls, 1);
 }
 
 TEST(VideoReader, ListsStreamsItDrops) {

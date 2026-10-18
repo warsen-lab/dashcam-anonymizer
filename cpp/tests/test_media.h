@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -30,6 +31,51 @@ std::filesystem::path videoWithAudio();
 std::filesystem::path noisyVideoWithAudio();
 // 1 s, 320x240 @ 30 fps H.264 with a mov_text subtitle stream.
 std::filesystem::path videoWithSubtitles();
+// 2 s of videoWithAudio() cut with `ffmpeg -ss 0.7 -c copy`: the video starts on the keyframe before
+// the cut, so its first packets have negative timestamps (hidden by an MP4 edit list).
+std::filesystem::path copyCutVideo();
+// videoWithAudio() remuxed to MPEG-TS: 90 kHz time bases for both streams and a start offset of ~1.4 s.
+std::filesystem::path mpegTsVideo();
+// 1 s, 320x240 @ 30 fps H.264 with a 4:3 sample aspect ratio.
+std::filesystem::path anamorphicVideo();
+// basic.mp4 (video only) with a 90 degree rotation in the display matrix.
+std::filesystem::path rotatedVideo();
+// 1 s, 320x240 @ 30 fps H.264 tagged BT.709 / limited range.
+std::filesystem::path bt709Video();
+// 1 s, 320x240 @ 30 fps H.264 tagged BT.601 (smpte170m / bt470bg) / full range.
+std::filesystem::path bt601FullRangeVideo();
+// 1 s, 320x240 @ 30 fps H.264 with PCM mu-law audio in a MOV: that audio cannot be stored in MP4.
+std::filesystem::path videoWithMulawAudio();
+// 1 s, 320x240 H.264 as a raw elementary stream (.h264): frames carry no timestamps.
+std::filesystem::path rawH264Stream();
+
+// Timing of one stream, from the container and its packets (packets flagged discard, which the
+// decoder never shows, are left out of first / last).
+struct StreamTiming {
+  double startSec = 0;     // AVStream::start_time
+  double firstPtsSec = 0;  // smallest packet pts
+  double lastPtsSec = 0;   // largest packet pts
+  int packets = 0;
+};
+// First stream of `type`. Throws std::runtime_error when there is none.
+StreamTiming streamTiming(const std::filesystem::path& path, AVMediaType type);
+// Codec id of the first stream of `type`.
+AVCodecID streamCodec(const std::filesystem::path& path, AVMediaType type);
+
+// How the first video stream is presented.
+struct VideoPresentation {
+  AVRational sampleAspectRatio{0, 1};
+  AVColorRange colorRange = AVCOL_RANGE_UNSPECIFIED;
+  AVColorSpace colorSpace = AVCOL_SPC_UNSPECIFIED;
+  AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED;
+  AVColorTransferCharacteristic colorTrc = AVCOL_TRC_UNSPECIFIED;
+  bool hasDisplayMatrix = false;
+  std::array<int32_t, 9> displayMatrix{};
+  double rotationDegrees = 0;  // av_display_rotation_get of the matrix, 0 without one
+  uint32_t codecTag = 0;
+};
+VideoPresentation videoPresentation(const std::filesystem::path& path);
+
 // Number of streams of `type` in a media file (opened with libavformat).
 int streamCount(const std::filesystem::path& path, AVMediaType type);
 // Duration in seconds of the first stream of `type`, from the container.

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,13 +31,34 @@ struct WriterConfig {
   std::string sourceCodec = "h264";                // "hevc" stays HEVC, anything else becomes H.264
   int64_t bitRate = 0;                             // <= 0: 8 Mb/s
   bool preferHardware = true;                      // VideoToolbox first, then libx264 / libx265
+
+  // Presentation metadata of the source video, written to the encoder and the MP4 so that the
+  // output is shown like the input (aspect ratio, colours, rotation). The defaults mean "not
+  // specified" and write nothing extra; copyPresentation() fills them from an input stream.
+  AVRational sampleAspectRatio{0, 1};  // 0/1 when unknown
+  AVColorRange colorRange = AVCOL_RANGE_UNSPECIFIED;
+  AVColorSpace colorSpace = AVCOL_SPC_UNSPECIFIED;
+  AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED;
+  AVColorTransferCharacteristic colorTrc = AVCOL_TRC_UNSPECIFIED;
+  std::optional<std::array<int32_t, 9>> displayMatrix;  // AV_PKT_DATA_DISPLAYMATRIX (rotation / flip)
 };
 
+// Copies the presentation metadata of an input video stream into `config`: the sample aspect ratio
+// (the stream's, else the codec parameters'), the colour range / space / primaries / transfer from
+// the codec parameters and the display matrix from the stream's coded side data. Reads the stream,
+// so call it where the demuxer is not in use on another thread.
+void copyPresentation(const AVStream& videoStream, WriterConfig& config);
+
 // Encodes frames and stream-copies audio into an MP4 file.
+//
+// Not thread-safe, and not tied to one thread by construction either: create it, call every method
+// (writeVideo / writeAudio / finish / the accessors) and destroy it from ONE thread. vc_redact
+// builds it on its encode thread and uses it only there.
 class VideoWriter {
  public:
   // Opens the first encoder that works and writes the MP4 header; `audio` streams are copied with
-  // their codec parameters and time base. Throws VcError.
+  // their codec parameters and time base. Throws VcError, also when an audio codec cannot be stored
+  // in MP4 (checked before the file is created).
   VideoWriter(const WriterConfig& config, const std::vector<const AVStream*>& audio);
   ~VideoWriter();  // closes the file; without finish() it is incomplete
   VideoWriter(const VideoWriter&) = delete;
@@ -44,10 +67,11 @@ class VideoWriter {
   // e.g. "h264_videotoolbox" or "libx264".
   const std::string& encoderName() const;
   // Encodes one frame whose pts is in config.timeBase. Clears frame.pict_type so the encoder picks
-  // frame types itself. Throws VcError.
+  // frame types itself. Throws VcError, also when the frame is not config.width x config.height
+  // (the encoder would read past the end of a smaller frame) or after finish().
   void writeVideo(AVFrame& frame);
   // Copies one packet of the audio stream at position `ordinal` of the constructor's `audio`; its
-  // timestamps are in that stream's time base. Throws VcError.
+  // timestamps are in that stream's time base. Throws VcError, also after finish().
   void writeAudio(const AVPacket& packet, size_t ordinal);
   // Flushes the encoder and writes the trailer. Throws VcError.
   void finish();

@@ -1,5 +1,6 @@
 #include "io/video_writer.h"
 
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -45,7 +46,28 @@ std::vector<std::string> encoderCandidates(const WriterConfig& config) {
   return names;
 }
 
+bool validRatio(AVRational r) { return r.num > 0 && r.den > 0; }
+
 }  // namespace
+
+void copyPresentation(const AVStream& videoStream, WriterConfig& config) {
+  const AVCodecParameters& par = *videoStream.codecpar;
+  config.sampleAspectRatio = validRatio(videoStream.sample_aspect_ratio) ? videoStream.sample_aspect_ratio
+                             : validRatio(par.sample_aspect_ratio)       ? par.sample_aspect_ratio
+                                                                         : AVRational{0, 1};
+  config.colorRange = par.color_range;
+  config.colorSpace = par.color_space;
+  config.colorPrimaries = par.color_primaries;
+  config.colorTrc = par.color_trc;
+  config.displayMatrix.reset();
+  const AVPacketSideData* matrix =
+      av_packet_side_data_get(par.coded_side_data, par.nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
+  if (matrix != nullptr && matrix->size >= sizeof(int32_t) * 9) {
+    std::array<int32_t, 9> values{};
+    std::memcpy(values.data(), matrix->data, sizeof(int32_t) * 9);
+    config.displayMatrix = values;
+  }
+}
 
 struct VideoWriter::Impl {
   WriterConfig config;
@@ -78,6 +100,13 @@ struct VideoWriter::Impl {
       ctx->time_base = config.timeBase;
       ctx->framerate = rate;
       ctx->bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
+      if (config.sampleAspectRatio.num > 0 && config.sampleAspectRatio.den > 0) {
+        ctx->sample_aspect_ratio = config.sampleAspectRatio;
+      }
+      ctx->color_range = config.colorRange;
+      ctx->colorspace = config.colorSpace;
+      ctx->color_primaries = config.colorPrimaries;
+      ctx->color_trc = config.colorTrc;
       if ((output->oformat->flags & AVFMT_GLOBALHEADER) != 0) ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
       const int ret = avcodec_open2(ctx.get(), codec, nullptr);
       if (ret < 0) {
@@ -103,6 +132,7 @@ struct VideoWriter::Impl {
   }
 };
 
+
 VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVStream*>& audio)
     : impl_(std::make_unique<Impl>()) {
   Impl& s = *impl_;
@@ -111,6 +141,13 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVS
   AVFormatContext* raw = nullptr;
   checkAv(avformat_alloc_output_context2(&raw, nullptr, "mp4", path.c_str()), "create MP4 muxer");
   s.output.reset(raw);
+  // Before anything is opened or created: a codec MP4 cannot hold would only fail at the header.
+  for (const AVStream* in : audio) {
+    const AVCodecID id = in->codecpar->codec_id;
+    if (avformat_query_codec(s.output->oformat, id, FF_COMPLIANCE_NORMAL) == 0) {
+      throw VcError(std::string("audio codec ") + avcodec_get_name(id) + " cannot be stored in MP4");
+    }
+  }
   s.openEncoder();
 
   s.videoStream = avformat_new_stream(s.output.get(), nullptr);
@@ -119,6 +156,14 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<const AVS
   if (s.encoder->codec_id == AV_CODEC_ID_HEVC) s.videoStream->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
   s.videoStream->time_base = s.encoder->time_base;
   s.videoStream->avg_frame_rate = s.encoder->framerate;
+  s.videoStream->sample_aspect_ratio = s.encoder->sample_aspect_ratio;
+  if (config.displayMatrix) {
+    AVCodecParameters& par = *s.videoStream->codecpar;
+    AVPacketSideData* matrix = av_packet_side_data_new(&par.coded_side_data, &par.nb_coded_side_data,
+                                                       AV_PKT_DATA_DISPLAYMATRIX, sizeof(int32_t) * 9, 0);
+    if (matrix == nullptr) throw VcError("cannot store the display matrix");
+    std::memcpy(matrix->data, config.displayMatrix->data(), sizeof(int32_t) * 9);
+  }
 
   for (const AVStream* in : audio) {
     AVStream* out = avformat_new_stream(s.output.get(), nullptr);
@@ -143,6 +188,13 @@ int64_t VideoWriter::videoFrames() const { return impl_->frames; }
 void VideoWriter::writeVideo(AVFrame& frame) {
   Impl& s = *impl_;
   if (s.finished) throw VcError("writeVideo after finish");
+  // The encoder reads width x height pixels from the frame whatever its real size is.
+  if (frame.width != s.config.width || frame.height != s.config.height) {
+    throw VcError("frame is " + std::to_string(frame.width) + "x" + std::to_string(frame.height) +
+                  ", the writer was set up for " + std::to_string(s.config.width) + "x" +
+                  std::to_string(s.config.height));
+  }
+  frame.pict_type = AV_PICTURE_TYPE_NONE;
   AVFrame* toSend = &frame;
   if (frame.format != s.encoder->pix_fmt) {
     if (!s.sws) s.sws = av::allocSws();
@@ -150,11 +202,16 @@ void VideoWriter::writeVideo(AVFrame& frame) {
     s.converted->format = s.encoder->pix_fmt;
     s.converted->width = frame.width;
     s.converted->height = frame.height;
+    // Only the pixel format changes: without these the conversion would assume the limited range
+    // and squeeze full-range pictures, while the output is tagged with the source's range.
+    s.converted->color_range = frame.color_range;
+    s.converted->colorspace = frame.colorspace;
+    s.converted->color_primaries = frame.color_primaries;
+    s.converted->color_trc = frame.color_trc;
     checkAv(sws_scale_frame(s.sws.get(), s.converted.get(), &frame), "convert frame for the encoder");
     checkAv(av_frame_copy_props(s.converted.get(), &frame), "copy frame properties");
     toSend = s.converted.get();
   }
-  toSend->pict_type = AV_PICTURE_TYPE_NONE;
   checkAv(avcodec_send_frame(s.encoder.get(), toSend), "encode frame");
   ++s.frames;
   s.drain();
@@ -162,6 +219,7 @@ void VideoWriter::writeVideo(AVFrame& frame) {
 
 void VideoWriter::writeAudio(const AVPacket& packet, size_t ordinal) {
   Impl& s = *impl_;
+  if (s.finished) throw VcError("writeAudio after finish");
   if (ordinal >= s.audioOut.size()) throw VcError("unknown audio stream " + std::to_string(ordinal));
   av::PacketPtr copy = av::allocPacket();
   checkAv(av_packet_ref(copy.get(), &packet), "reference audio packet");

@@ -341,6 +341,7 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
   c.sourceCodec = reader.info().codecName;
   c.bitRate = stream->codecpar->bit_rate;
   c.preferHardware = preferHardware;
+  copyPresentation(*stream, c);  // aspect ratio, colour tags and rotation stay as in the input
   return c;
 }
 

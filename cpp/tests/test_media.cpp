@@ -1,7 +1,10 @@
 #include "test_media.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -10,6 +13,7 @@
 
 extern "C" {
 #include <libavutil/common.h>
+#include <libavutil/display.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -74,6 +78,48 @@ fs::path noisyVideoWithAudio() {
                    "-c:a aac -shortest");
 }
 
+fs::path copyCutVideo() {
+  return makeMedia("cut_copy.mp4", "-ss 0.7 -i \"" + videoWithAudio().string() + "\" -c copy");
+}
+
+fs::path mpegTsVideo() {
+  return makeMedia("video_audio.ts", "-i \"" + videoWithAudio().string() + "\" -c copy");
+}
+
+fs::path anamorphicVideo() {
+  return makeMedia("anamorphic.mp4",
+                   "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -vf setsar=4/3 -c:v libx264 -pix_fmt yuv420p");
+}
+
+fs::path rotatedVideo() {
+  return makeMedia("rotated.mp4", "-display_rotation 90 -i \"" + basicVideo().string() + "\" -c copy");
+}
+
+fs::path bt709Video() {
+  return makeMedia("bt709.mp4",
+                   "-f lavfi -i testsrc2=s=320x240:r=30:d=1 "
+                   "-vf setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv "
+                   "-c:v libx264 -pix_fmt yuv420p");
+}
+
+fs::path bt601FullRangeVideo() {
+  return makeMedia("bt601_full.mp4",
+                   "-f lavfi -i testsrc2=s=320x240:r=30:d=1 "
+                   "-vf setparams=colorspace=bt470bg:color_primaries=smpte170m:color_trc=smpte170m:range=pc "
+                   "-c:v libx264 -pix_fmt yuv420p");
+}
+
+fs::path videoWithMulawAudio() {
+  return makeMedia("video_mulaw.mov",
+                   "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -f lavfi -i sine=f=440:d=1 "
+                   "-c:v libx264 -pix_fmt yuv420p -c:a pcm_mulaw -ar 8000 -shortest");
+}
+
+fs::path rawH264Stream() {
+  return makeMedia("raw.h264",
+                   "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -c:v libx264 -pix_fmt yuv420p -f h264");
+}
+
 fs::path videoWithSubtitles() {
   const fs::path srt = tmpDir() / "subs.srt";
   if (!fs::exists(srt)) {
@@ -83,6 +129,75 @@ fs::path videoWithSubtitles() {
   }
   return makeMedia("video_subs.mp4", "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -i \"" + srt.string() +
                                          "\" -map 0:v -map 1:s -c:v libx264 -pix_fmt yuv420p -c:s mov_text");
+}
+
+namespace {
+
+av::InputContextPtr openProbed(const fs::path& path) {
+  AVFormatContext* raw = nullptr;
+  if (avformat_open_input(&raw, path.string().c_str(), nullptr, nullptr) < 0) throw std::runtime_error("open " + path.string());
+  av::InputContextPtr input(raw);
+  if (avformat_find_stream_info(input.get(), nullptr) < 0) throw std::runtime_error("probe " + path.string());
+  return input;
+}
+
+int firstStreamOf(const AVFormatContext& input, AVMediaType type, const fs::path& path) {
+  for (unsigned i = 0; i < input.nb_streams; ++i) {
+    if (input.streams[i]->codecpar->codec_type == type) return static_cast<int>(i);
+  }
+  throw std::runtime_error("no " + std::string(av_get_media_type_string(type)) + " stream in " + path.string());
+}
+
+}  // namespace
+
+StreamTiming streamTiming(const fs::path& path, AVMediaType type) {
+  const av::InputContextPtr input = openProbed(path);
+  const int index = firstStreamOf(*input, type, path);
+  const AVStream* stream = input->streams[index];
+  StreamTiming t;
+  t.startSec = stream->start_time == AV_NOPTS_VALUE ? 0.0 : static_cast<double>(stream->start_time) * av_q2d(stream->time_base);
+  int64_t first = std::numeric_limits<int64_t>::max();
+  int64_t last = std::numeric_limits<int64_t>::min();
+  const av::PacketPtr packet = av::allocPacket();
+  while (av_read_frame(input.get(), packet.get()) >= 0) {
+    if (packet->stream_index == index) {
+      ++t.packets;
+      if ((packet->flags & AV_PKT_FLAG_DISCARD) == 0 && packet->pts != AV_NOPTS_VALUE) {
+        first = std::min(first, packet->pts);
+        last = std::max(last, packet->pts);
+      }
+    }
+    av_packet_unref(packet.get());
+  }
+  if (first > last) throw std::runtime_error("no packets with timestamps in " + path.string());
+  t.firstPtsSec = static_cast<double>(first) * av_q2d(stream->time_base);
+  t.lastPtsSec = static_cast<double>(last) * av_q2d(stream->time_base);
+  return t;
+}
+
+AVCodecID streamCodec(const fs::path& path, AVMediaType type) {
+  const av::InputContextPtr input = openProbed(path);
+  return input->streams[firstStreamOf(*input, type, path)]->codecpar->codec_id;
+}
+
+VideoPresentation videoPresentation(const fs::path& path) {
+  const av::InputContextPtr input = openProbed(path);
+  const AVStream* stream = input->streams[firstStreamOf(*input, AVMEDIA_TYPE_VIDEO, path)];
+  const AVCodecParameters* par = stream->codecpar;
+  VideoPresentation p;
+  p.sampleAspectRatio = stream->sample_aspect_ratio.num > 0 ? stream->sample_aspect_ratio : par->sample_aspect_ratio;
+  p.colorRange = par->color_range;
+  p.colorSpace = par->color_space;
+  p.colorPrimaries = par->color_primaries;
+  p.colorTrc = par->color_trc;
+  p.codecTag = par->codec_tag;
+  const AVPacketSideData* sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
+  if (sd != nullptr && sd->size >= sizeof(int32_t) * 9) {
+    p.hasDisplayMatrix = true;
+    std::memcpy(p.displayMatrix.data(), sd->data, sizeof(int32_t) * 9);
+    p.rotationDegrees = av_display_rotation_get(p.displayMatrix.data());
+  }
+  return p;
 }
 
 int streamCount(const fs::path& path, AVMediaType type) {

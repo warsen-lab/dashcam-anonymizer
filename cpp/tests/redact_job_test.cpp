@@ -180,6 +180,29 @@ TEST(RedactJob, KeepsTheTimingOfVideoAndAudio) {
   EXPECT_NEAR(test::streamDurationSec(s.video, AVMEDIA_TYPE_AUDIO), test::streamDurationSec(o.input, AVMEDIA_TYPE_AUDIO), 0.05);
 }
 
+// The picture is shown like the input: same pixel aspect ratio, colour tags and rotation.
+TEST(RedactJob, KeepsThePresentationOfTheInput) {
+  struct Case {
+    const char* name;
+    fs::path input;
+  };
+  for (const Case& c : {Case{"redact_present_sar", test::anamorphicVideo()}, Case{"redact_present_rot", test::rotatedVideo()},
+                        Case{"redact_present_709", test::bt709Video()}, Case{"redact_present_full", test::bt601FullRangeVideo()}}) {
+    RedactOptions o = baseOptions(c.name);
+    o.input = c.input;
+    const RedactStats s = runRedact(o);
+    const test::VideoPresentation in = test::videoPresentation(c.input);
+    const test::VideoPresentation out = test::videoPresentation(s.video);
+    EXPECT_EQ(out.sampleAspectRatio.num * in.sampleAspectRatio.den, in.sampleAspectRatio.num * out.sampleAspectRatio.den) << c.name;
+    EXPECT_EQ(out.hasDisplayMatrix, in.hasDisplayMatrix) << c.name;
+    EXPECT_EQ(out.displayMatrix, in.displayMatrix) << c.name;
+    EXPECT_EQ(out.colorRange, in.colorRange) << c.name;
+    EXPECT_EQ(out.colorSpace, in.colorSpace) << c.name;
+    EXPECT_EQ(out.colorPrimaries, in.colorPrimaries) << c.name;
+    EXPECT_EQ(out.colorTrc, in.colorTrc) << c.name;
+  }
+}
+
 TEST(RedactJob, RejectsAnInvalidConfigBeforeCreatingAnything) {
   RedactOptions o = baseOptions("redact_badconfig");
   o.config.detectFps = 1.0;  // below the 5 fps floor
