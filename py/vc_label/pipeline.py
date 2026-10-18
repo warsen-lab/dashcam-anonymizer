@@ -165,16 +165,29 @@ def run_fuse(frames_dir: Path, labels_dir: Path, cfg: LabelingConfig) -> tuple[F
     return summary, sequence, flags
 
 
-def run_export_review(frames_dir: Path, labels_dir: Path, review_dir: Path, cfg: LabelingConfig) -> int:
-    """Writes one LabelMe JSON per labelled frame plus review_queue.csv; returns the frame count."""
+def run_export_review(
+    frames_dir: Path, labels_dir: Path, review_dir: Path, cfg: LabelingConfig, force: bool = False
+) -> tuple[int, int]:
+    """Writes a LabelMe JSON for every labelled frame that has none yet, plus review_queue.csv.
+
+    The review dir is where X-AnyLabeling saves human review, so an existing `<frame>.json` is left
+    untouched unless `force`; review_queue.csv is derived and always rewritten.
+    Returns (written, kept).
+    """
     _, sequence, flags = run_fuse(frames_dir, labels_dir, cfg)
     review_dir.mkdir(parents=True, exist_ok=True)
     per_frame: dict[int, list[Flag]] = defaultdict(list)
     for f in flags:
         per_frame[f.frame].append(f)
+    written = kept = 0
     for ref, boxes in sequence:
+        target = review_dir / f"{ref.frame:06d}.json"
+        if target.exists() and not force:
+            kept += 1
+            continue
         width, height = _image_size(ref)
         doc = labelme_document(ref, boxes, per_frame.get(ref.frame, []), review_dir, width, height)
-        (review_dir / f"{ref.frame:06d}.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False))
+        target.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+        written += 1
     write_review_queue(review_dir / "review_queue.csv", flags)
-    return len(sequence)
+    return written, kept

@@ -89,3 +89,36 @@ def test_review_and_gold_inside_the_frames_dir_are_rejected(tmp_path, capsys):
 
     assert not (frames / "review").exists()
     assert not (frames / "gold").exists()
+
+
+def _labelled(tmp_path):
+    """A one-frame frames dir and a labels dir holding one raw face, built without running teachers."""
+    import cv2
+    import numpy as np
+
+    from vc_label.contracts import Box, Detection
+
+    frames = tmp_path / "frames" / "trip"
+    frames.mkdir(parents=True)
+    cv2.imwrite(str(frames / "000000.jpg"), np.full((48, 64, 3), 128, np.uint8))
+    (frames / "frames.csv").write_text("video,frame,pts_ms,reason,motion_score\ntrip.mp4,0,0.0,base,0\n")
+    labels = tmp_path / "labels"
+    labels.mkdir()
+    (labels / "processed.txt").write_text("0\n")
+    write_jsonl(labels / "raw.jsonl", [Detection("trip.mp4", 0, 0.0, Box("face", 10, 10, 20, 24, score=0.9, src="teacher_yunet"))])
+    return frames, labels
+
+
+def test_export_review_keeps_existing_files_unless_forced(tmp_path, capsys):
+    frames, labels = _labelled(tmp_path)
+    review = tmp_path / "review"
+    argv = ["export-review", "--frames", str(frames), "--labels", str(labels), "--review", str(review)]
+
+    assert main(argv) == 0
+    assert f"export-review: 1 new LabelMe files, 0 kept in {review}" in capsys.readouterr().out
+
+    assert main(argv) == 0
+    assert f"export-review: 0 new LabelMe files, 1 kept in {review}" in capsys.readouterr().out
+
+    assert main([*argv, "--force"]) == 0
+    assert f"export-review: 1 new LabelMe files, 0 kept in {review}" in capsys.readouterr().out

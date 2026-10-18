@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export-review", help="write LabelMe JSON for X-AnyLabeling")
     common(export)
     export.add_argument("--review", type=Path, required=True, help="review dir, outside --frames")
+    export.add_argument("--force", action="store_true", help="overwrite existing LabelMe files, discarding human review")
 
     imp = sub.add_parser("import-review", help="reviewed LabelMe JSON -> gold YOLO labels")
     imp.add_argument("--frames", type=Path, required=True)
@@ -94,8 +95,8 @@ def _run(args: argparse.Namespace) -> str:
         return f"fuse: {summary.frames} frames, {summary.boxes} boxes ({summary.filled} temporal fills), {summary.flags} flags"
     from vc_label.pipeline import run_export_review
 
-    count = run_export_review(args.frames, args.labels, args.review, cfg)
-    return f"export-review: {count} LabelMe files in {args.review}"
+    written, kept = run_export_review(args.frames, args.labels, args.review, cfg, force=args.force)
+    return f"export-review: {written} new LabelMe files, {kept} kept in {args.review}"
 
 
 def main(argv: list[str] | None = None) -> int:

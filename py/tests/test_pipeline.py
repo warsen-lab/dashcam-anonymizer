@@ -133,9 +133,49 @@ def test_run_export_review_writes_one_labelme_file_per_frame(tmp_path):
     frames, labels, review = make_frames(tmp_path, 2), tmp_path / "labels", tmp_path / "review"
     run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
 
-    assert run_export_review(frames, labels, review, CFG) == 2
+    assert run_export_review(frames, labels, review, CFG) == (2, 0)
 
     doc = json.loads((review / "000012.json").read_text())
     assert doc["imagePath"] == "../frames/trip/000012.jpg"
     assert [s["label"] for s in doc["shapes"]] == ["face", "plate"]
     assert (review / "review_queue.csv").exists()
+
+
+def _edit_review_file(path: Path) -> dict:
+    doc = json.loads(path.read_text())
+    doc["shapes"].append({"label": "face", "points": [[1, 2], [30, 40]], "shape_type": "rectangle", "flags": {}})
+    doc["flags"]["night"] = True
+    path.write_text(json.dumps(doc))
+    return doc
+
+
+def test_run_export_review_never_overwrites_reviewed_files_by_default(tmp_path):
+    frames, labels, review = make_frames(tmp_path, 2), tmp_path / "labels", tmp_path / "review"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    run_export_review(frames, labels, review, CFG)
+    edited = _edit_review_file(review / "000012.json")
+    (review / "review_queue.csv").write_text("stale\n")
+
+    assert run_export_review(frames, labels, review, CFG) == (0, 2)
+
+    assert json.loads((review / "000012.json").read_text()) == edited
+    assert (review / "review_queue.csv").read_text() != "stale\n"  # derived: always rewritten
+
+    assert run_export_review(frames, labels, review, CFG, force=True) == (2, 0)
+
+    doc = json.loads((review / "000012.json").read_text())
+    assert [s["label"] for s in doc["shapes"]] == ["face", "plate"]
+    assert doc["flags"]["night"] is False
+
+
+def test_run_export_review_writes_only_new_frames_after_another_teach_batch(tmp_path):
+    frames, labels, review = make_frames(tmp_path, 3), tmp_path / "labels", tmp_path / "review"
+    run_teach(frames, labels, teachers(), CFG, limit=1, log=lambda _: None)
+    assert run_export_review(frames, labels, review, CFG) == (1, 0)
+    edited = _edit_review_file(review / "000000.json")
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+
+    assert run_export_review(frames, labels, review, CFG) == (2, 1)
+
+    assert json.loads((review / "000000.json").read_text()) == edited
+    assert sorted(p.name for p in review.glob("*.json")) == ["000000.json", "000012.json", "000024.json"]
