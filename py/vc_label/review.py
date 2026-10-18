@@ -142,9 +142,27 @@ def check_source(path: Path, doc: dict, ref: FrameRef) -> None:
     video, frame = source.get("video"), source.get("frame")
     if video != ref.video or type(frame) is not int or frame != ref.frame:  # type(): True == 1 is not frame 1
         raise ValueError(
-            f"{path}: {SOURCE_KEY} says {video}#{frame!r} but this frame is {ref.video}#{ref.frame}; "
-            f"this review dir was exported from another video"
+            f"{path}: {SOURCE_KEY} records {video}#{frame!r}, but the frames.csv row for this file is "
+            f"{ref.video}#{ref.frame}; the file does not belong to that row"
         )
+
+
+def count_without_source(review_dir: Path) -> tuple[int, int]:
+    """(`*.json` files with no `vc_source` key, all `*.json` files) in review_dir.
+
+    These are files exported before `vc_source` existed (export-review keeps existing files), which import-review
+    refuses. A file that does not parse, or has a wrong `vc_source`, is not counted: import-review reports it.
+    """
+    paths = sorted(review_dir.glob("*.json"))
+    without = 0
+    for path in paths:
+        try:
+            doc = load_labelme(path)
+        except (ValueError, OSError):
+            continue
+        if SOURCE_KEY not in doc:
+            without += 1
+    return without, len(paths)
 
 
 def check_image_path(path: Path, doc: dict, ref: FrameRef) -> None:

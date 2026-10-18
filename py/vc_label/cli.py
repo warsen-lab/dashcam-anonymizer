@@ -9,7 +9,7 @@ from pathlib import Path
 from vc_label.config import LabelingConfig
 from vc_label.contracts import read_frames_csv
 from vc_label.paths import RETINAFACE_WEIGHTS, YUNET_MODEL, offline_model_env, required_model_files
-from vc_label.review import ensure_outside, import_review
+from vc_label.review import count_without_source, ensure_outside, import_review
 
 # The repository's thresholds, read by default (the path follows this file, not the working directory).
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "labeling.json"
@@ -113,6 +113,14 @@ def _run(args: argparse.Namespace) -> str:
     from vc_label.pipeline import run_export_review
 
     written, kept = run_export_review(args.frames, args.labels, args.review, cfg, force=args.force)
+    without, total = count_without_source(args.review)
+    if without:
+        print(
+            f"export-review: warning: {without} of {total} LabelMe files in {args.review} have no vc_source "
+            f"(kept from an older export), so import-review will refuse them; "
+            f"see docs/labeling-guide.md, section 没有 vc_source 的旧复核目录",
+            file=sys.stderr,
+        )
     return f"export-review: {written} new LabelMe files, {kept} kept in {args.review}"
 
 

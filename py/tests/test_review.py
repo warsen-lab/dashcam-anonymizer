@@ -11,6 +11,7 @@ from vc_label.review import (
     REVIEWED_FLAG,
     SCENE_FLAGS,
     SOURCE_KEY,
+    count_without_source,
     ensure_outside,
     import_review,
     labelme_document,
@@ -536,7 +537,6 @@ _SAVED_WRONG_SOURCE = [
     pytest.param({"video": "other.mp4", "frame": 7}, r"000007\.json.*other\.mp4#7.*trip\.mp4#7", id="other-video-same-frame-number"),
     pytest.param({"video": "trip.mp4", "frame": 8}, r"000007\.json.*trip\.mp4#8.*trip\.mp4#7", id="same-video-other-frame"),
     pytest.param({"video": "trip.mp4", "frame": "7"}, r"000007\.json.*trip\.mp4#'7'.*trip\.mp4#7", id="frame-is-a-string"),
-    pytest.param({"video": "trip.mp4", "frame": True}, r"000007\.json.*trip\.mp4#True.*trip\.mp4#7", id="frame-is-a-boolean"),
     pytest.param({"video": "trip.mp4"}, r"000007\.json.*trip\.mp4#None.*trip\.mp4#7", id="no-frame"),
     pytest.param("trip.mp4#7", r"000007\.json.*vc_source", id="not-an-object"),
 ]
@@ -564,3 +564,43 @@ def test_import_review_with_one_file_missing_vc_source_writes_nothing(tmp_path):
         import_review(review, read_frames_csv(frames), gold)
 
     assert not gold.exists()
+
+
+def test_a_json_true_is_not_frame_one_in_vc_source(tmp_path):
+    # True == 1 in Python, so frame 1 is the only frame a boolean could pass for; every other frame number differs anyway.
+    frames, review, gold = _frames_dir(tmp_path, (1,)), tmp_path / "review", tmp_path / "gold"
+    _write_saved(review, _xanylabeling_save(frame=1, source={"video": "trip.mp4", "frame": True}), frame=1)
+
+    with pytest.raises(ValueError, match=r"000001\.json.*trip\.mp4#True.*trip\.mp4#1"):
+        import_review(review, read_frames_csv(frames), gold)
+    assert not gold.exists()
+
+    _write_saved(review, _xanylabeling_save(frame=1), frame=1)  # the integer 1 is fine
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+
+
+def test_vc_source_mismatch_states_both_sides_and_does_not_guess_the_cause(tmp_path):
+    frames, review = _frames_dir(tmp_path), tmp_path / "review"
+    _write_saved(review, _xanylabeling_save(source={"video": "other.mp4", "frame": 7}))
+
+    with pytest.raises(ValueError) as excinfo:
+        import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+    message = str(excinfo.value)
+    assert "000007.json" in message
+    assert "other.mp4#7" in message and "trip.mp4#7" in message  # recorded, then expected
+    assert "frames.csv row" in message and "does not belong" in message
+    assert "exported from another video" not in message  # a hand-edited or copied file fails the same way
+
+
+def test_count_without_source_counts_parsable_json_files_that_lack_the_key(tmp_path):
+    review = tmp_path / "review"
+    _write_saved(review, _xanylabeling_save(frame=1), frame=1)
+    _write_saved(review, _xanylabeling_save(frame=2, source=None), frame=2)
+    _write_saved(review, _xanylabeling_save(frame=3, source="garbage"), frame=3)  # present, if wrong: import-review reports it
+    _write_saved(review, _xanylabeling_save(frame=4, source=None), frame=4)
+    (review / "000005.json").write_text("{not json")  # unreadable: import-review reports it too
+    (review / "review_queue.csv").write_text("video,frame\n")
+
+    assert count_without_source(review) == (2, 5)
+    assert count_without_source(tmp_path / "nowhere") == (0, 0)

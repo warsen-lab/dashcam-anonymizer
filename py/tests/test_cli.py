@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 import vc_label.cli
@@ -126,6 +128,32 @@ def test_export_review_keeps_existing_files_unless_forced(tmp_path, capsys):
 
     assert main([*argv, "--force"]) == 0
     assert f"export-review: 1 new LabelMe files, 0 kept in {review}" in capsys.readouterr().out
+
+
+def test_export_review_warns_about_kept_files_without_vc_source(tmp_path, capsys):
+    frames, labels = _labelled(tmp_path)
+    review = tmp_path / "review"
+    argv = ["export-review", "--frames", str(frames), "--labels", str(labels), "--review", str(review)]
+
+    assert main(argv) == 0
+    captured = capsys.readouterr()
+    assert "1 new LabelMe files, 0 kept" in captured.out
+    assert captured.err == ""  # everything just written carries vc_source
+
+    path = review / "000000.json"
+    doc = json.loads(path.read_text())
+    del doc["vc_source"]  # a file exported before vc_source existed, kept because export-review never overwrites
+    path.write_text(json.dumps(doc))
+
+    assert main(argv) == 0  # exit code unchanged
+    captured = capsys.readouterr()
+    assert "0 new LabelMe files, 1 kept" in captured.out
+    [warning] = captured.err.splitlines()
+    assert "1 of 1" in warning and "vc_source" in warning and str(review) in warning
+    assert "docs/labeling-guide.md" in warning
+
+    assert main([*argv, "--force"]) == 0  # --force regenerates it with vc_source
+    assert capsys.readouterr().err == ""
 
 
 def test_import_review_needs_reviewed_frames_unless_allowed(tmp_path, capsys):

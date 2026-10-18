@@ -171,6 +171,27 @@ def test_run_export_review_never_overwrites_reviewed_files_by_default(tmp_path):
     assert doc["flags"]["night"] is False
 
 
+def test_deleting_only_the_unreviewed_old_files_then_exporting_keeps_the_reviewed_one(tmp_path):
+    """The recovery recipe in docs/labeling-guide.md for a review dir exported before vc_source existed."""
+    frames, labels, review = make_frames(tmp_path, 2), tmp_path / "labels", tmp_path / "review"
+    run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    run_export_review(frames, labels, review, CFG)
+    for name in ("000000.json", "000012.json"):  # both look like an older export: no vc_source
+        doc = json.loads((review / name).read_text())
+        del doc["vc_source"]
+        (review / name).write_text(json.dumps(doc))
+    doc = json.loads((review / "000012.json").read_text())
+    doc["flags"]["reviewed"] = True  # the human finished this one
+    (review / "000012.json").write_text(json.dumps(doc))
+    reviewed_bytes = (review / "000012.json").read_bytes()
+
+    (review / "000000.json").unlink()  # the unreviewed one
+    assert run_export_review(frames, labels, review, CFG) == (1, 1)  # no --force
+
+    assert (review / "000012.json").read_bytes() == reviewed_bytes  # kept as it was, to get vc_source by hand
+    assert json.loads((review / "000000.json").read_text())["vc_source"] == {"video": "trip.mp4", "frame": 0}
+
+
 def test_run_export_review_writes_only_new_frames_after_another_teach_batch(tmp_path):
     frames, labels, review = make_frames(tmp_path, 3), tmp_path / "labels", tmp_path / "review"
     run_teach(frames, labels, teachers(), CFG, limit=1, log=lambda _: None)
