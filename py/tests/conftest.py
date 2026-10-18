@@ -18,3 +18,24 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if "models" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def sample_frame():
+    import cv2
+
+    return cv2.imread(str(SAMPLE_FRAMES / "006005.jpg"))
+
+
+@pytest.fixture(scope="session")
+def device():
+    import torch
+
+    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
+
+def best_match(boxes, target):
+    """The box overlapping `target` most, or None."""
+    from vc_label.boxes import iou
+
+    return max(boxes, key=lambda b: iou(b, target), default=None)
