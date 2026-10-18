@@ -13,6 +13,7 @@ add_executable(vc_tests
   letterbox_test.cpp
   luma_thumb_test.cpp
   model_info_test.cpp
+  mosaic_test.cpp
   onnx_yolo_detector_test.cpp
   video_reader_test.cpp
   yolo_decode_test.cpp

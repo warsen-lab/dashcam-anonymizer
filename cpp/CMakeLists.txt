@@ -26,6 +26,7 @@ add_library(vc_core STATIC
   src/detect/letterbox.cpp
   src/io/jpeg_writer.cpp
   src/io/video_reader.cpp
+  src/mask/mosaic.cpp
   src/sampler/frame_sampler.cpp
   src/sampler/luma_thumb.cpp
   src/track/box_timeline.cpp
