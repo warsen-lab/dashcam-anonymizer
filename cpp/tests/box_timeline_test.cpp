@@ -204,7 +204,7 @@ TEST(BoxTimeline, FinishExtendsForwardWithVelocity) {
   ASSERT_EQ(masks[0].size(), 1u);
   ASSERT_EQ(masks[3].size(), 1u);
   expectBox(masks[0][0], 112, 100, 132, 120, MaskOrigin::Detected);
-  expectBox(masks[3][0], 112, 100, 135, 120, MaskOrigin::Extended);  // frame 15, swept at 1 px per frame
+  expectBox(masks[3][0], 109, 100, 135, 120, MaskOrigin::Extended);  // frame 15, swept 3 px either way
 }
 
 TEST(BoxTimeline, RejectsCallsOutOfOrder) {
@@ -222,8 +222,8 @@ TEST(BoxTimeline, BridgesOneMissedKeyframeWithAGhostTrack) {
   timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
   timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   const auto gap = timeline.advance(frames(12, 24), key(24, {}));
-  ASSERT_EQ(gap[6].size(), 1u);  // frame 18: swept from the detection at 112
-  expectBox(gap[6][0], 112, 100, 138, 120, MaskOrigin::Extended);
+  ASSERT_EQ(gap[6].size(), 1u);  // frame 18: swept 6 px either way of the detection at 112
+  expectBox(gap[6][0], 106, 100, 138, 120, MaskOrigin::Extended);
 
   const auto bridged = timeline.advance(frames(24, 36), key(36, {face(136, 100, 156, 120)}));
   // The ghost is matched, not duplicated: its interpolation, the next box held in place and the
@@ -262,8 +262,8 @@ TEST(BoxTimeline, DropsAGhostAfterTwoMissedKeyframes) {
   timeline.advance(frames(12, 24), key(24, {}));
   const auto ghost = timeline.advance(frames(24, 36), key(36, {}));
   for (const auto& m : ghost) EXPECT_EQ(m.size(), 1u);  // the ghost still covers its last interval
-  ASSERT_EQ(ghost[6].size(), 1u);  // swept from the last detection (112, index 12) to 130 at frame 30
-  expectBox(ghost[6][0], 112, 100, 150, 120, MaskOrigin::Extended);
+  ASSERT_EQ(ghost[6].size(), 1u);  // 18 frames either way of the last detection (112, index 12)
+  expectBox(ghost[6][0], 94, 100, 150, 120, MaskOrigin::Extended);
 
   const auto after = timeline.advance(frames(36, 48), key(48, {}));
   ASSERT_EQ(after.size(), 12u);
@@ -277,10 +277,10 @@ TEST(BoxTimeline, FinishExtendsAGhostTrack) {
   timeline.advance(frames(12, 24), key(24, {}));
   const auto masks = timeline.finish(frames(24, 30));
   ASSERT_EQ(masks.size(), 6u);
-  ASSERT_EQ(masks[0].size(), 1u);  // the ghost at 124, swept from the last detection at 112
-  expectBox(masks[0][0], 112, 100, 144, 120, MaskOrigin::Extended);  // not a detection
+  ASSERT_EQ(masks[0].size(), 1u);  // the ghost at 124: 12 frames either way of the detection at 112
+  expectBox(masks[0][0], 100, 100, 144, 120, MaskOrigin::Extended);  // not a detection
   ASSERT_EQ(masks[3].size(), 1u);
-  expectBox(masks[3][0], 112, 100, 147, 120, MaskOrigin::Extended);
+  expectBox(masks[3][0], 97, 100, 147, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, ExpandsForMotionInAnyDirection) {
@@ -297,15 +297,15 @@ TEST(BoxTimeline, ExtrapolatesADisappearingBoxAlongItsVelocity) {
   plain.advance({}, key(0, {face(100, 100, 120, 120)}));
   plain.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   const auto masks = plain.advance(frames(12, 24), key(24, {}));
-  ASSERT_EQ(masks[6].size(), 1u);  // frame 18, 1 px per frame, swept from 112
-  expectBox(masks[6][0], 112, 100, 138, 120, MaskOrigin::Extended);
+  ASSERT_EQ(masks[6].size(), 1u);  // frame 18, 1 px per frame, swept 6 px either way of 112
+  expectBox(masks[6][0], 106, 100, 138, 120, MaskOrigin::Extended);
 
   BoxTimeline moving(TimelineConfig{1.0, 0.0, 0.5, 0.0}, 1000, 1000);
   moving.advance({}, key(0, {face(100, 100, 120, 120)}));
   moving.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   const auto grown = moving.advance(frames(12, 24), key(24, {}));
-  ASSERT_EQ(grown[6].size(), 1u);  // swept 112..138, |v| * interval = 12 px, half of it per side
-  expectBox(grown[6][0], 106, 100, 144, 120, MaskOrigin::Extended);
+  ASSERT_EQ(grown[6].size(), 1u);  // swept 106..138, |v| * interval = 12 px, half of it per side
+  expectBox(grown[6][0], 100, 100, 144, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, MatchesGreedilyByCost) {
@@ -363,12 +363,12 @@ TEST(BoxTimeline, FinishCapsExtrapolationAtOneInterval) {
   timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   const auto masks = timeline.finish(frames(12, 42));
   ASSERT_EQ(masks.size(), 30u);
-  ASSERT_EQ(masks[11].size(), 1u);  // frame 23: still inside the first interval (swept from 112)
-  expectBox(masks[11][0], 112, 100, 143, 120, MaskOrigin::Extended);
+  ASSERT_EQ(masks[11].size(), 1u);  // frame 23: still inside the first interval (11 px either way)
+  expectBox(masks[11][0], 101, 100, 143, 120, MaskOrigin::Extended);
   ASSERT_EQ(masks[25].size(), 1u);  // frame 37: 25 frames past the keyframe, capped at 12
-  expectBox(masks[25][0], 112, 100, 144, 120, MaskOrigin::Extended);
+  expectBox(masks[25][0], 100, 100, 144, 120, MaskOrigin::Extended);
   ASSERT_EQ(masks[29].size(), 1u);
-  expectBox(masks[29][0], 112, 100, 144, 120, MaskOrigin::Extended);
+  expectBox(masks[29][0], 100, 100, 144, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, MatchesATargetThatStops) {
@@ -422,8 +422,8 @@ TEST(BoxTimeline, ExtensionMarginUsesAbsoluteVelocity) {
   timeline.advance({}, key(0, {face(112, 112, 132, 132)}));
   timeline.advance(frames(0, 12), key(12, {face(100, 100, 120, 120)}));  // v = (-1, -1)
   const auto gone = timeline.advance(frames(12, 24), key(24, {}));
-  ASSERT_EQ(gone[6].size(), 1u);  // frame 18: swept 94..120 (shifted -6), margin 0.5 * 12 per side
-  expectBox(gone[6][0], 88, 88, 126, 126, MaskOrigin::Extended);
+  ASSERT_EQ(gone[6].size(), 1u);  // frame 18: swept 94..126 (6 px either way), margin 0.5 * 12 per side
+  expectBox(gone[6][0], 88, 88, 132, 132, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, FinishMarginUsesAbsoluteVelocityAndCap) {
@@ -433,8 +433,8 @@ TEST(BoxTimeline, FinishMarginUsesAbsoluteVelocityAndCap) {
   const auto masks = timeline.finish(frames(12, 40));
   ASSERT_EQ(masks[0].size(), 1u);
   expectBox(masks[0][0], 94, 94, 126, 126, MaskOrigin::Detected);  // margin 6 at the keyframe frame
-  ASSERT_EQ(masks[20].size(), 1u);  // frame 32: swept 88..120 (shift capped at -12), margin 6
-  expectBox(masks[20][0], 82, 82, 126, 126, MaskOrigin::Extended);
+  ASSERT_EQ(masks[20].size(), 1u);  // frame 32: swept 88..132 (shift capped at 12 either way), margin 6
+  expectBox(masks[20][0], 82, 82, 138, 138, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, OneTrackMatchesAtMostOneBox) {
@@ -457,8 +457,9 @@ TEST(BoxTimeline, MatchedGhostVelocityIsRecomputed) {
   ASSERT_EQ(masks[3].size(), 1u);
   // The velocity runs from the last detection (centre (122, 110) at index 12) to the new one (centre
   // (150, 118) at index 36): (28, 8) / 24 = (7/6, 1/3) px per frame, so frame 39 is 3.5 px right and
-  // 1 px down of the box (swept from it). (Measured from the ghost it would be (4/3, 2/3): 4 px and 2 px.)
-  expectBox(masks[3][0], 140, 108, 163.5f, 129, MaskOrigin::Extended);
+  // 1 px down of the box, and as far the other way (swept). (Measured from the ghost it would be
+  // (4/3, 2/3): 4 px and 2 px.)
+  expectBox(masks[3][0], 136.5f, 107, 163.5f, 129, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, UnmatchedGhostIsExtendedAtItsKeyFrame) {
@@ -467,8 +468,8 @@ TEST(BoxTimeline, UnmatchedGhostIsExtendedAtItsKeyFrame) {
   timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
   timeline.advance(frames(12, 24), key(24, {}));
   const auto ghost = timeline.advance(frames(24, 36), key(36, {}));
-  ASSERT_EQ(ghost[0].size(), 1u);  // the ghost at 124, swept from the last detection at 112
-  expectBox(ghost[0][0], 112, 100, 144, 120, MaskOrigin::Extended);
+  ASSERT_EQ(ghost[0].size(), 1u);  // the ghost at 124: 12 frames either way of the detection at 112
+  expectBox(ghost[0][0], 100, 100, 144, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, MatchedGhostVelocityIsMeasuredFromItsLastDetection) {
@@ -483,8 +484,8 @@ TEST(BoxTimeline, MatchedGhostVelocityIsMeasuredFromItsLastDetection) {
   ASSERT_EQ(masks.size(), 7u);
   ASSERT_EQ(masks[0].size(), 1u);
   expectBox(masks[0][0], 118, 100, 138, 120, MaskOrigin::Detected);
-  ASSERT_EQ(masks[6].size(), 1u);  // frame 30: swept to 118 + 0.75 * 6
-  expectBox(masks[6][0], 118, 100, 142.5f, 120, MaskOrigin::Extended);
+  ASSERT_EQ(masks[6].size(), 1u);  // frame 30: swept 0.75 * 6 px either way of 118
+  expectBox(masks[6][0], 113.5f, 100, 142.5f, 120, MaskOrigin::Extended);
 }
 
 TEST(BoxTimeline, AGhostWithoutVelocityStaysInPlace) {
@@ -696,8 +697,8 @@ TEST(BoxTimeline, ALooseMatchSeedsTheVelocity) {
   ASSERT_EQ(masks[6].size(), 1u);  // frame 18
   expectBox(masks[6][0], 190, 100, 210, 120, MaskOrigin::Interpolated);
   const auto tail = timeline.finish(frames(24, 30));
-  ASSERT_EQ(tail[3].size(), 1u);  // frame 27: 5 px per frame from the keyframe, swept from 220
-  expectBox(tail[3][0], 220, 100, 255, 120, MaskOrigin::Extended);
+  ASSERT_EQ(tail[3].size(), 1u);  // frame 27: 5 px per frame from the keyframe, 15 px either way of 220
+  expectBox(tail[3][0], 205, 100, 255, 120, MaskOrigin::Extended);
 }
 
 // The second pass gates each axis by the larger box size along it and pairs only similar sizes.
@@ -741,8 +742,9 @@ TEST(BoxTimeline, ALooseMatchKeepsTheExtrapolationOfATrackWithAVelocity) {
   EXPECT_EQ(countOrigin(masks[6], MaskOrigin::Interpolated), 1u);
 }
 
-// An unmatched track with a velocity masks the region swept between its keyframe box and where the
-// velocity takes it: a target that stops (or turns back) right after its last detection stays covered.
+// An unmatched track with a velocity masks the region it may have swept since its last detection:
+// as far along its velocity as it would have got, and as far back (it may have turned round), so a
+// target that stops or turns round right after its last detection stays covered.
 TEST(BoxTimeline, AnUnmatchedTrackMasksTheRegionItSweeps) {
   BoxTimeline timeline(exact(), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
@@ -750,8 +752,8 @@ TEST(BoxTimeline, AnUnmatchedTrackMasksTheRegionItSweeps) {
   const auto missed = timeline.advance(frames(12, 24), key(24, {}));     // stopped at 112, then missed
   for (size_t k = 0; k < missed.size(); ++k) {
     ASSERT_EQ(missed[k].size(), 1u);
-    const float reach = 132 + static_cast<float>(k);
-    expectBox(missed[k][0], 112, 100, reach, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Extended);
+    const float reach = static_cast<float>(k);
+    expectBox(missed[k][0], 112 - reach, 100, 132 + reach, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Extended);
   }
 
   // The same at the end of the video.
@@ -759,8 +761,17 @@ TEST(BoxTimeline, AnUnmatchedTrackMasksTheRegionItSweeps) {
   ending.advance({}, key(0, {face(112, 112, 132, 132)}));
   ending.advance(frames(0, 12), key(12, {face(100, 100, 120, 120)}));  // v = (-1, -1)
   const auto tail = ending.finish(frames(12, 18));
-  ASSERT_EQ(tail[5].size(), 1u);  // frame 17
-  expectBox(tail[5][0], 95, 95, 120, 120, MaskOrigin::Extended);
+  ASSERT_EQ(tail[5].size(), 1u);  // frame 17: 5 px either way
+  expectBox(tail[5][0], 95, 95, 125, 125, MaskOrigin::Extended);
+
+  // A ghost reaches back as far from the last detection (112 at index 12) as it reaches forward.
+  BoxTimeline twice(exact(), 1000, 1000);
+  twice.advance({}, key(0, {face(100, 100, 120, 120)}));
+  twice.advance(frames(0, 12), key(12, {face(112, 100, 132, 120)}));
+  twice.advance(frames(12, 24), key(24, {}));
+  const auto ghost = twice.advance(frames(24, 36), key(36, {}));
+  ASSERT_EQ(ghost[6].size(), 1u);  // frame 30: 18 frames after the detection
+  expectBox(ghost[6][0], 94, 100, 150, 120, MaskOrigin::Extended);
 
   // With the default margins a target that stops after its last detection is covered on every frame.
   BoxTimeline defaults(TimelineConfig{}, 1920, 1080);
@@ -862,6 +873,39 @@ TEST(BoxTimeline, AMatchedGhostIsAlsoInterpolatedFromItsLastDetection) {
     const auto found = probe.advance(frames(2 * kStep, 3 * kStep), key(3 * kStep, {plate(3 * kStep)}));
     for (size_t k = 0; k < found.size(); ++k) {
       EXPECT_GE(coverage(found[k], plate(2 * kStep + static_cast<int64_t>(k))), 0.8) << "frame " << 2 * kStep + k;
+    }
+  }
+}
+
+// The reviewer's probe: a 40 x 14 plate at v px per frame that stops or turns round right after
+// keyframe 12, is missed at 24 and found again at 36 (or missed at 36 too). The masks of the missed
+// interval are made before the re-detection exists, so only the swept region can cover it.
+TEST(BoxTimeline, CoversATargetThatStopsOrTurnsRoundWhileMissed) {
+  struct Case {
+    bool turns;
+    bool missedTwice;
+  };
+  for (const Case c : {Case{false, false}, Case{true, false}, Case{true, true}}) {
+    for (const double v : {1.0, 2.0, 3.0, 4.0, 6.0}) {
+      SCOPED_TRACE(std::string(c.turns ? "turns round" : "stops") + (c.missedTwice ? ", missed twice" : "") +
+                   ", v = " + std::to_string(v) + " px per frame");
+      const auto x = [&](int64_t f) {
+        if (f <= kStep) return 600 + v * static_cast<double>(f);
+        return 600 + v * static_cast<double>(c.turns ? 2 * kStep - f : kStep);
+      };
+      const auto plate = [&](int64_t f) {
+        return Box{kPlate, static_cast<float>(x(f)), 500, static_cast<float>(x(f) + 40), 514, 0.9f};
+      };
+      BoxTimeline timeline(TimelineConfig{}, 1920, 1080);
+      timeline.advance({}, key(0, {plate(0)}));
+      std::vector<std::vector<MaskBox>> masks = timeline.advance(frames(0, kStep), key(kStep, {plate(kStep)}));
+      for (auto& m : timeline.advance(frames(kStep, 2 * kStep), key(2 * kStep, {}))) masks.push_back(std::move(m));
+      const std::vector<Box> last = c.missedTwice ? std::vector<Box>{} : std::vector<Box>{plate(3 * kStep)};
+      for (auto& m : timeline.advance(frames(2 * kStep, 3 * kStep), key(3 * kStep, last))) masks.push_back(std::move(m));
+      ASSERT_EQ(masks.size(), static_cast<size_t>(3 * kStep));
+      for (size_t f = 0; f < masks.size(); ++f) {
+        EXPECT_GE(coverage(masks[f], plate(static_cast<int64_t>(f))), 0.8) << "frame " << f;
+      }
     }
   }
 }

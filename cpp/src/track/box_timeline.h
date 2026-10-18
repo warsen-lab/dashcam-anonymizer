@@ -54,9 +54,9 @@ struct TimelineConfig {
 // track and the box would have had unmatched (over the whole interval), so a wrong pairing can add
 // masks but never remove one. Any match gives the next interval a velocity.
 //
-// An unmatched track with a velocity masks the region it sweeps: on each frame the bounding box of
-// where the target was last detected and where the velocity takes it, so a target that stopped or
-// turned back stays covered. A box missed at one keyframe is kept for one more interval as a ghost
+// An unmatched track with a velocity masks the region it may have swept: on each frame the bounding
+// box of where the target was last detected, where the velocity takes it, and as far back from the
+// detection (it may have turned round), so a target that stopped or turned round stays covered. A box missed at one keyframe is kept for one more interval as a ghost
 // track (moved along its velocity, masked as `extended`, swept from its last real detection) and can
 // still be matched at the next keyframe; a second miss drops it. A ghost that is matched also gets
 // the new box held in place over the whole interval (`extended`, next to the interpolated mask) and a
@@ -110,8 +110,9 @@ class BoxTimeline {
   void add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY, MaskOrigin origin) const {
     add(out, box, box, motionX, motionY, origin);
   }
-  // The swept region of an unmatched track `since` frames after the keyframe: from its last real
-  // detection to the box moved along its velocity; motion margins for `span` frames of velocity.
+  // The swept region of an unmatched track `since` frames after the keyframe: its last real
+  // detection, the box moved along its velocity, and the detection moved as far the other way;
+  // motion margins for `span` frames of velocity.
   void sweep(std::vector<MaskBox>& out, const Track& track, double since, double span, MaskOrigin origin) const;
 
   TimelineConfig config_;

@@ -231,8 +231,13 @@ void BoxTimeline::add(std::vector<MaskBox>& out, const Box& region, const Box& s
 void BoxTimeline::sweep(std::vector<MaskBox>& out, const Track& track, double since, double span,
                         MaskOrigin origin) const {
   const Velocity v = track.velocity.value_or(Velocity{});
-  const Box moved = shifted(track.box, v.x * since, v.y * since);
-  add(out, unionOf(track.anchor, moved), track.box, std::abs(v.x) * span, std::abs(v.y) * span, origin);
+  const Box ahead = shifted(track.box, v.x * since, v.y * since);
+  // A target that turned round right after its last detection: as far back from it as `ahead` is
+  // forward (for a ghost, the frames since the detection include the missed interval).
+  const double sinceDetection = track.anchorSteps + since;
+  const Box behind = shifted(track.anchor, -v.x * sinceDetection, -v.y * sinceDetection);
+  add(out, unionOf(unionOf(track.anchor, ahead), behind), track.box, std::abs(v.x) * span, std::abs(v.y) * span,
+      origin);
 }
 
 std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTime>& frames,
