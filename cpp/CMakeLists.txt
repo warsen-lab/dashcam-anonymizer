@@ -50,6 +50,15 @@ add_library(vc_extract_lib STATIC
 target_include_directories(vc_extract_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
 target_link_libraries(vc_extract_lib PUBLIC vc_core)
 
+find_package(Threads REQUIRED)
+
+add_library(vc_redact_lib STATIC
+  apps/vc_redact/records.cpp
+  apps/vc_redact/redact_config.cpp
+)
+target_include_directories(vc_redact_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
+target_link_libraries(vc_redact_lib PUBLIC vc_detect_lib Threads::Threads)
+
 add_executable(vc_extract apps/vc_extract/main.cpp)
 target_link_libraries(vc_extract PRIVATE vc_extract_lib)
 
