@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,22 +19,26 @@ GREEN = (0, 200, 0)
 
 
 def extract_frames(video: Path, frames: list[int], out_dir: Path) -> dict[int, Path]:
-    """Decodes 0-based frame numbers of `video` into out_dir/<frame:06d>.jpg."""
+    """Decodes 0-based frame numbers of `video` into out_dir/<frame:06d>.jpg.
+
+    ffmpeg runs inside out_dir with a relative output pattern: a directory name holding a `%` would otherwise be read
+    as part of the pattern. It never reads stdin, and stops once a batch is complete instead of decoding to the end.
+    """
     wanted = sorted(set(frames))
     if not wanted:
         return {}
     out_dir.mkdir(parents=True, exist_ok=True)
+    source = os.path.abspath(video)  # the working directory changes below
     got: dict[int, Path] = {}
     for start in range(0, len(wanted), BATCH):
         batch = wanted[start : start + BATCH]
         expr = "+".join(f"eq(n\\,{n})" for n in batch)
-        pattern = out_dir / "batch_%05d.jpg"
         for leftover in out_dir.glob("batch_*.jpg"):  # from an interrupted run: must not be mistaken for output
             leftover.unlink()
         subprocess.run(
-            [FFMPEG, "-v", "error", "-y", "-i", str(video), "-vf", f"select={expr}", "-fps_mode", "passthrough",
-             "-q:v", "3", str(pattern)],
-            check=True,
+            [FFMPEG, "-nostdin", "-v", "error", "-y", "-i", source, "-vf", f"select={expr}", "-fps_mode", "passthrough",
+             "-frames:v", str(len(batch)), "-q:v", "3", "batch_%05d.jpg"],
+            check=True, cwd=out_dir, stdin=subprocess.DEVNULL,
         )
         for i, frame in enumerate(batch, 1):
             produced = out_dir / f"batch_{i:05d}.jpg"
@@ -45,13 +50,16 @@ def extract_frames(video: Path, frames: list[int], out_dir: Path) -> dict[int, P
     return got
 
 
-def _crop(image: np.ndarray, box: Box) -> tuple[np.ndarray, tuple[int, int]]:
+def _crop(image: np.ndarray, box: Box, path: Path) -> tuple[np.ndarray, tuple[int, int]]:
     h, w = image.shape[:2]
     side = max(96.0, 3 * max(box.width, box.height))
     cx, cy = box.center
     x1, y1 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
     x2, y2 = int(min(w, cx + side / 2)), int(min(h, cy + side / 2))
-    return image[y1:y2, x1:x2].copy(), (x1, y1)
+    crop = image[y1:y2, x1:x2].copy()
+    if crop.size == 0:
+        raise ValueError(f"{path}: the box ({box.x1:g}, {box.y1:g})-({box.x2:g}, {box.y2:g}) is outside the {w}x{h} image")
+    return crop, (x1, y1)
 
 
 def _to_height(image: np.ndarray, height: int) -> np.ndarray:
@@ -59,30 +67,43 @@ def _to_height(image: np.ndarray, height: int) -> np.ndarray:
     return cv2.resize(image, (max(1, round(image.shape[1] * scale)), height), interpolation=cv2.INTER_AREA)
 
 
+def _read(path: Path) -> np.ndarray:
+    image = cv2.imread(str(path))
+    if image is None:
+        raise ValueError(f"cannot read {path}")
+    return image
+
+
+def _write(path: Path, image: np.ndarray, params: list[int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), image, params):  # imwrite reports a full disk or an unwritable path by returning False
+        raise ValueError(f"cannot write {path}")
+
+
 def miss_tile(original: Path, redacted: Path | None, box: Box, out: Path, height: int = 160) -> Path:
-    src = cv2.imread(str(original))
-    if src is None:
-        raise ValueError(f"cannot read {original}")
-    crop, (ox, oy) = _crop(src, box)
+    """Crop around `box` from the original (box drawn in green) and, when given, from the redacted frame beside it.
+
+    The two frames must have the same size and the box must lie at least partly inside them; otherwise ValueError.
+    """
+    src = _read(original)
+    red = None if redacted is None else _read(redacted)
+    if red is not None and red.shape[:2] != src.shape[:2]:
+        raise ValueError(
+            f"{original} is {src.shape[1]}x{src.shape[0]} but {redacted} is {red.shape[1]}x{red.shape[0]}; they are not the same frame size"
+        )
+    crop, (ox, oy) = _crop(src, box, original)
     cv2.rectangle(crop, (int(box.x1 - ox), int(box.y1 - oy)), (int(box.x2 - ox), int(box.y2 - oy)), GREEN, 1)
     parts = [_to_height(crop, height)]
-    if redacted is not None:
-        red = cv2.imread(str(redacted))
-        if red is None:
-            raise ValueError(f"cannot read {redacted}")
-        parts.append(_to_height(_crop(red, box)[0], height))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out), cv2.hconcat(parts), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if red is not None:
+        parts.append(_to_height(_crop(red, box, redacted)[0], height))
+    _write(out, cv2.hconcat(parts), [cv2.IMWRITE_JPEG_QUALITY, 90])
     return out
 
 
 def thumbnail(image: Path, out: Path, width: int = 640) -> Path:
-    src = cv2.imread(str(image))
-    if src is None:
-        raise ValueError(f"cannot read {image}")
+    src = _read(image)
     scale = width / src.shape[1]
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out), cv2.resize(src, (width, round(src.shape[0] * scale)), interpolation=cv2.INTER_AREA))
+    _write(out, cv2.resize(src, (width, round(src.shape[0] * scale)), interpolation=cv2.INTER_AREA), [])
     return out
 
 

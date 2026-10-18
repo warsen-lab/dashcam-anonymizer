@@ -211,6 +211,7 @@ PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <�
 - 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、时间覆盖率、完整性、误打面积、速度（标题注明段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。`--out` 和 `data/redacted` 都不能放在抽帧根目录 `data/frames/` 之下的任何位置（包括没有用 `--stems` 列出的段，那些目录会被 `vc_extract --overwrite` 整个删掉）；`--out` 也不能等于或包含 `data/frames`、`data/labels`、`data/videos`、`data/redacted`、模型目录、两个可执行文件和配置文件，也不能落在 `data/redacted/dense` 或 `data/redacted/fps<频率>` 里（`vc_redact` 写那里）。
 - `--out` 已存在且非空时直接拒绝（退出码 2）；加 `--overwrite` 才会在检查完所有输入之后先清空它（只清里面的内容，输入有问题时旧报告原样保留）。一次中途失败的运行会留下文件，重跑要加 `--overwrite`。
 - 退出码：0 选出了频率；1 没有频率通过；2 输入或运行错误（stderr 打印 `vc_eval: <原因>`）。
+- 抽查页的取帧：ffmpeg 不读 stdin、在输出目录里用相对路径写（目录名里有 `%` 也行）、每批取够就停；原帧和打码帧尺寸不一致、框完全在图外、图片写不出来都直接报错（`vc_eval: ...`），不会生成错位的对比图。
 
 ### 单项子命令
 
