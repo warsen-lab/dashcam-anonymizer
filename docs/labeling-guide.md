@@ -64,21 +64,26 @@ python3 -m venv ~/.cache/video-compliance/x-anylabeling-venv
 
 **`export-review --force` 对整个目录生效**：连勾过 `reviewed` 的文件也一起覆盖，复核全丢。按下面的顺序处理，不要一上来就 `--force`。
 
-先看有没有勾过 `reviewed` 的文件（没有输出 = 一个都没勾）：
+先列出要关心的文件：勾了 `reviewed` 的，或者缺 `vc_source` 的（其余文件不用管）。判断用 JSON 解析，不看文件怎么排版：
 
 ```bash
-grep -l '"reviewed": true' data/review/<stem>/*.json
+.venv/bin/python - data/review/<stem> <<'EOF'
+import json, pathlib, sys
+
+for p in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
+    doc = json.loads(p.read_text())
+    reviewed = (doc.get("flags") or {}).get("reviewed") is True
+    has_source = "vc_source" in doc
+    if reviewed or not has_source:
+        print("reviewed" if reviewed else "unreviewed", "has-vc_source" if has_source else "no-vc_source", p)
+EOF
 ```
 
-- **(a) 一个都没勾过**：整个目录里没有人工复核可丢，用 `export-review --force` 全部重新生成。
-- **(b) 已经有勾过的**：不要 `--force`。列出缺 `vc_source` 的文件和它们是否勾了 `reviewed`：
+每行是 `<reviewed|unreviewed> <has-vc_source|no-vc_source> <文件>`。
 
-  ```bash
-  .venv/bin/python -c "import json,pathlib,sys; [print('reviewed' if json.loads(p.read_text()).get('flags',{}).get('reviewed') is True else 'unreviewed', p) for p in sorted(pathlib.Path(sys.argv[1]).glob('*.json')) if 'vc_source' not in json.loads(p.read_text())]" data/review/<stem>
-  ```
-
-  把列出的 `unreviewed` 文件删掉（这些文件里改了一半的框也会丢），然后**不带 `--force`** 重跑 `export-review`：它只写缺的文件，已有的（包括勾过 `reviewed` 的）原样保留。
-- **(c) 列出的 `reviewed` 文件**不能删，在 JSON 顶层手工补上 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（视频文件名取自 `frames.csv` 的 `video` 列，帧号就是文件名里的数字，不带前导零）。
+- **(a) 没有任何以 `reviewed` 开头的行**（一个都没勾过）：没有已完成的复核可丢，可以用 `export-review --force` 全部重新生成。注意 `--force` 也会丢掉未勾 `reviewed` 的文件里改了一半的框。
+- **(b) 有以 `reviewed` 开头的行**：不要 `--force`。把 `unreviewed no-vc_source` 的文件删掉（这些文件里改了一半的框也会丢），然后**不带 `--force`** 重跑 `export-review`：它只写缺的文件，已有的（包括勾过 `reviewed` 的）原样保留。`unreviewed has-vc_source` 的文件不会被列出，也不用动。
+- **(c) `reviewed no-vc_source` 的文件**不能删，在 JSON 顶层手工补上 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（视频文件名取自 `frames.csv` 的 `video` 列，帧号就是文件名里的数字，不带前导零）。`reviewed has-vc_source` 的文件已经齐了。
 
 ## 规则标记
 
