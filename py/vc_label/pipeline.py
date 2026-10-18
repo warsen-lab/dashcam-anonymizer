@@ -58,6 +58,57 @@ def read_processed(labels_dir: Path) -> set[int]:
     return {int(line) for line in path.read_text().split()} if path.exists() else set()
 
 
+@dataclass(frozen=True)
+class _JsonlLine:
+    raw: bytes
+    record: dict
+
+
+def _read_records(path: Path) -> tuple[list[_JsonlLine], bool]:
+    """(parsed non-blank lines of a detections JSONL file, whether a torn last line was dropped).
+
+    An undecodable last line is an append cut short by a crash and is dropped. Any other bad line,
+    or a record without `video` and `frame`, raises ValueError naming the file and line number.
+    """
+    numbered = [(n, line) for n, line in enumerate(path.read_bytes().split(b"\n"), start=1) if line.strip()]
+    lines: list[_JsonlLine] = []
+    for i, (number, raw) in enumerate(numbered):
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            if i == len(numbered) - 1:
+                return lines, True
+            raise ValueError(f"{path}:{number}: not a JSON line ({e})") from e
+        if not isinstance(record, dict) or "video" not in record or "frame" not in record:
+            raise ValueError(f"{path}:{number}: not a detection record (needs video and frame)")
+        lines.append(_JsonlLine(raw, record))
+    return lines, False
+
+
+def _preview(items: list, limit: int = 8) -> str:
+    shown = ", ".join(str(i) for i in items[:limit])
+    return f"[{shown}{f', ... (+{len(items) - limit} more)' if len(items) > limit else ''}]"
+
+
+def check_labels_match_frames(frames_dir: Path, labels_dir: Path, refs: list[FrameRef]) -> None:
+    """A labels dir is keyed on frame numbers only; refuse one that was taught on other frames."""
+    videos = {r.video for r in refs}
+    frame_numbers = {r.frame for r in refs}
+    foreign_videos: set[str] = set()
+    for name in (RAW, AUX):
+        path = labels_dir / name
+        if path.exists():
+            foreign_videos |= {str(line.record["video"]) for line in _read_records(path)[0]} - videos
+    stray_frames = sorted(read_processed(labels_dir) - frame_numbers)
+    problems = []
+    if foreign_videos:
+        problems.append(f"{RAW}/{AUX} hold videos {_preview(sorted(foreign_videos))} which frames.csv lacks (it has {_preview(sorted(videos))})")
+    if stray_frames:
+        problems.append(f"{PROCESSED} lists frames {_preview(stray_frames)} which frames.csv lacks")
+    if problems:
+        raise ValueError(f"labels dir {labels_dir} does not match {frames_dir}: " + "; ".join(problems))
+
+
 def _drop_unfinished(labels_dir: Path, done: set[int]) -> None:
     """Drops detections of frames a crashed run never marked processed, and a torn last line
     (an append cut short by a crash). Rewrites via a temp file and os.replace, and only when needed."""
@@ -65,18 +116,9 @@ def _drop_unfinished(labels_dir: Path, done: set[int]) -> None:
         path = labels_dir / name
         if not path.exists():
             continue
-        lines = [line for line in path.read_bytes().split(b"\n") if line.strip()]
-        kept: list[bytes] = []
-        for i, line in enumerate(lines):
-            try:
-                frame = int(json.loads(line.decode("utf-8"))["frame"])
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                if i == len(lines) - 1:
-                    continue  # torn last line: drop it
-                raise
-            if frame in done:
-                kept.append(line)
-        if len(kept) == len(lines):
+        lines, torn = _read_records(path)
+        kept = [line.raw for line in lines if int(line.record["frame"]) in done]
+        if not torn and len(kept) == len(lines):
             continue
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_bytes(b"".join(line + b"\n" for line in kept))
@@ -93,10 +135,12 @@ def run_teach(
     log: Callable[[str], None] = print,
 ) -> int:
     """Labels every `every`-th frame of frames.csv not yet processed, at most `limit`; resumable."""
+    refs = read_frames_csv(frames_dir)
     labels_dir.mkdir(parents=True, exist_ok=True)
+    check_labels_match_frames(frames_dir, labels_dir, refs)
     done = read_processed(labels_dir)
     _drop_unfinished(labels_dir, done)
-    todo = [r for r in read_frames_csv(frames_dir)[::every] if r.frame not in done][:limit]
+    todo = [r for r in refs[::every] if r.frame not in done][:limit]
     started = time.monotonic()
     for i, ref in enumerate(todo, start=1):
         bgr = cv2.imread(str(ref.image))
@@ -130,8 +174,10 @@ def _by_frame(path: Path) -> dict[int, list[Box]]:
 
 def run_fuse(frames_dir: Path, labels_dir: Path, cfg: LabelingConfig) -> tuple[FuseSummary, list[tuple[FrameRef, list[Box]]], list[Flag]]:
     """Fuses raw teacher boxes, fills temporal holes, applies rules, writes merged/flags/YOLO."""
+    all_refs = read_frames_csv(frames_dir)
+    check_labels_match_frames(frames_dir, labels_dir, all_refs)
     done = read_processed(labels_dir)
-    refs = [r for r in read_frames_csv(frames_dir) if r.frame in done]
+    refs = [r for r in all_refs if r.frame in done]
     raw, aux = _by_frame(labels_dir / RAW), _by_frame(labels_dir / AUX)
     fused = [(r, fuse(raw.get(r.frame, []), cfg.fuse_iou)) for r in refs]
     filled_lists, flags = temporal_fill(fused, cfg)

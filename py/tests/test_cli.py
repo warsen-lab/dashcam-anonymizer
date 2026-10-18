@@ -137,3 +137,35 @@ def test_import_review_needs_reviewed_frames_unless_allowed(tmp_path, capsys):
 
     assert main([*argv, "--allow-unreviewed"]) == 0
     assert f"import-review: 1 gold frames in {gold}" in capsys.readouterr().out
+
+
+def _other_video_frames(tmp_path):
+    frames = tmp_path / "frames" / "other"
+    frames.mkdir(parents=True)
+    (frames / "frames.csv").write_text("video,frame,pts_ms,reason,motion_score\nother.mp4,0,0.0,base,0\n")
+    return frames
+
+
+def test_a_labels_dir_of_another_video_is_a_usage_error(tmp_path, capsys, monkeypatch):
+    _, labels = _labelled(tmp_path)
+    other = _other_video_frames(tmp_path)
+    monkeypatch.setattr("vc_label.cli._load_teachers", lambda cfg, device: None)  # must fail before any teacher runs
+
+    assert main(["fuse", "--frames", str(other), "--labels", str(labels)]) == 2
+    assert "does not match" in capsys.readouterr().err
+
+    assert main(["teach", "--frames", str(other), "--labels", str(labels)]) == 2
+    assert "does not match" in capsys.readouterr().err
+
+    assert main(["export-review", "--frames", str(other), "--labels", str(labels), "--review", str(tmp_path / "review")]) == 2
+    assert "does not match" in capsys.readouterr().err
+
+
+def test_export_review_refuses_to_use_the_labels_dir_as_review_dir(tmp_path, capsys):
+    frames, labels = _labelled(tmp_path)
+    before = sorted(p.name for p in labels.iterdir())
+
+    assert main(["export-review", "--frames", str(frames), "--labels", str(labels), "--review", str(labels / ".." / "labels")]) == 2
+
+    assert "--review" in capsys.readouterr().err
+    assert sorted(p.name for p in labels.iterdir()) == before

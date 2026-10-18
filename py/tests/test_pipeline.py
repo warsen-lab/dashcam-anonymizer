@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from vc_label.config import LabelingConfig
 from vc_label.contracts import Box, Detection, read_jsonl, write_jsonl
@@ -43,14 +44,14 @@ def teachers() -> Teachers:
     return Teachers(faces=[FakeFaces("teacher_retinaface"), FakeFaces("teacher_yunet")], coco=FakeCoco(), plates=FakePlates())
 
 
-def make_frames(root: Path, count: int) -> Path:
-    frames = root / "frames" / "trip"
+def make_frames(root: Path, count: int, name: str = "trip") -> Path:
+    frames = root / "frames" / name
     frames.mkdir(parents=True)
     rows = ["video,frame,pts_ms,reason,motion_score"]
     for i in range(count):
         frame = i * 12
         cv2.imwrite(str(frames / f"{frame:06d}.jpg"), np.full((H, W, 3), 128, np.uint8))
-        rows.append(f"trip.mp4,{frame},{frame * 1000 / 60:.1f},base,0.0")
+        rows.append(f"{name}.mp4,{frame},{frame * 1000 / 60:.1f},base,0.0")
     (frames / "frames.csv").write_text("\n".join(rows) + "\n")
     return frames
 
@@ -179,3 +180,48 @@ def test_run_export_review_writes_only_new_frames_after_another_teach_batch(tmp_
 
     assert json.loads((review / "000000.json").read_text()) == edited
     assert sorted(p.name for p in review.glob("*.json")) == ["000000.json", "000012.json", "000024.json"]
+
+
+def test_run_fuse_rejects_a_labels_dir_taught_on_another_video(tmp_path):
+    frames_a, labels = make_frames(tmp_path, 3), tmp_path / "labels"
+    frames_b = make_frames(tmp_path, 3, name="other")
+    run_teach(frames_a, labels, teachers(), CFG, log=lambda _: None)
+
+    with pytest.raises(ValueError, match=r"labels dir .*labels does not match .*other: .*trip\.mp4"):
+        run_fuse(frames_b, labels, CFG)
+
+    assert not (labels / "merged.jsonl").exists()
+
+
+def test_run_fuse_rejects_processed_frames_that_are_not_in_frames_csv(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    labels.mkdir()
+    (labels / "processed.txt").write_text("0\n5\n7\n")
+
+    with pytest.raises(ValueError, match=r"does not match .*processed\.txt.*\[5, 7\]"):
+        run_fuse(frames, labels, CFG)
+
+
+def test_run_teach_rejects_a_labels_dir_taught_on_another_video_and_leaves_it_alone(tmp_path):
+    frames_a, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    frames_b = make_frames(tmp_path, 2, name="other")
+    run_teach(frames_a, labels, teachers(), CFG, log=lambda _: None)
+    before = {p.name: p.read_bytes() for p in labels.iterdir()}
+
+    with pytest.raises(ValueError, match=r"does not match .*other"):
+        run_teach(frames_b, labels, teachers(), CFG, log=lambda _: None)
+
+    assert {p.name: p.read_bytes() for p in labels.iterdir()} == before
+
+
+def test_a_bad_line_before_the_last_names_the_file_and_line(tmp_path):
+    frames, labels = make_frames(tmp_path, 2), tmp_path / "labels"
+    labels.mkdir()
+    (labels / "processed.txt").write_text("0\n")
+    good = '{"video": "trip.mp4", "frame": 0, "pts_ms": 0.0, "cls": "face", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "score": 0.9, "src": "s"}\n'
+    (labels / "raw.jsonl").write_text(good + "not json\n" + good)
+
+    with pytest.raises(ValueError, match=r"raw\.jsonl:2"):
+        run_teach(frames, labels, teachers(), CFG, log=lambda _: None)
+    with pytest.raises(ValueError, match=r"raw\.jsonl:2"):
+        run_fuse(frames, labels, CFG)

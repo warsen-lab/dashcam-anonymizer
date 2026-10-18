@@ -77,6 +77,8 @@ def _run(args: argparse.Namespace) -> str:
     for name in ("labels", "review", "gold"):
         if getattr(args, name, None) is not None:
             ensure_outside(args.frames, getattr(args, name))
+    if args.command == "export-review" and args.review.resolve() == args.labels.resolve():
+        raise ValueError("--review must differ from --labels: export-review writes one <frame>.json per frame into --review")
     if args.command == "import-review":
         count = import_review(args.review, read_frames_csv(args.frames), args.gold, allow_unreviewed=args.allow_unreviewed)
         return f"import-review: {count} gold frames in {args.gold}"
