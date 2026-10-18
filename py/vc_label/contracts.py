@@ -60,7 +60,7 @@ class FrameRef:
 
 def read_frames_csv(frames_dir: Path) -> list[FrameRef]:
     """Rows of <frames_dir>/frames.csv (written by vc_extract), in file order."""
-    with (frames_dir / "frames.csv").open(newline="") as f:
+    with (frames_dir / "frames.csv").open(newline="", encoding="utf-8") as f:
         return [
             FrameRef(
                 video=row["video"],
@@ -83,14 +83,14 @@ class Detection:
         b = self.box
         return {
             "video": self.video,
-            "frame": self.frame,
-            "pts_ms": round(self.pts_ms, 1),
+            "frame": int(self.frame),
+            "pts_ms": round(float(self.pts_ms), 1),
             "cls": b.cls,
-            "x1": round(b.x1, 1),
-            "y1": round(b.y1, 1),
-            "x2": round(b.x2, 1),
-            "y2": round(b.y2, 1),
-            "score": round(b.score, 4),
+            "x1": round(float(b.x1), 1),
+            "y1": round(float(b.y1), 1),
+            "x2": round(float(b.x2), 1),
+            "y2": round(float(b.y2), 1),
+            "score": round(float(b.score), 4),
             "src": b.src,
         }
 
@@ -109,7 +109,7 @@ class Detection:
 
 
 def write_jsonl(path: Path, detections: Iterable[Detection], append: bool = False) -> None:
-    with path.open("a" if append else "w") as f:
+    with path.open("a" if append else "w", encoding="utf-8") as f:
         for d in detections:
             f.write(json.dumps(d.to_record(), ensure_ascii=False) + "\n")
 
@@ -117,7 +117,7 @@ def write_jsonl(path: Path, detections: Iterable[Detection], append: bool = Fals
 def read_jsonl(path: Path) -> Iterator[Detection]:
     if not path.exists():
         return
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 yield Detection.from_record(json.loads(line))
@@ -142,9 +142,18 @@ def from_yolo_lines(lines: Iterable[str], width: int, height: int, src: str = ""
     for line in lines:
         if not line.strip():
             continue
-        cls_id, cx, cy, w, h = line.split()
-        cx, cy, w, h = float(cx) * width, float(cy) * height, float(w) * width, float(h) * height
+        fields = line.split()
+        if len(fields) != 5:
+            raise ValueError(f"bad YOLO line {line!r}")
+        try:
+            cls_id = int(fields[0])
+            cx, cy, w, h = (float(v) for v in fields[1:])
+        except ValueError:
+            raise ValueError(f"bad YOLO line {line!r}") from None
+        if cls_id not in range(len(LABEL_CLASSES)):
+            raise ValueError(f"bad YOLO line {line!r}")
+        cx, cy, w, h = cx * width, cy * height, w * width, h * height
         boxes.append(
-            Box(LABEL_CLASSES[int(cls_id)], cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, src=src)
+            Box(LABEL_CLASSES[cls_id], cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, src=src)
         )
     return boxes

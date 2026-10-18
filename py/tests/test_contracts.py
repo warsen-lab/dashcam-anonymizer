@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from vc_label.contracts import (
@@ -50,6 +51,24 @@ def test_read_jsonl_of_missing_file_is_empty(tmp_path):
     assert list(read_jsonl(tmp_path / "nope.jsonl")) == []
 
 
+def test_to_record_accepts_numpy_scalars(tmp_path):
+    det = Detection(
+        "trip.mp4",
+        np.int64(3),
+        np.float32(50.04),
+        Box("face", np.float32(1.04), np.float32(2), np.float32(3), np.float32(4), score=np.float32(0.9), src="teacher_yunet"),
+    )
+    write_jsonl(tmp_path / "raw.jsonl", [det])
+    back = list(read_jsonl(tmp_path / "raw.jsonl"))
+    assert back[0].box.x1 == 1.0
+    assert back[0].box.score == 0.9
+
+
+def test_record_keys_match_the_spec():
+    record = Detection("v.mp4", 0, 0.0, Box("face", 0, 0, 1, 1)).to_record()
+    assert list(record) == ["video", "frame", "pts_ms", "cls", "x1", "y1", "x2", "y2", "score", "src"]
+
+
 def test_yolo_round_trip():
     boxes = [Box("face", 100, 50, 140, 100), Box("plate", 0, 0, 1920, 1080)]
     lines = to_yolo_lines(boxes, 1920, 1080)
@@ -63,6 +82,12 @@ def test_yolo_round_trip():
 def test_yolo_rejects_auxiliary_classes():
     with pytest.raises(ValueError, match="vehicle"):
         to_yolo_lines([Box("vehicle", 0, 0, 10, 10)], 100, 100)
+
+
+def test_from_yolo_lines_rejects_bad_rows():
+    for line in ["-1 0.5 0.5 0.1 0.1", "2 0.5 0.5 0.1 0.1", "0 0.5 0.5 0.1 0.1 0.9"]:
+        with pytest.raises(ValueError, match="bad YOLO line"):
+            from_yolo_lines([line], 100, 100)
 
 
 def test_frame_image_paths_are_six_digit_jpgs(tmp_path):

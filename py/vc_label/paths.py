@@ -12,10 +12,14 @@ YUNET_MODEL = MODELS / "face_detection_yunet_2023mar.onnx"
 
 
 def offline_model_env() -> None:
-    """Points Hugging Face / torch at the shared cache and forbids downloads (metered link).
+    """Points Hugging Face / torch at the shared cache and forbids Hugging Face downloads (metered link).
+
+    HF_HUB_OFFLINE is forced to "1" rather than defaulted, so an exported HF_HUB_OFFLINE=0
+    cannot re-enable downloads. Torch weights must be loaded from cached files: no env var
+    stops torchvision from downloading a missing file.
 
     Must run before transformers or torchvision load weights.
     """
     os.environ.setdefault("HF_HOME", str(CACHE / "hf"))
     os.environ.setdefault("TORCH_HOME", str(CACHE / "torch"))
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ["HF_HUB_OFFLINE"] = "1"
