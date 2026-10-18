@@ -7,7 +7,16 @@ import pytest
 from PIL import Image
 
 from vc_label.contracts import Box, FrameRef, read_frames_csv
-from vc_label.review import REVIEWED_FLAG, SCENE_FLAGS, ensure_outside, import_review, labelme_document, read_labelme_boxes, write_review_queue
+from vc_label.review import (
+    REVIEWED_FLAG,
+    SCENE_FLAGS,
+    SOURCE_KEY,
+    ensure_outside,
+    import_review,
+    labelme_document,
+    read_labelme_boxes,
+    write_review_queue,
+)
 from vc_label.rules import Flag
 
 
@@ -51,6 +60,8 @@ def test_labelme_document_points_back_to_the_frame(tmp_path):
     doc = labelme_document(ref, [face], [Flag("trip.mp4", 7, "low_score", face)], review, 1920, 1080)
 
     assert doc["imagePath"] == "../../frames/trip/000007.jpg"
+    assert SOURCE_KEY == "vc_source"
+    assert doc[SOURCE_KEY] == {"video": "trip.mp4", "frame": 7}  # survives X-AnyLabeling rewriting imagePath
     assert (doc["imageWidth"], doc["imageHeight"], doc["imageData"]) == (1920, 1080, None)
     assert doc["flags"] == {"reviewed": False, "day": False, "night": False, "rain": False, "tunnel": False, "city": False, "highway": False}
     assert list(doc["flags"]) == [REVIEWED_FLAG, *SCENE_FLAGS]  # the review checkbox comes first
@@ -84,6 +95,9 @@ def _frames_dir(tmp_path: Path, frames_numbers=(7,), name: str = "trip") -> Path
     return frames
 
 
+_FROM_FRAME = object()  # vc_source default: the frame this file is named after, of video trip.mp4
+
+
 def _review_json(
     review: Path,
     shapes: list[dict],
@@ -92,11 +106,17 @@ def _review_json(
     reviewed: bool = True,
     size: tuple[int, int] = (200, 100),
     image_path: str | None = None,
+    vc_source: object = _FROM_FRAME,
 ) -> None:
-    """A LabelMe file as X-AnyLabeling saves it; imagePath defaults to the frame of `_frames_dir(review.parent)`."""
+    """A LabelMe file as export-review writes it; imagePath and vc_source default to the frame of `_frames_dir(review.parent)`.
+
+    `vc_source=None` leaves the key out.
+    """
     review.mkdir(parents=True, exist_ok=True)
     if image_path is None:
         image_path = os.path.relpath(review.parent / "frames" / "trip" / f"{frame:06d}.jpg", review)
+    if vc_source is _FROM_FRAME:
+        vc_source = {"video": "trip.mp4", "frame": frame}
     doc = {
         "version": "5.4.1",
         "flags": {REVIEWED_FLAG: reviewed, **flags},
@@ -106,6 +126,8 @@ def _review_json(
         "imageHeight": size[1],
         "imageWidth": size[0],
     }
+    if vc_source is not None:
+        doc[SOURCE_KEY] = vc_source
     (review / f"{frame:06d}.json").write_text(json.dumps(doc))
 
 
@@ -369,14 +391,14 @@ def test_import_review_rejects_a_review_dir_exported_from_another_video(tmp_path
         import_review(review, read_frames_csv(frames_a), gold)
 
     message = str(excinfo.value)
-    assert "000007.json" in message and "../frames/other/000007.jpg" in message
-    assert str(frames_a / "000007.jpg") in message  # the frame image the importer expected
+    assert "000007.json" in message
+    assert "other.mp4#7" in message and "trip.mp4#7" in message  # what the file says, what the importer expected
     assert not gold.exists()
     # The same file imported against the right frames dir is fine.
     assert import_review(review, read_frames_csv(frames_b), gold) == 1
 
 
-def test_import_review_foreign_video_leaves_an_existing_gold_dir_alone(tmp_path):
+def test_import_review_rejects_a_relative_image_path_into_another_frames_dir_even_with_a_matching_vc_source(tmp_path):
     frames, review, gold = _imported_gold(tmp_path)
     other = _frames_dir(tmp_path, name="other")
     before = _snapshot(gold)
@@ -442,3 +464,103 @@ def test_only_a_real_true_marks_a_frame_reviewed(tmp_path, value):
     assert import_review(review, read_frames_csv(frames), gold, allow_unreviewed=True) == 1
     with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
         assert list(csv.reader(fh))[1][3] == "false"
+
+
+def test_exported_review_dir_has_the_source_in_every_file_and_imports(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    review.mkdir()
+    for ref in read_frames_csv(frames):
+        doc = labelme_document(ref, [], [], review, 200, 100)
+        assert doc[SOURCE_KEY] == {"video": "trip.mp4", "frame": ref.frame}
+        doc["flags"][REVIEWED_FLAG] = True
+        (review / f"{ref.frame:06d}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    assert import_review(review, read_frames_csv(frames), gold) == 2
+
+
+def _xanylabeling_save(frame: int = 7, source: object = _FROM_FRAME) -> dict:
+    """What X-AnyLabeling 4.1.0 writes back after a GUI save of one of our files (checked on a real round trip).
+
+    It rewrites imagePath to the bare file name, saves rectangles as 4 points, adds `checked` and per-shape
+    bookkeeping, writes its own version, and keeps the image-level description and unknown top-level keys.
+    """
+    doc = {
+        "version": "4.1.0",
+        "flags": {REVIEWED_FLAG: True, "day": True, "night": False, "rain": False, "tunnel": False, "city": False, "highway": False},
+        "checked": False,
+        "shapes": [
+            {
+                "label": "face",
+                "score": None,
+                "points": [[146.0, 20.4], [162.9, 20.4], [162.9, 38.4], [146.0, 38.4]],
+                "group_id": None,
+                "description": "score=0.93 src=teacher_retinaface face_single_source",
+                "difficult": False,
+                "shape_type": "rectangle",
+                "flags": {},
+                "attributes": {},
+                "kie_linking": [],
+            }
+        ],
+        "imagePath": f"{frame:06d}.jpg",
+        "imageData": None,
+        "imageHeight": 100,
+        "imageWidth": 200,
+        "description": f"vc_label video=trip.mp4 frame={frame}",
+    }
+    if source is _FROM_FRAME:
+        source = {"video": "trip.mp4", "frame": frame}
+    if source is not None:
+        doc[SOURCE_KEY] = source
+    return doc
+
+
+def _write_saved(review: Path, doc: dict, frame: int = 7) -> None:
+    review.mkdir(parents=True, exist_ok=True)
+    (review / f"{frame:06d}.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
+def test_import_review_accepts_a_file_as_x_anylabeling_saves_it(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path), tmp_path / "review", tmp_path / "gold"
+    _write_saved(review, _xanylabeling_save())
+
+    assert import_review(review, read_frames_csv(frames), gold) == 1
+
+    assert (gold / "yolo" / "000007.txt").read_text(encoding="utf-8").splitlines() == ["0 0.772250 0.294000 0.084500 0.180000"]
+    with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
+        assert list(csv.reader(fh))[1] == ["000007.jpg", "trip.mp4", "7", "true", "day"]
+
+
+_SAVED_WRONG_SOURCE = [
+    pytest.param(None, r"000007\.json: no vc_source; re-export it with vc_label export-review", id="missing"),
+    pytest.param({"video": "other.mp4", "frame": 7}, r"000007\.json.*other\.mp4#7.*trip\.mp4#7", id="other-video-same-frame-number"),
+    pytest.param({"video": "trip.mp4", "frame": 8}, r"000007\.json.*trip\.mp4#8.*trip\.mp4#7", id="same-video-other-frame"),
+    pytest.param({"video": "trip.mp4", "frame": "7"}, r"000007\.json.*trip\.mp4#'7'.*trip\.mp4#7", id="frame-is-a-string"),
+    pytest.param({"video": "trip.mp4", "frame": True}, r"000007\.json.*trip\.mp4#True.*trip\.mp4#7", id="frame-is-a-boolean"),
+    pytest.param({"video": "trip.mp4"}, r"000007\.json.*trip\.mp4#None.*trip\.mp4#7", id="no-frame"),
+    pytest.param("trip.mp4#7", r"000007\.json.*vc_source", id="not-an-object"),
+]
+
+
+@pytest.mark.parametrize("source, message", _SAVED_WRONG_SOURCE)
+def test_import_review_rejects_a_file_whose_vc_source_is_missing_or_wrong_and_leaves_gold_alone(tmp_path, source, message):
+    frames, review, gold = _imported_gold(tmp_path)
+    before = _snapshot(gold)
+    # A bare imagePath names the right file (every video's frames are NNNNNN.jpg), so only vc_source can tell.
+    _write_saved(review, _xanylabeling_save(source=source))
+
+    with pytest.raises(ValueError, match=message):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert _snapshot(gold) == before
+
+
+def test_import_review_with_one_file_missing_vc_source_writes_nothing(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    _write_saved(review, _xanylabeling_save(frame=7))
+    _write_saved(review, _xanylabeling_save(frame=8, source=None), frame=8)  # a later file without it
+
+    with pytest.raises(ValueError, match=r"000008\.json: no vc_source"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert not gold.exists()

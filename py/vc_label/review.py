@@ -16,6 +16,7 @@ from vc_label.rules import Flag
 SCENE_FLAGS = ("day", "night", "rain", "tunnel", "city", "highway")
 REVIEWED_FLAG = "reviewed"
 LABELME_VERSION = "5.4.1"
+SOURCE_KEY = "vc_source"
 
 
 def ensure_outside(frames_dir: Path, path: Path) -> None:
@@ -56,6 +57,9 @@ def labelme_document(ref: FrameRef, boxes: list[Box], flags: list[Flag], review_
         "imageData": None,
         "imageHeight": height,
         "imageWidth": width,
+        # X-AnyLabeling rewrites imagePath to the bare file name on save and keeps unknown top-level keys,
+        # so this is what ties the file to its video: every video's frames are named NNNNNN.jpg.
+        SOURCE_KEY: {"video": ref.video, "frame": ref.frame},
     }
 
 
@@ -125,11 +129,30 @@ def boxes_from_labelme(path: Path, doc: dict) -> tuple[list[Box], list[str], boo
 MAX_LISTED_FRAMES = 20
 
 
-def check_image_path(path: Path, doc: dict, ref: FrameRef) -> None:
-    """The JSON must describe the frame its file name says: frame numbers repeat across videos.
+def check_source(path: Path, doc: dict, ref: FrameRef) -> None:
+    """The JSON must carry the `vc_source` that export-review wrote, naming this frame of this video."""
+    if SOURCE_KEY not in doc:
+        raise ValueError(f"{path}: no {SOURCE_KEY}; re-export it with vc_label export-review")
+    source = doc[SOURCE_KEY]
+    if not isinstance(source, dict):
+        raise ValueError(
+            f"{path}: {SOURCE_KEY} must be an object with video and frame, got {source!r}; "
+            f"re-export it with vc_label export-review"
+        )
+    video, frame = source.get("video"), source.get("frame")
+    if video != ref.video or type(frame) is not int or frame != ref.frame:  # type(): True == 1 is not frame 1
+        raise ValueError(
+            f"{path}: {SOURCE_KEY} says {video}#{frame!r} but this frame is {ref.video}#{ref.frame}; "
+            f"this review dir was exported from another video"
+        )
 
-    `imagePath` is resolved against the JSON's directory; if that file exists it must be the frame
-    image itself, otherwise (a review dir moved to another machine) the file names must agree.
+
+def check_image_path(path: Path, doc: dict, ref: FrameRef) -> None:
+    """Secondary to `check_source`: the JSON's `imagePath` must lead to the frame image it is filed under.
+
+    Frame numbers repeat across videos. `imagePath` is resolved against the JSON's directory; if that file
+    exists it must be the frame image itself, otherwise (a review dir moved to another machine, or X-AnyLabeling
+    having cut it down to a bare file name) the file names must agree.
     """
     image_path = doc.get("imagePath")
     if not isinstance(image_path, str) or not image_path:
@@ -159,6 +182,8 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
 
     Every frame must carry the `reviewed` checkbox unless `allow_unreviewed` (training videos only:
     their pre-labels pass through, recorded as reviewed=false in gold_meta.csv).
+    Every JSON must carry the `vc_source` (video, frame) that `labelme_document` wrote: X-AnyLabeling rewrites
+    `imagePath` to a bare file name, which every video's frames share, so `imagePath` alone cannot tell videos apart.
     All JSONs are parsed and validated first; only then is the gold dir touched, so a bad file leaves an
     earlier import intact. Label files of frames no longer in the review dir are removed, so a review
     dir that is missing or holds no JSON is refused: it would otherwise empty the gold dir.
@@ -177,6 +202,7 @@ def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")
         doc = load_labelme(path)
+        check_source(path, doc, ref)
         check_image_path(path, doc, ref)
         boxes, tags, reviewed, width, height = boxes_from_labelme(path, doc)
         actual = image_size(ref.image)

@@ -139,6 +139,7 @@ def test_run_export_review_writes_one_labelme_file_per_frame(tmp_path):
 
     doc = json.loads((review / "000012.json").read_text())
     assert doc["imagePath"] == "../frames/trip/000012.jpg"
+    assert doc["vc_source"] == {"video": "trip.mp4", "frame": 12}
     assert [s["label"] for s in doc["shapes"]] == ["face", "plate"]
     assert (review / "review_queue.csv").exists()
 
