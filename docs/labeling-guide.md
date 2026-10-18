@@ -27,7 +27,7 @@
 ## 流程
 
 1. **预标注**：`vc_label teach`，每批不超过 15 分钟（1080p 约 2.5 秒/帧，`--limit 300` 约 12 分钟），可以分多批续跑。
-2. **导出复核文件**：`vc_label export-review`。已有的 `<帧号>.json` 不会被改动（X-AnyLabeling 把你的复核存在这里）：`teach` 又跑了一批、或改了阈值之后再导出，只会补写新帧的文件，并打印 `N new LabelMe files, M kept`；`review_queue.csv` 每次重写。只有明确要丢掉已有复核重新生成时才加 `--force`。
+2. **导出复核文件**：`vc_label export-review`。已有的 `<帧号>.json` 不会被改动（X-AnyLabeling 把你的复核存在这里）：`teach` 又跑了一批、或改了阈值之后再导出，只会补写新帧的文件，并打印 `N new LabelMe files, M kept`；`review_queue.csv` 每次重写。只有明确要丢掉已有复核重新生成时才加 `--force`（它对整个目录生效）。导出时如果目录里有没有 `vc_source` 的旧文件，会在 stderr 提示个数，处理方法见“没有 `vc_source` 的旧复核目录”。
 3. **人工复核**（X-AnyLabeling，需另行安装，见下面的“安装 X-AnyLabeling”）：在仓库根目录运行 `scripts/review_ui.sh <stem>`。它以 `data/frames/<stem>/` 为图片目录、`data/review/<stem>/` 为保存目录，标签固定为 `face`、`plate`，并把工具的所有联网途径指向本机的死代理（计费流量，复核时不出网）。`data/frames/<stem>/frames.csv` 或 `data/review/<stem>/` 不存在（还没 `export-review`），或者没装 X-AnyLabeling，脚本以退出码 2 拒绝。界面：
    - 右上角 Flags 面板：这一帧复核完就勾 `reviewed`，同处勾场景标记 `day`、`night`、`rain`、`tunnel`、`city`、`highway`。
    - Labels 只有 `face`、`plate`，只画矩形。
@@ -56,7 +56,29 @@ python3 -m venv ~/.cache/video-compliance/x-anylabeling-venv
 ~/.cache/video-compliance/x-anylabeling-venv/bin/pip install x-anylabeling-cvhub==4.1.0
 ```
 
-**不要删掉 JSON 里的 `vc_source` 字段**：X-AnyLabeling 保存时会把 `imagePath` 改写成裸文件名（比如 `000120.jpg`），而每个视频的帧都叫 `NNNNNN.jpg`，光看 `imagePath` 分不出是哪个视频的帧。所以 `export-review` 在每个 JSON 顶层写入 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（X-AnyLabeling 会原样保留），`import-review` 靠它认文件：缺失或和 `frames.csv` 里对应的视频、帧号对不上就拒绝，整个导入什么都不写。没有 `vc_source` 的旧文件（这一版之前导出的）：还没复核的用 `export-review --force` 重新导出；已经复核过的不要加 `--force`（它会丢掉复核），在 JSON 顶层手工补上 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`。
+**不要删掉 JSON 里的 `vc_source` 字段**：X-AnyLabeling 保存时会把 `imagePath` 改写成裸文件名（比如 `000120.jpg`），而每个视频的帧都叫 `NNNNNN.jpg`，光看 `imagePath` 分不出是哪个视频的帧。所以 `export-review` 在每个 JSON 顶层写入 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（X-AnyLabeling 会原样保留），`import-review` 靠它认文件：缺失或和 `frames.csv` 里对应的视频、帧号对不上就拒绝，整个导入什么都不写。没有 `vc_source` 的旧文件（这一版之前导出的）怎么处理，见下一节。
+
+## 没有 `vc_source` 的旧复核目录
+
+这一版之前导出的 `data/review/<stem>/` 里的 JSON 没有 `vc_source`，`import-review` 会拒绝（`no vc_source`）。`export-review` 不覆盖已有文件，所以直接重跑它改不了什么；它会在 stderr 提示这样的文件有多少个（`N of M LabelMe files ... have no vc_source`）。
+
+**`export-review --force` 对整个目录生效**：连勾过 `reviewed` 的文件也一起覆盖，复核全丢。按下面的顺序处理，不要一上来就 `--force`。
+
+先看有没有勾过 `reviewed` 的文件（没有输出 = 一个都没勾）：
+
+```bash
+grep -l '"reviewed": true' data/review/<stem>/*.json
+```
+
+- **(a) 一个都没勾过**：整个目录里没有人工复核可丢，用 `export-review --force` 全部重新生成。
+- **(b) 已经有勾过的**：不要 `--force`。列出缺 `vc_source` 的文件和它们是否勾了 `reviewed`：
+
+  ```bash
+  .venv/bin/python -c "import json,pathlib,sys; [print('reviewed' if json.loads(p.read_text()).get('flags',{}).get('reviewed') is True else 'unreviewed', p) for p in sorted(pathlib.Path(sys.argv[1]).glob('*.json')) if 'vc_source' not in json.loads(p.read_text())]" data/review/<stem>
+  ```
+
+  把列出的 `unreviewed` 文件删掉（这些文件里改了一半的框也会丢），然后**不带 `--force`** 重跑 `export-review`：它只写缺的文件，已有的（包括勾过 `reviewed` 的）原样保留。
+- **(c) 列出的 `reviewed` 文件**不能删，在 JSON 顶层手工补上 `"vc_source": {"video": "<视频文件名>", "frame": <帧号>}`（视频文件名取自 `frames.csv` 的 `video` 列，帧号就是文件名里的数字，不带前导零）。
 
 ## 规则标记
 
