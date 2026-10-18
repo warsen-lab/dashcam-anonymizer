@@ -8,12 +8,20 @@ from pathlib import Path
 
 from vc_label.config import LabelingConfig
 from vc_label.contracts import read_frames_csv
-from vc_label.paths import RETINAFACE_WEIGHTS, YUNET_MODEL, offline_model_env
+from vc_label.paths import RETINAFACE_WEIGHTS, YUNET_MODEL, offline_model_env, required_model_files
 from vc_label.review import ensure_outside, import_review
 
 
 def _load_teachers(cfg: LabelingConfig, device_name: str):
     offline_model_env()
+    missing = [p for p in required_model_files() if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "missing model files: "
+            + ", ".join(str(p) for p in missing)
+            + "; download them as described in py/README.md (needs approval: metered link)"
+        )
+
     import torch
 
     from vc_label.pipeline import Teachers
@@ -22,9 +30,6 @@ def _load_teachers(cfg: LabelingConfig, device_name: str):
     from vc_label.teachers.retinaface import RetinaFaceTeacher
     from vc_label.teachers.yunet import YuNetTeacher
 
-    for path in (RETINAFACE_WEIGHTS, YUNET_MODEL):
-        if not path.exists():
-            raise FileNotFoundError(f"missing model file {path}; see py/README.md")
     if device_name == "auto":
         device_name = "mps" if torch.backends.mps.is_available() else "cpu"
     device = torch.device(device_name)
@@ -97,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         print(_run(args))
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, OSError) as e:
         print(f"vc_label: {e}", file=sys.stderr)
         return 2
     return 0

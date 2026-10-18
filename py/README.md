@@ -45,12 +45,18 @@ HF_HOME=~/.cache/video-compliance/hf .venv/bin/python -c "from transformers impo
 
 下载后用 `shasum -a 256` 核对上表。运行时 `vc_label` 会设置 `HF_HUB_OFFLINE=1`，不会再联网。
 
+`vc_label teach` 在加载任何模型前先检查上表四个文件是否都在缓存中，缺一个就以退出码 2 停止，从不下载。
+
 ## 用法
 
 在仓库根目录运行。标注目录必须在抽帧目录之外，否则命令直接拒绝。
 
 ```bash
 PYTHONPATH=py .venv/bin/python -m vc_label teach --frames data/frames/<stem> --labels data/labels/<stem> --limit 300
+```
+
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_label fuse --frames data/frames/<stem> --labels data/labels/<stem>
 ```
 
 ```bash
@@ -65,6 +71,8 @@ PYTHONPATH=py .venv/bin/python -m vc_label import-review --frames data/frames/<s
 - `fuse`：融合、时间补洞、规则标记，写 `merged.jsonl`、`flags.csv`、`yolo/`。很快，可以反复跑（比如改了 `configs/labeling.json` 之后）。
 - `export-review`：先做一次 `fuse`，再为每帧写 LabelMe JSON 和 `review_queue.csv`，供 X-AnyLabeling 复核。
 - `import-review`：把复核后的 JSON 转成金标准（`yolo/` + `gold_meta.csv`）。
+
+每个视频用自己的 `data/labels/<stem>/`、`data/review/<stem>/`、`data/gold/<stem>/`，不要几个视频共用一个目录：续跑记录 `processed.txt` 只按帧号区分，共用会让后一个视频的帧被当成"已处理"而跳过。
 
 `data/labels/<stem>/` 里的文件：
 

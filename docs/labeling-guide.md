@@ -20,6 +20,8 @@
 | `data/review/<stem>/` | 复核用的 LabelMe JSON、`review_queue.csv` | `vc_label export-review`，人工复核 |
 | `data/gold/<stem>/` | 金标准 YOLO 标注和 `gold_meta.csv` | `vc_label import-review` |
 
+每个视频用自己的 `data/labels/<stem>/`、`data/review/<stem>/`、`data/gold/<stem>/`，不要几个视频共用一个目录：续跑记录 `processed.txt` 只按帧号区分，共用会让后一个视频的帧被当成"已处理"而跳过。
+
 **任何标注都不能放进 `data/frames/<stem>/`**：重新抽帧时 `vc_extract --overwrite` 会把这个目录整个删掉。`vc_label` 会拒绝把输出写进去；在 X-AnyLabeling 里也要把保存目录设到 `data/review/<stem>/`，不能用默认的“保存在图片旁边”。
 
 ## 流程

@@ -45,3 +45,47 @@ def test_unknown_config_key_is_a_usage_error(tmp_path, capsys):
     assert main(["fuse", "--frames", str(frames), "--labels", str(tmp_path / "l"), "--config", str(config)]) == 2
 
     assert "nope" in capsys.readouterr().err
+
+
+def test_teach_refuses_to_run_when_a_model_file_is_missing(tmp_path, capsys, monkeypatch):
+    frames = _frames(tmp_path)
+    monkeypatch.setattr("vc_label.cli.required_model_files", lambda: [tmp_path / "missing.pth"])
+
+    assert main(["teach", "--frames", str(frames), "--labels", str(tmp_path / "labels")]) == 2
+
+    assert "missing.pth" in capsys.readouterr().err
+    assert not (tmp_path / "labels").exists()
+
+
+def test_required_model_files_follow_the_cache_env(tmp_path, monkeypatch):
+    import vc_label.paths
+
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torch"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    files = vc_label.paths.required_model_files()
+
+    assert files[-2:] == [
+        tmp_path / "torch" / "hub" / "checkpoints" / "fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+        tmp_path
+        / "hf"
+        / "hub"
+        / "models--google--owlv2-base-patch16-ensemble"
+        / "snapshots"
+        / "cfd3195ba4ea9592eec887ded089f4c08eff231d"
+        / "model.safetensors",
+    ]
+
+
+def test_review_and_gold_inside_the_frames_dir_are_rejected(tmp_path, capsys):
+    frames = _frames(tmp_path)
+    f = str(frames)
+
+    assert main(["export-review", "--frames", f, "--labels", str(tmp_path / "labels"), "--review", str(frames / "review")]) == 2
+    assert "inside the frames directory" in capsys.readouterr().err
+
+    assert main(["import-review", "--frames", f, "--review", str(tmp_path / "review"), "--gold", str(frames / "gold")]) == 2
+    assert "inside the frames directory" in capsys.readouterr().err
+
+    assert not (frames / "review").exists()
+    assert not (frames / "gold").exists()

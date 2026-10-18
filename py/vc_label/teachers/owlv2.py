@@ -8,10 +8,11 @@ from PIL import Image
 from transformers import Owlv2ForObjectDetection, Owlv2Processor
 
 from vc_label.contracts import Box
+from vc_label.paths import OWLV2_REVISION
 
 SOURCE = "teacher_owlv2"
 MODEL_ID = "google/owlv2-base-patch16-ensemble"
-MODEL_REVISION = "cfd3195ba4ea9592eec887ded089f4c08eff231d"
+MODEL_REVISION = OWLV2_REVISION
 QUERIES = ("a photo of a license plate",)
 _CROP_MARGIN = 0.1
 
