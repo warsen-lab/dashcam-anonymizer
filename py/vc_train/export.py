@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import shutil
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 from vc_label.boxes import iou
 from vc_train.geometry import PAD_VALUE, decode_yolov8, letterbox
@@ -18,20 +16,36 @@ from vc_train.offline import load_yolo
 
 MODEL_ONNX = "model.onnx"
 MODEL_JSON = "model.json"
+MAP50_KEY = "metrics/mAP50(B)"
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _best_map50(weights: Path) -> float:
-    results = weights.parent.parent / "results.csv"
-    if not results.exists():
-        return 0.0
-    with results.open(newline="") as f:
-        rows = list(csv.DictReader(f))
-    values = [float(v) for r in rows for k, v in r.items() if k.strip() == "metrics/mAP50(B)" and v.strip()]
-    return max(values, default=0.0)
+def _checkpoint_map50(weights: Path) -> float:
+    """mAP50 that ultralytics stored in the checkpoint: the validation of the very weights being exported."""
+    import torch
+
+    ckpt = torch.load(weights, map_location="cpu", weights_only=False)
+    train_metrics = ckpt.get("train_metrics") if isinstance(ckpt, dict) else None
+    if not isinstance(train_metrics, dict) or train_metrics.get(MAP50_KEY) is None:
+        raise ValueError(f"{weights} has no train_metrics[{MAP50_KEY!r}]; cannot report val_map50")
+    return float(train_metrics[MAP50_KEY])
+
+
+def _check_onnx_io(onnx_path: Path, in_width: int, in_height: int) -> None:
+    """Reads the exported graph back with onnxruntime: one static NCHW input, float32 inputs and outputs only."""
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    inputs, outputs = session.get_inputs(), session.get_outputs()
+    shapes = [list(i.shape) for i in inputs]
+    if shapes != [[1, 3, in_height, in_width]]:
+        raise ValueError(f"{onnx_path} has input shapes {shapes}, expected one input of shape [1, 3, {in_height}, {in_width}]")
+    types = [i.type for i in inputs] + [o.type for o in outputs]
+    if any(t != "tensor(float)" for t in types):
+        raise ValueError(f"{onnx_path} must use tensor(float) for every input and output, got {types}")
 
 
 def export_onnx(
@@ -42,11 +56,18 @@ def export_onnx(
     manifest: Path | None = None,
     name: str | None = None,
 ) -> Path:
-    """Static [1, 3, in_height, in_width] ONNX without NMS, plus model.json, into out_dir."""
+    """Static [1, 3, in_height, in_width] ONNX without NMS, plus model.json, into out_dir.
+
+    out_dir only receives files once the exported graph has been read back and has the expected static float shape.
+    """
+    if min(in_width, in_height) <= 0 or in_width % 32 or in_height % 32:
+        raise ValueError(f"input size {in_width}x{in_height} must be a positive multiple of 32 in both dimensions")
+    map50 = _checkpoint_map50(Path(weights))
     model = load_yolo(weights)
     exported = Path(
         model.export(format="onnx", imgsz=(in_height, in_width), opset=17, simplify=False, dynamic=False, nms=False, device="cpu")
     )
+    _check_onnx_io(exported, in_width, in_height)
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / MODEL_ONNX
     shutil.move(str(exported), target)
@@ -57,7 +78,7 @@ def export_onnx(
         "input": {"width": in_width, "height": in_height, "color": "RGB", "scale": 1 / 255, "letterbox": "top_left", "pad_value": PAD_VALUE},
         "output_format": "yolov8",
         "train_manifest_sha256": _sha256(manifest) if manifest else "",
-        "metrics": {"val_map50": float(_best_map50(Path(weights)))},
+        "metrics": {"val_map50": map50},
     }
     (out_dir / MODEL_JSON).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return target
@@ -75,7 +96,7 @@ class ConsistencyReport:
     unmatched: int
 
     def passed(self, tol_px: float = 1.0) -> bool:
-        return self.unmatched == 0 and self.max_diff_px < tol_px
+        return self.images > 0 and self.unmatched == 0 and self.max_diff_px < tol_px
 
 
 def check_consistency(
