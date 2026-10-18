@@ -18,7 +18,9 @@ class Detector {
   virtual const std::vector<std::string>& classes() const = 0;
   // The `src` written to detections.jsonl ("student", "fake").
   virtual std::string source() const = 0;
-  // Execution backend for reports ("CoreML", "CPU"); empty when not applicable.
+  // Execution backend for reports ("CoreML", "CPU"); empty when not applicable. "CoreML" means the
+  // CoreML execution provider was registered for the session; unsupported nodes may still run on
+  // the CPU.
   virtual std::string backend() const { return {}; }
 };
 

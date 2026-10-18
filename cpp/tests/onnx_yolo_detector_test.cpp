@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,17 @@ fs::path variant(const std::string& name, const std::string& from, const std::st
   return dir;
 }
 
+// Constructs a detector on `dir` (CPU) and expects a VcError whose message contains `needle`.
+void expectConstructionFails(const fs::path& dir, const std::string& needle) {
+  try {
+    OnnxYoloDetector detector(dir, ExecutionProvider::Cpu, DecodeParams{}, 128, 128);
+    ADD_FAILURE() << "expected a VcError mentioning '" << needle << "' for " << dir;
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find(needle), std::string::npos)
+        << "'" << needle << "' not in: " << e.what();
+  }
+}
+
 void expectConstBoxes(const std::vector<Box>& boxes, float tolerance) {
   ASSERT_EQ(boxes.size(), 2u);
   // input 64x64, frame 128x128 -> r = 0.5
@@ -70,6 +82,8 @@ TEST(OnnxYoloDetector, DecodesTheConstantModelOnCpu) {
 TEST(OnnxYoloDetector, CoreMlGivesTheSameBoxes) {
   OnnxYoloDetector detector(constModel(), ExecutionProvider::CoreML, DecodeParams{}, 128, 128);
   EXPECT_TRUE(detector.backend() == "CoreML" || detector.backend() == "CPU") << detector.backend();
+  RecordProperty("backend", detector.backend());
+  std::cout << "[ backend  ] " << detector.backend() << std::endl;
   const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
   expectConstBoxes(detector.detect(view(frame.get())), 1e-3f);
 }
@@ -81,11 +95,15 @@ TEST(OnnxYoloDetector, RejectsAFrameOfAnotherSize) {
 }
 
 TEST(OnnxYoloDetector, RejectsModelJsonThatDisagreesWithTheOnnx) {
-  const fs::path wrongSize = variant("const_yolo_size", R"("width": 64)", R"("width": 128)");
-  EXPECT_THROW(OnnxYoloDetector(wrongSize, ExecutionProvider::Cpu, DecodeParams{}, 128, 128), VcError);
-  const fs::path wrongClasses =
-      variant("const_yolo_classes", R"(["face", "plate"])", R"(["face", "plate", "car"])");
-  EXPECT_THROW(OnnxYoloDetector(wrongClasses, ExecutionProvider::Cpu, DecodeParams{}, 128, 128), VcError);
+  expectConstructionFails(variant("const_yolo_width", R"("width": 64)", R"("width": 128)"), "input shape");
+  expectConstructionFails(variant("const_yolo_height", R"("height": 64)", R"("height": 128)"), "input shape");
+  expectConstructionFails(
+      variant("const_yolo_classes", R"(["face", "plate"])", R"(["face", "plate", "car"])"), "output shape");
+}
+
+TEST(OnnxYoloDetector, RejectsANonFloatModel) {
+  // Same graph, but output0 is FLOAT16: GetTensorData<float> would read it as garbage boxes.
+  expectConstructionFails(fs::path(VC_TEST_DATA_DIR) / "const_yolo_fp16", "float32");
 }
 
 TEST(OnnxYoloDetector, ParsesExecutionProviders) {

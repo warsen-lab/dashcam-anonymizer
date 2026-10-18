@@ -26,6 +26,42 @@ std::string shapeText(const std::vector<int64_t>& shape) {
   return text + "]";
 }
 
+const char* elementTypeName(ONNXTensorElementDataType type) {
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return "float32";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return "float16";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: return "bfloat16";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: return "float64";
+    default: return "a non-float32 type";
+  }
+}
+
+struct TensorSpec {
+  ONNXTensorElementDataType type;
+  std::vector<int64_t> shape;
+};
+
+// `what` is "input" or "output", for messages. GetTensorData<float> does no type check, so a
+// float16 export would be read as garbage boxes; refuse anything but float32 tensors up front.
+TensorSpec readFloatTensorSpec(const Ort::TypeInfo& info, const char* what, const fs::path& onnx) {
+  if (info.GetONNXType() != ONNX_TYPE_TENSOR) {
+    throw VcError(onnx.string() + ": the " + what + " is not a tensor");
+  }
+  const auto tensor = info.GetTensorTypeAndShapeInfo();
+  TensorSpec spec{tensor.GetElementType(), tensor.GetShape()};
+  if (spec.type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw VcError(onnx.string() + ": the " + what + " tensor is " + elementTypeName(spec.type) +
+                  ", but the model must be float32 (e.g. not a float16 export)");
+  }
+  return spec;
+}
+
+Ort::SessionOptions makeOptions() {
+  Ort::SessionOptions options;
+  options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+  return options;
+}
+
 }  // namespace
 
 ExecutionProvider parseExecutionProvider(const std::string& text) {
@@ -54,14 +90,14 @@ struct OnnxYoloDetector::Impl {
     inputName = session.GetInputNameAllocated(0, allocator).get();
     outputName = session.GetOutputNameAllocated(0, allocator).get();
     const std::vector<int64_t> inShape =
-        session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        readFloatTensorSpec(session.GetInputTypeInfo(0), "input", onnx).shape;
     const std::vector<int64_t> wanted{1, 3, info.inputHeight, info.inputWidth};
     if (inShape != wanted) {
       throw VcError(onnx.string() + ": input shape " + shapeText(inShape) +
                     " does not match model.json input " + shapeText(wanted));
     }
     const std::vector<int64_t> outShape =
-        session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        readFloatTensorSpec(session.GetOutputTypeInfo(0), "output", onnx).shape;
     const int64_t rows = 4 + static_cast<int64_t>(info.classes.size());
     if (outShape.size() != 3 || outShape[0] != 1 || outShape[1] != rows || outShape[2] <= 0) {
       throw VcError(onnx.string() + ": output shape " + shapeText(outShape) + " does not match the " +
@@ -84,20 +120,32 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
   const fs::path onnx = modelDir / "model.onnx";
   if (!fs::is_regular_file(onnx)) throw VcError("missing " + onnx.string());
   try {
-    Ort::SessionOptions options;
-    options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    bool coreMlAttached = false;
+    Ort::SessionOptions options = makeOptions();
     if (provider == ExecutionProvider::CoreML) {
       try {
         options.AppendExecutionProvider(
             "CoreML", {{"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"},
                        {"RequireStaticInputShapes", "1"}});
-        s.backend = "CoreML";
+        coreMlAttached = true;
       } catch (const Ort::Exception& e) {
         std::fprintf(stderr, "vc: CoreML execution provider unavailable (%s); using CPU\n", e.what());
       }
     }
-    s.session = Ort::Session(ortEnv(), onnx.c_str(), options);
-    s.checkShapes(onnx);
+    if (coreMlAttached) {
+      try {
+        s.session = Ort::Session(ortEnv(), onnx.c_str(), options);
+        s.backend = "CoreML";
+      } catch (const Ort::Exception& e) {
+        // CoreML compiles the model while the session is created; retry once without it.
+        std::fprintf(stderr, "vc: CoreML session failed (%s); using CPU\n", e.what());
+      }
+    }
+    if (s.backend != "CoreML") {
+      const Ort::SessionOptions cpuOptions = makeOptions();
+      s.session = Ort::Session(ortEnv(), onnx.c_str(), cpuOptions);
+    }
+    s.checkShapes(onnx);  // its VcError is a model problem, never retried
   } catch (const Ort::Exception& e) {
     throw VcError("onnxruntime: " + onnx.string() + ": " + e.what());
   }
