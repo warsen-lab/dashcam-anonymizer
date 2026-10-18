@@ -1,6 +1,7 @@
 #include "test_media.h"
 
 #include <cstdlib>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -58,6 +59,45 @@ fs::path tenBitVideo() {
 
 fs::path audioOnlyFile() {
   return makeMedia("audio_only.m4a", "-f lavfi -i sine=f=440:d=1 -c:a aac");
+}
+
+fs::path videoWithAudio() {
+  return makeMedia("video_audio.mp4",
+                   "-f lavfi -i testsrc2=s=640x360:r=30:d=2 -f lavfi -i sine=f=440:d=2 "
+                   "-c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -shortest");
+}
+
+fs::path videoWithSubtitles() {
+  const fs::path srt = tmpDir() / "subs.srt";
+  if (!fs::exists(srt)) {
+    const fs::path partial = tmpDir() / (std::to_string(getpid()) + "-subs.srt");
+    std::ofstream(partial) << "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n";
+    fs::rename(partial, srt);
+  }
+  return makeMedia("video_subs.mp4", "-f lavfi -i testsrc2=s=320x240:r=30:d=1 -i \"" + srt.string() +
+                                         "\" -map 0:v -map 1:s -c:v libx264 -pix_fmt yuv420p -c:s mov_text");
+}
+
+int streamCount(const fs::path& path, AVMediaType type) {
+  AVFormatContext* raw = nullptr;
+  if (avformat_open_input(&raw, path.string().c_str(), nullptr, nullptr) < 0) throw std::runtime_error("open " + path.string());
+  av::InputContextPtr input(raw);
+  if (avformat_find_stream_info(input.get(), nullptr) < 0) throw std::runtime_error("probe " + path.string());
+  int count = 0;
+  for (unsigned i = 0; i < input->nb_streams; ++i) count += input->streams[i]->codecpar->codec_type == type ? 1 : 0;
+  return count;
+}
+
+double streamDurationSec(const fs::path& path, AVMediaType type) {
+  AVFormatContext* raw = nullptr;
+  if (avformat_open_input(&raw, path.string().c_str(), nullptr, nullptr) < 0) throw std::runtime_error("open " + path.string());
+  av::InputContextPtr input(raw);
+  if (avformat_find_stream_info(input.get(), nullptr) < 0) throw std::runtime_error("probe " + path.string());
+  for (unsigned i = 0; i < input->nb_streams; ++i) {
+    const AVStream* s = input->streams[i];
+    if (s->codecpar->codec_type == type && s->duration != AV_NOPTS_VALUE) return s->duration * av_q2d(s->time_base);
+  }
+  return 0.0;
 }
 
 namespace {

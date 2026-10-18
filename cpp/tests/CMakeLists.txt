@@ -16,6 +16,7 @@ add_executable(vc_tests
   mosaic_test.cpp
   onnx_yolo_detector_test.cpp
   video_reader_test.cpp
+  video_writer_test.cpp
   yolo_decode_test.cpp
 )
 target_link_libraries(vc_tests PRIVATE vc_extract_lib vc_detect_lib vc_core GTest::gtest_main)

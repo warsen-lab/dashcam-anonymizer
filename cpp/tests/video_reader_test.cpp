@@ -120,6 +120,31 @@ TEST(VideoReader, SkipsCorruptPacketsAndCountsThem) {
   EXPECT_EQ(reader.next(), nullptr);
 }
 
+TEST(VideoReader, ForwardsAudioPacketsToTheSink) {
+  VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
+  const std::vector<const AVStream*> audio = reader.audioStreams();
+  ASSERT_EQ(audio.size(), 1u);
+  EXPECT_EQ(reader.videoStream()->codecpar->codec_type, AVMEDIA_TYPE_VIDEO);
+  int packets = 0;
+  bool otherStream = false;
+  reader.setAudioSink([&](const AVPacket& packet) {
+    ++packets;
+    otherStream = otherStream || packet.stream_index != audio[0]->index;
+  });
+  int frames = 0;
+  while (reader.next() != nullptr) ++frames;
+  EXPECT_EQ(frames, 60);
+  EXPECT_GT(packets, 50);  // ~94 AAC packets in 2 s at 48 kHz
+  EXPECT_FALSE(otherStream);
+  EXPECT_TRUE(reader.droppedStreams().empty());
+}
+
+TEST(VideoReader, ListsStreamsItDrops) {
+  VideoReader reader(test::videoWithSubtitles().string(), HwAccel::None);
+  EXPECT_TRUE(reader.audioStreams().empty());
+  EXPECT_EQ(reader.droppedStreams(), (std::vector<std::string>{"#1 subtitle mov_text"}));
+}
+
 TEST(VideoReader, ParsesHwAccelNames) {
   EXPECT_EQ(parseHwAccel("none"), HwAccel::None);
   EXPECT_EQ(parseHwAccel("videotoolbox"), HwAccel::VideoToolbox);

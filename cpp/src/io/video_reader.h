@@ -1,12 +1,16 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "common/luma_plane.h"
 
 struct AVFrame;
+struct AVPacket;
+struct AVStream;
 
 namespace vc {
 
@@ -52,6 +56,16 @@ class VideoReader {
   bool usingHardware() const;
   // Packets/frames the decoder rejected as corrupt; decoding continues past them.
   int64_t decodeErrors() const;
+  // The decoded video stream (codec parameters, time base, frame rate).
+  const AVStream* videoStream() const;
+  // Audio streams in stream order; vc_redact copies them unchanged.
+  std::vector<const AVStream*> audioStreams() const;
+  // Every other stream as "#<index> <type> <codec>" (GPS / data tracks, subtitles, extra video);
+  // vc_redact drops them.
+  std::vector<std::string> droppedStreams() const;
+  // Called from next() with each packet of an audio stream, in demux order. The packet is only
+  // valid during the call; an exception thrown by the sink propagates out of next().
+  void setAudioSink(std::function<void(const AVPacket&)> sink);
 
   // Next frame, or nullptr at end of stream. The pointer and its AVFrame stay
   // valid until the next call. Throws VcError on unrecoverable errors.

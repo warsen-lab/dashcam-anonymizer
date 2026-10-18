@@ -23,6 +23,14 @@ std::filesystem::path staticThenNoiseVideo();
 std::filesystem::path tenBitVideo();
 // 1 s AAC audio, no video stream.
 std::filesystem::path audioOnlyFile();
+// 2 s, 640x360 @ 30 fps H.264 (60 frames) with 2 s of AAC audio.
+std::filesystem::path videoWithAudio();
+// 1 s, 320x240 @ 30 fps H.264 with a mov_text subtitle stream.
+std::filesystem::path videoWithSubtitles();
+// Number of streams of `type` in a media file (opened with libavformat).
+int streamCount(const std::filesystem::path& path, AVMediaType type);
+// Duration in seconds of the first stream of `type`, from the container.
+double streamDurationSec(const std::filesystem::path& path, AVMediaType type);
 
 // Frame whose luma bytes are all y and chroma bytes u / v (8-bit planar YUV or NV12), limited range.
 av::FramePtr makeFrame(int width, int height, AVPixelFormat format, uint8_t y, uint8_t u, uint8_t v);
