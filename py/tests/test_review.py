@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from vc_label.contracts import Box, FrameRef, read_frames_csv
-from vc_label.review import ensure_outside, import_review, labelme_document, write_review_queue
+from vc_label.review import REVIEWED_FLAG, SCENE_FLAGS, ensure_outside, import_review, labelme_document, read_labelme_boxes, write_review_queue
 from vc_label.rules import Flag
 
 
@@ -29,7 +29,8 @@ def test_labelme_document_points_back_to_the_frame(tmp_path):
 
     assert doc["imagePath"] == "../../frames/trip/000007.jpg"
     assert (doc["imageWidth"], doc["imageHeight"], doc["imageData"]) == (1920, 1080, None)
-    assert doc["flags"] == {"day": False, "night": False, "rain": False, "tunnel": False, "city": False, "highway": False}
+    assert doc["flags"] == {"reviewed": False, "day": False, "night": False, "rain": False, "tunnel": False, "city": False, "highway": False}
+    assert list(doc["flags"]) == [REVIEWED_FLAG, *SCENE_FLAGS]  # the review checkbox comes first
     [shape] = doc["shapes"]
     assert shape["label"] == "face" and shape["shape_type"] == "rectangle"
     assert shape["points"] == [[10, 20], [30, 50]]
@@ -50,17 +51,26 @@ def test_review_queue_lists_most_flagged_frames_first(tmp_path):
     assert rows[2][:2] == ["v.mp4", "5"]
 
 
-def _frames_dir(tmp_path: Path) -> Path:
+def _frames_dir(tmp_path: Path, frames_numbers=(7,)) -> Path:
     frames = tmp_path / "frames" / "trip"
     frames.mkdir(parents=True)
-    (frames / "frames.csv").write_text("video,frame,pts_ms,reason,motion_score\ntrip.mp4,7,116.7,base,0\n")
+    rows = ["video,frame,pts_ms,reason,motion_score"] + [f"trip.mp4,{n},{n * 16.7:.1f},base,0" for n in frames_numbers]
+    (frames / "frames.csv").write_text("\n".join(rows) + "\n")
     return frames
 
 
-def _review_json(review: Path, shapes: list[dict], flags: dict) -> None:
-    review.mkdir(parents=True)
-    doc = {"version": "5.4.1", "flags": flags, "shapes": shapes, "imagePath": "x.jpg", "imageData": None, "imageHeight": 100, "imageWidth": 200}
-    (review / "000007.json").write_text(json.dumps(doc))
+def _review_json(review: Path, shapes: list[dict], flags: dict, frame: int = 7, reviewed: bool = True) -> None:
+    review.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "version": "5.4.1",
+        "flags": {REVIEWED_FLAG: reviewed, **flags},
+        "shapes": shapes,
+        "imagePath": "x.jpg",
+        "imageData": None,
+        "imageHeight": 100,
+        "imageWidth": 200,
+    }
+    (review / f"{frame:06d}.json").write_text(json.dumps(doc))
 
 
 def test_import_review_writes_gold_yolo_and_scene_tags(tmp_path):
@@ -80,8 +90,8 @@ def test_import_review_writes_gold_yolo_and_scene_tags(tmp_path):
     with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
     assert rows == [
-        ["image", "video", "frame", "scene_tags"],
-        ["000007.jpg", "trip.mp4", "7", "city;day"],
+        ["image", "video", "frame", "reviewed", "scene_tags"],
+        ["000007.jpg", "trip.mp4", "7", "true", "city;day"],
     ]
 
 
@@ -136,6 +146,7 @@ def test_export_then_import_round_trip(tmp_path):
     ]
     review.mkdir(parents=True)
     doc = labelme_document(ref, boxes, [], review, 200, 100)
+    doc["flags"][REVIEWED_FLAG] = True  # what the human does when the frame is done
     (review / "000007.json").write_text(json.dumps(doc), encoding="utf-8")
 
     assert import_review(review, read_frames_csv(frames), gold) == 1
@@ -144,3 +155,77 @@ def test_export_then_import_round_trip(tmp_path):
         "0 0.100000 0.350000 0.100000 0.300000",
         "1 0.600000 0.650000 0.200000 0.100000",
     ]
+
+
+def test_import_review_rejects_unreviewed_frames_and_writes_nothing(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [], {}, frame=7, reviewed=True)
+    _review_json(review, [], {}, frame=8, reviewed=False)
+
+    with pytest.raises(ValueError, match=r"1 of 2 frames are not marked reviewed.*\b8\b.*--allow-unreviewed"):
+        import_review(review, read_frames_csv(frames), gold)
+
+    assert not gold.exists()
+
+
+def test_import_review_lists_at_most_twenty_unreviewed_frames(tmp_path):
+    numbers = tuple(range(1, 31))
+    frames, review = _frames_dir(tmp_path, numbers), tmp_path / "review"
+    for n in numbers:
+        _review_json(review, [], {}, frame=n, reviewed=False)
+
+    with pytest.raises(ValueError) as excinfo:
+        import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+    message = str(excinfo.value)
+    assert "30 of 30 frames are not marked reviewed" in message
+    assert "20" in message and "21" not in message.split("--allow")[0]  # only the first twenty are listed
+    assert "10 more" in message
+
+
+def test_import_review_can_pass_unreviewed_frames_through_as_pre_labels(tmp_path):
+    frames, review, gold = _frames_dir(tmp_path, (7, 8)), tmp_path / "review", tmp_path / "gold"
+    _review_json(review, [], {"day": True}, frame=7, reviewed=True)
+    _review_json(review, [], {"night": True}, frame=8, reviewed=False)
+
+    assert import_review(review, read_frames_csv(frames), gold, allow_unreviewed=True) == 2
+
+    with (gold / "gold_meta.csv").open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    assert rows == [
+        ["image", "video", "frame", "reviewed", "scene_tags"],
+        ["000007.jpg", "trip.mp4", "7", "true", "day"],
+        ["000008.jpg", "trip.mp4", "8", "false", "night"],
+    ]
+
+
+def test_read_labelme_boxes_reports_reviewed_apart_from_scene_tags(tmp_path):
+    review = tmp_path / "review"
+    _review_json(review, [], {"day": True, "rain": False})
+
+    boxes, tags, reviewed, width, height = read_labelme_boxes(review / "000007.json")
+
+    assert (boxes, tags, reviewed, width, height) == ([], ["day"], True, 200, 100)
+    assert REVIEWED_FLAG not in tags
+
+
+def test_read_labelme_boxes_without_a_reviewed_flag_is_unreviewed(tmp_path):
+    review = tmp_path / "review"
+    _review_json(review, [], {})
+    path = review / "000007.json"
+    doc = json.loads(path.read_text())
+    del doc["flags"][REVIEWED_FLAG]
+    path.write_text(json.dumps(doc))
+
+    assert read_labelme_boxes(path)[2] is False
+
+
+def test_import_review_rejects_an_unknown_true_flag_but_ignores_a_false_one(tmp_path):
+    frames, review = _frames_dir(tmp_path), tmp_path / "review"
+    _review_json(review, [], {"snow": True})
+
+    with pytest.raises(ValueError, match=r"000007\.json.*'snow'"):
+        import_review(review, read_frames_csv(frames), tmp_path / "gold")
+
+    _review_json(review, [], {"snow": False})
+    assert import_review(review, read_frames_csv(frames), tmp_path / "gold") == 1

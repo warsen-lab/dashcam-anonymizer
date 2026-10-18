@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--frames", type=Path, required=True)
     imp.add_argument("--review", type=Path, required=True)
     imp.add_argument("--gold", type=Path, required=True, help="gold label dir, outside --frames")
+    imp.add_argument("--allow-unreviewed", action="store_true", help="also import frames without the 'reviewed' flag (training videos only)")
     return parser
 
 
@@ -77,7 +78,7 @@ def _run(args: argparse.Namespace) -> str:
         if getattr(args, name, None) is not None:
             ensure_outside(args.frames, getattr(args, name))
     if args.command == "import-review":
-        count = import_review(args.review, read_frames_csv(args.frames), args.gold)
+        count = import_review(args.review, read_frames_csv(args.frames), args.gold, allow_unreviewed=args.allow_unreviewed)
         return f"import-review: {count} gold frames in {args.gold}"
 
     cfg = LabelingConfig.from_json(args.config) if args.config else LabelingConfig()

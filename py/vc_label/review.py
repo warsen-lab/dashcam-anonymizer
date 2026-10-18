@@ -12,6 +12,7 @@ from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, to_yolo_lines
 from vc_label.rules import Flag
 
 SCENE_FLAGS = ("day", "night", "rain", "tunnel", "city", "highway")
+REVIEWED_FLAG = "reviewed"
 LABELME_VERSION = "5.4.1"
 
 
@@ -40,7 +41,7 @@ def labelme_document(ref: FrameRef, boxes: list[Box], flags: list[Flag], review_
     ]
     return {
         "version": LABELME_VERSION,
-        "flags": {name: False for name in SCENE_FLAGS},
+        "flags": {REVIEWED_FLAG: False, **{name: False for name in SCENE_FLAGS}},
         "shapes": shapes,
         "imagePath": os.path.relpath(ref.image.resolve(), review_dir.resolve()),
         "imageData": None,
@@ -66,8 +67,12 @@ def write_review_queue(path: Path, flags: list[Flag]) -> None:
             writer.writerow([video, frame, len(frame_flags), rules, where])
 
 
-def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], int, int]:
-    """(boxes, true scene flags, width, height). Non-rectangles, unknown labels and empty boxes are errors."""
+def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], bool, int, int]:
+    """(boxes, true scene flags, reviewed, width, height).
+
+    `reviewed` is the human's "this frame is done" checkbox and is never part of the scene tags.
+    Non-rectangles, unknown labels, empty boxes and unknown true image-level flags are errors.
+    """
     doc = json.loads(path.read_text(encoding="utf-8"))
     width, height = int(doc["imageWidth"]), int(doc["imageHeight"])
     boxes = []
@@ -86,26 +91,49 @@ def read_labelme_boxes(path: Path) -> tuple[list[Box], list[str], int, int]:
         if box.area <= 0:
             raise ValueError(f"{path}: shape {i} {label!r} is empty after clipping to the image")
         boxes.append(box)
-    tags = sorted(name for name, on in doc.get("flags", {}).items() if on)
-    return boxes, tags, width, height
+    flags = doc.get("flags") or {}
+    if not isinstance(flags, dict):
+        raise ValueError(f"{path}: image-level flags must be an object, got {type(flags).__name__}")
+    on = [name for name, value in flags.items() if value]
+    for name in on:
+        if name != REVIEWED_FLAG and name not in SCENE_FLAGS:
+            raise ValueError(f"{path}: unknown image flag {name!r} (expected {REVIEWED_FLAG!r} or one of {SCENE_FLAGS})")
+    return boxes, sorted(name for name in on if name in SCENE_FLAGS), REVIEWED_FLAG in on, width, height
 
 
-def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path) -> int:
-    """Converts reviewed LabelMe JSONs to gold YOLO labels plus gold_meta.csv; returns frame count."""
+MAX_LISTED_FRAMES = 20
+
+
+def import_review(review_dir: Path, refs: list[FrameRef], gold_dir: Path, allow_unreviewed: bool = False) -> int:
+    """Converts reviewed LabelMe JSONs to gold YOLO labels plus gold_meta.csv; returns frame count.
+
+    Every frame must carry the `reviewed` checkbox unless `allow_unreviewed` (training videos only:
+    their pre-labels pass through, recorded as reviewed=false in gold_meta.csv).
+    """
     by_name = {f"{r.frame:06d}": r for r in refs}
-    yolo_dir = gold_dir / "yolo"
-    yolo_dir.mkdir(parents=True, exist_ok=True)
-    rows = []
+    parsed = []
     for path in sorted(review_dir.glob("*.json")):
         ref = by_name.get(path.stem)
         if ref is None:
             raise ValueError(f"{path}: no frame {path.stem} in frames.csv")
-        boxes, tags, width, height = read_labelme_boxes(path)
+        parsed.append((ref, *read_labelme_boxes(path)))
+    pending = [ref.frame for ref, _, _, reviewed, _, _ in parsed if not reviewed]
+    if pending and not allow_unreviewed:
+        listed = ", ".join(str(n) for n in pending[:MAX_LISTED_FRAMES])
+        more = f" (+{len(pending) - MAX_LISTED_FRAMES} more)" if len(pending) > MAX_LISTED_FRAMES else ""
+        raise ValueError(
+            f"{len(pending)} of {len(parsed)} frames are not marked reviewed: {listed}{more}; "
+            f"tick 'reviewed' in X-AnyLabeling or pass --allow-unreviewed (training videos only)"
+        )
+    yolo_dir = gold_dir / "yolo"
+    yolo_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for ref, boxes, tags, reviewed, width, height in parsed:
         yolo_text = "".join(f"{line}\n" for line in to_yolo_lines(boxes, width, height))
-        (yolo_dir / f"{path.stem}.txt").write_text(yolo_text, encoding="utf-8")
-        rows.append([ref.image.name, ref.video, ref.frame, ";".join(tags)])
+        (yolo_dir / f"{ref.frame:06d}.txt").write_text(yolo_text, encoding="utf-8")
+        rows.append([ref.image.name, ref.video, ref.frame, "true" if reviewed else "false", ";".join(tags)])
     with (gold_dir / "gold_meta.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["image", "video", "frame", "scene_tags"])
+        writer.writerow(["image", "video", "frame", "reviewed", "scene_tags"])
         writer.writerows(rows)
     return len(rows)

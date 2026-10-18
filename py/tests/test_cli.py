@@ -122,3 +122,18 @@ def test_export_review_keeps_existing_files_unless_forced(tmp_path, capsys):
 
     assert main([*argv, "--force"]) == 0
     assert f"export-review: 1 new LabelMe files, 0 kept in {review}" in capsys.readouterr().out
+
+
+def test_import_review_needs_reviewed_frames_unless_allowed(tmp_path, capsys):
+    frames, labels = _labelled(tmp_path)
+    review, gold = tmp_path / "review", tmp_path / "gold"
+    assert main(["export-review", "--frames", str(frames), "--labels", str(labels), "--review", str(review)]) == 0
+    capsys.readouterr()
+    argv = ["import-review", "--frames", str(frames), "--review", str(review), "--gold", str(gold)]
+
+    assert main(argv) == 2
+    assert "not marked reviewed: 0" in capsys.readouterr().err
+    assert not gold.exists()
+
+    assert main([*argv, "--allow-unreviewed"]) == 0
+    assert f"import-review: 1 gold frames in {gold}" in capsys.readouterr().out
