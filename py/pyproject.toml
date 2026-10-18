@@ -1,0 +1,12 @@
+[project]
+name = "vc-label"
+version = "0.1.0"
+description = "Teacher pre-labelling, rule flags and human review round trip for dashcam redaction"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "models: needs the cached teacher weights and the sg_drive_600s sample frames",
+]
