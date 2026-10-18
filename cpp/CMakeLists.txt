@@ -18,6 +18,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(FFmpeg REQUIRED)
+include(ThirdParty)
 
 add_library(vc_core STATIC
   src/common/vc_error.cpp
@@ -30,6 +31,13 @@ add_library(vc_core STATIC
 )
 target_include_directories(vc_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)
+
+add_library(vc_detect_lib STATIC
+  src/detect/fake_detector.cpp
+  src/detect/model_info.cpp
+  src/detect/yolo_decode.cpp
+)
+target_link_libraries(vc_detect_lib PUBLIC vc_core vc_nlohmann_json)
 
 add_library(vc_extract_lib STATIC
   apps/vc_extract/extract_cli.cpp
