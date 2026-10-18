@@ -22,16 +22,26 @@ MATCH_IOU = 0.5
 
 @dataclass(frozen=True)
 class ConsistencyReport:
+    """`max_diff_px` is the largest corner difference over matched pairs whose C++ box scores >= CONFIDENT; it is the gated
+    figure. Low-score boxes sit next to the threshold and may legitimately move between runtimes, so they only show up in
+    `max_diff_all_px`, the largest difference over every matched pair."""
+
     images: int
     boxes: int
     matched: int
     max_diff_px: float
     unmatched_confident: int
     unmatched_low: int
+    max_diff_all_px: float = 0.0
+    matched_confident: int = 0
 
     def passed(self, tol_px: float = 1.0) -> bool:
-        # no images or no matched boxes is no evidence of agreement, however empty the unmatched counts are
-        return self.images > 0 and self.matched > 0 and self.unmatched_confident == 0 and self.max_diff_px < tol_px
+        # no images or no confident matched pair is no evidence of agreement (a gate over zero pairs reads 0.0 px),
+        # however empty the unmatched counts are
+        return (
+            self.images > 0 and self.matched > 0 and self.matched_confident > 0
+            and self.unmatched_confident == 0 and self.max_diff_px < tol_px
+        )
 
 
 def python_detections(model_dir: Path, refs: list[FrameRef], score: float = 0.15, iou_threshold: float = 0.5) -> dict[int, list[Box]]:
@@ -54,8 +64,8 @@ def python_detections(model_dir: Path, refs: list[FrameRef], score: float = 0.15
 
 def compare_detections(cpp: dict[int, list[Box]], py: dict[int, list[Box]]) -> ConsistencyReport:
     frames = sorted(set(cpp) | set(py))
-    boxes = matched = confident = low = 0
-    worst = 0.0
+    boxes = matched = matched_confident = confident = low = 0
+    worst = worst_all = 0.0
     for frame in frames:
         remaining = list(py.get(frame, []))
         for box in cpp.get(frame, []):
@@ -67,10 +77,14 @@ def compare_detections(cpp: dict[int, list[Box]], py: dict[int, list[Box]]) -> C
                 continue
             remaining.remove(match)
             matched += 1
-            worst = max(worst, *(abs(p - q) for p, q in zip((box.x1, box.y1, box.x2, box.y2), (match.x1, match.y1, match.x2, match.y2))))
+            diff = max(abs(p - q) for p, q in zip((box.x1, box.y1, box.x2, box.y2), (match.x1, match.y1, match.x2, match.y2)))
+            worst_all = max(worst_all, diff)
+            if box.score >= CONFIDENT:
+                matched_confident += 1
+                worst = max(worst, diff)
         for box in remaining:
             confident, low = (confident + 1, low) if box.score >= CONFIDENT else (confident, low + 1)
-    return ConsistencyReport(len(frames), boxes, matched, worst, confident, low)
+    return ConsistencyReport(len(frames), boxes, matched, worst, confident, low, worst_all, matched_confident)
 
 
 def run_vc_detect(

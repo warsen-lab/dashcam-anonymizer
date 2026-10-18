@@ -147,3 +147,28 @@ def test_run_vc_detect_turns_a_failed_run_into_a_value_error_with_its_stderr(tmp
 
     with pytest.raises(ValueError, match="bad magic number"):
         run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "work", runner=failing_runner)
+
+
+def test_the_max_diff_gate_applies_to_confident_pairs_and_all_pairs_are_reported_separately():
+    cpp = {0: [Box("face", 10, 10, 20, 20, score=0.9), Box("plate", 50, 50, 70, 60, score=0.2)]}
+    py = {0: [Box("face", 10.4, 10, 20, 20.2, score=0.9), Box("plate", 53, 50, 73, 60, score=0.2)]}  # the low-score plate moved 3 px
+    r = compare_detections(cpp, py)
+    assert (r.matched, r.matched_confident) == (2, 1)
+    assert r.max_diff_px == pytest.approx(0.4)  # gated: the confident face only
+    assert r.max_diff_all_px == pytest.approx(3.0)  # reported: both pairs
+    assert r.passed()
+
+
+def test_a_confident_pair_off_by_a_pixel_fails_whatever_the_low_score_pairs_do():
+    cpp = {0: [Box("face", 10, 10, 20, 20, score=0.9)]}
+    r = compare_detections(cpp, {0: [Box("face", 11.5, 10, 21.5, 20, score=0.9)]})
+    assert r.max_diff_px == pytest.approx(1.5) and r.max_diff_all_px == pytest.approx(1.5) and not r.passed()
+
+
+def test_only_low_score_pairs_matched_is_no_evidence_of_agreement():
+    cpp = {0: [Box("plate", 50, 50, 70, 60, score=0.2)]}
+    r = compare_detections(cpp, {0: [Box("plate", 50, 50, 70, 60, score=0.2)]})
+    assert (r.matched, r.matched_confident, r.unmatched_confident) == (1, 0, 0)
+    assert r.max_diff_px == 0.0 and not r.passed()  # nothing confident was compared: the 0.0 is not a measurement
+    assert not ConsistencyReport(1, 1, 1, 0.0, 0, 0, max_diff_all_px=0.0, matched_confident=0).passed()
+    assert ConsistencyReport(1, 1, 1, 0.5, 0, 0, max_diff_all_px=0.5, matched_confident=1).passed()

@@ -110,6 +110,7 @@ def _fake_runner(calls, masks=(MASK, PLATE_MASK), dense=(FACE,)):
                 f.write(json.dumps({"video": video.name, "frame": fr, "boxes": masks_of(video.stem, fr)}) + "\n")
         write_jsonl(d / "detections.jsonl", [Detection(video.name, fr, fr * 33.3, box) for fr in range(N) for box in dense])
         (d / "stats.json").write_text(json.dumps({
+            "frames": N, "detect_every_frame": "--detect-every-frame" in cmd,
             "detector": "student/CPU", "encoder": "libx264", "elapsed_s": 1.5,
             "stages": {s: {"busy_s": 0.1, "items": N, "fps": 300.0} for s in ("decode", "detect", "track", "mosaic", "encode")},
         }))
@@ -486,6 +487,44 @@ def test_cli_run_reports_a_failing_vc_redact_as_exit_2(tmp_path, monkeypatch, ca
     assert err.startswith("vc_eval:") and "boom" in err
 
 
+def test_a_dense_run_that_did_not_detect_every_frame_cannot_be_the_temporal_reference(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    fake = _fake_runner([])
+
+    def sparse_in_disguise(cmd, check, capture_output, text):
+        fake(cmd, check, capture_output, text)
+        if "--detect-every-frame" in cmd:
+            stats = Path(cmd[cmd.index("--out") + 1]) / STEM / "stats.json"
+            stats.write_text(json.dumps({**json.loads(stats.read_text()), "detect_every_frame": False}))
+
+    with pytest.raises(ValueError, match="detect_every_frame"):
+        run_all(_cfg(tmp_path), runner=sparse_in_disguise)
+
+
+def test_consistency_line_separates_the_gated_difference_from_the_one_over_all_pairs(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    import vc_eval.run as run_module
+
+    low = Box("plate", 50, 50, 70, 60, score=0.2, src="student")
+    moved = Box("plate", 53, 50, 73, 60, score=0.2, src="student")
+    monkeypatch.setattr(run_module, "python_detections", lambda model, refs: {r.frame: [FACE, moved] for r in refs})
+    fake = _fake_runner([])
+
+    def detect_with_a_low_plate(cmd, check, capture_output, text):
+        fake(cmd, check, capture_output, text)
+        if cmd[0].endswith("vc_detect"):
+            out = Path(cmd[cmd.index("--out") + 1])
+            rows = _rows(f"{cmd[cmd.index('--frames') + 1]}/frames.csv")
+            write_jsonl(out, [Detection(r["video"], int(r["frame"]), float(r["pts_ms"]), b) for r in rows for b in (FACE, low)])
+
+    summary = run_all(_cfg(tmp_path), runner=detect_with_a_low_plate)
+    c = summary["consistency"]
+    assert c["max_diff_px"] == 0.0 and c["max_diff_all_px"] == pytest.approx(3.0) and c["matched_confident"] == 3 and c["passed"] is True
+    line = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## C++ / Python 一致性")[1]
+    assert "分数 ≥ 0.3 的配对最大坐标差 0.000 px" in line and "所有配对最大坐标差 3.000 px" in line
+
+
 def test_consistency_frames_are_spread_over_the_whole_segment(tmp_path, monkeypatch):
     _setup(tmp_path)
     _python_dets(monkeypatch)
@@ -650,8 +689,10 @@ def test_cli_coverage_reports_the_low_confidence_tier_without_judging_it(tmp_pat
 
 def test_cli_temporal_and_integrity(tmp_path, capsys):
     video = _setup(tmp_path)
-    dense = tmp_path / "dense.jsonl"
+    dense = tmp_path / "dense" / "detections.jsonl"
+    dense.parent.mkdir()
     write_jsonl(dense, [Detection(f"{STEM}.mp4", fr, fr * 33.3, FACE) for fr in range(N)])
+    (dense.parent / "stats.json").write_text(json.dumps({"frames": N, "detect_every_frame": True}))
     sparse = tmp_path / "sparse.jsonl"
     with sparse.open("w") as f:
         for fr in range(N):

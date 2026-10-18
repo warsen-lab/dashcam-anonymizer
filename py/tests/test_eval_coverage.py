@@ -53,6 +53,13 @@ def _labels(root, stem, boxes_by_frame, flags=()):
     return d
 
 
+def _dense_stats(dense, frames, every=True):
+    """The stats.json vc_redact writes next to detections.jsonl; a --detect-every-frame run says so and counts its frames."""
+    stats = dense.parent / "stats.json"
+    stats.write_text(json.dumps({"frames": frames, "detect_every_frame": every}))
+    return stats
+
+
 def _cell_targets():
     """30 must-mask faces packed into heatmap cell (row 0, col 0) of a 1920x1080 frame: 6 columns x 5 rows."""
     return [Box("face", 10 + 50 * c, 10 + 50 * r, 50 + 50 * c, 50 + 50 * r, src="teacher_retinaface") for r in range(5) for c in range(6)]
@@ -235,6 +242,7 @@ def test_temporal_coverage_uses_dense_detections_as_reference(tmp_path):
         ],
     )
     sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)], 1: [Box("face", 95, 95, 125, 135)]}, [0, 1, 2])
+    _dense_stats(dense, 3)
     r = evaluate_temporal(dense, sparse, 1080)
     assert r.video == "a.mp4" and r.frames == 3
     assert (r.classes["face"].hits, r.classes["face"].total) == (2, 2)
@@ -252,6 +260,7 @@ def test_temporal_refuses_masks_of_another_video(tmp_path):
     dense = tmp_path / "dense.jsonl"
     write_jsonl(dense, [Detection("a.mp4", 0, 0.0, Box("face", 100, 100, 120, 130, score=0.9, src="student"))])
     sparse = _masks(tmp_path / "sparse.jsonl", "b.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0])
+    _dense_stats(dense, 1)
     with pytest.raises(ValueError, match="different videos"):
         evaluate_temporal(dense, sparse, 1080)
 
@@ -260,6 +269,7 @@ def test_temporal_refuses_a_dense_frame_without_a_masks_line(tmp_path):
     dense = tmp_path / "dense.jsonl"
     write_jsonl(dense, [Detection("a.mp4", 5, 83.5, Box("face", 100, 100, 120, 130, score=0.9, src="student"))])
     sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0])
+    _dense_stats(dense, 6)
     with pytest.raises(ValueError, match="frame 5"):
         evaluate_temporal(dense, sparse, 1080)
 
@@ -268,6 +278,7 @@ def test_temporal_takes_the_video_from_masks_when_dense_is_empty(tmp_path):
     dense = tmp_path / "dense.jsonl"
     dense.write_text("")
     sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {}, [0, 1])
+    _dense_stats(dense, 2)
     r = evaluate_temporal(dense, sparse, 1080)
     assert (r.video, r.frames, r.misses) == ("a.mp4", 2, [])
 
@@ -279,6 +290,7 @@ def test_temporal_refuses_an_empty_dense_file_with_masks_of_several_videos(tmp_p
     sparse.write_text(
         json.dumps({"video": "a.mp4", "frame": 0, "boxes": []}) + "\n" + json.dumps({"video": "b.mp4", "frame": 1, "boxes": []}) + "\n"
     )
+    _dense_stats(dense, 2)
     with pytest.raises(ValueError, match="a.mp4, b.mp4"):
         evaluate_temporal(dense, sparse, 1080)
 
@@ -288,8 +300,80 @@ def test_temporal_refuses_an_empty_masks_file(tmp_path):
     dense.write_text("")
     sparse = tmp_path / "sparse.jsonl"
     sparse.write_text("")
+    _dense_stats(dense, 1)
     with pytest.raises(ValueError, match="no frames"):
         evaluate_temporal(dense, sparse, 1080)
+
+
+def _dense_with_one_face(tmp_path):
+    dense = tmp_path / "dense" / "detections.jsonl"
+    dense.parent.mkdir()
+    write_jsonl(dense, [Detection("a.mp4", 0, 0.0, Box("face", 100, 100, 120, 130, score=0.9, src="student"))])
+    return dense
+
+
+def test_temporal_refuses_a_dense_run_without_stats_json(tmp_path):
+    dense = _dense_with_one_face(tmp_path)
+    sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0])
+    with pytest.raises(ValueError, match=r"stats\.json does not exist"):
+        evaluate_temporal(dense, sparse, 1080)
+
+
+@pytest.mark.parametrize(
+    "stats, message",
+    [
+        ({"frames": 1, "detect_every_frame": False}, "detect_every_frame"),  # a sparse run is no per-frame reference
+        ({"frames": 1}, "detect_every_frame"),
+        ({"frames": 1, "detect_every_frame": 1}, "detect_every_frame"),  # truthy is not true
+        ({"detect_every_frame": True}, "frames"),
+        ({"frames": 0, "detect_every_frame": True}, "frames"),
+        ({"frames": "1", "detect_every_frame": True}, "frames"),
+        ({"frames": True, "detect_every_frame": True}, "frames"),
+        ([1], "detect_every_frame"),
+    ],
+)
+def test_temporal_refuses_a_dense_run_that_is_not_a_complete_every_frame_run(tmp_path, stats, message):
+    dense = _dense_with_one_face(tmp_path)
+    sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0])
+    (dense.parent / "stats.json").write_text(json.dumps(stats))
+    with pytest.raises(ValueError, match=message) as info:
+        evaluate_temporal(dense, sparse, 1080)
+    assert "stats.json" in str(info.value)
+
+
+def test_temporal_refuses_a_stats_json_that_is_not_json(tmp_path):
+    dense = _dense_with_one_face(tmp_path)
+    sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0])
+    (dense.parent / "stats.json").write_text("{not json")
+    with pytest.raises(ValueError, match=r"stats\.json"):
+        evaluate_temporal(dense, sparse, 1080)
+
+
+def test_temporal_needs_masks_for_every_frame_of_the_dense_run_not_just_the_detected_ones(tmp_path):
+    dense = _dense_with_one_face(tmp_path)  # a detection in frame 0 only; the run had 5 frames
+    _dense_stats(dense, 5)
+    short = _masks(tmp_path / "short.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0, 1, 2])
+    with pytest.raises(ValueError, match=r"frames 3, 4"):
+        evaluate_temporal(dense, short, 1080)
+    gap = _masks(tmp_path / "gap.jsonl", "a.mp4", {}, [0, 1, 3, 4])
+    with pytest.raises(ValueError, match=r"frames 2"):
+        evaluate_temporal(dense, gap, 1080)
+
+
+def test_temporal_refuses_masks_of_a_longer_video_than_the_dense_run(tmp_path):
+    dense = _dense_with_one_face(tmp_path)
+    _dense_stats(dense, 2)
+    long = _masks(tmp_path / "long.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0, 1, 2, 3])
+    with pytest.raises(ValueError, match=r"beyond.*frames 2, 3"):
+        evaluate_temporal(dense, long, 1080)
+
+
+def test_temporal_accepts_masks_covering_exactly_the_frames_of_the_dense_run(tmp_path):
+    dense = _dense_with_one_face(tmp_path)
+    _dense_stats(dense, 4)
+    sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0, 1, 2, 3])
+    r = evaluate_temporal(dense, sparse, 1080)
+    assert r.frames == 4 and (r.classes["face"].hits, r.classes["face"].total) == (1, 1)
 
 
 def test_coverage_refuses_a_missing_processed_file(tmp_path):

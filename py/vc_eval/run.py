@@ -370,7 +370,9 @@ def _summary_md(summary: dict) -> str:
         "",
         "## C++ / Python 一致性",
         "",
-        f"{c['images']} 张图、{c['boxes']} 个框，配上 {c['matched']} 个，最大坐标差 {c['max_diff_px']:.3f} px，"
+        f"{c['images']} 张图、{c['boxes']} 个框，配上 {c['matched']} 个（其中分数 ≥ 0.3 的 {c['matched_confident']} 个）。"
+        f"分数 ≥ 0.3 的配对最大坐标差 {c['max_diff_px']:.3f} px（门槛 < 1 px，判定只看这一项）；"
+        f"所有配对最大坐标差 {c['max_diff_all_px']:.3f} px（含低分框，只报告，贴着阈值的低分框在两个运行时之间本来就会有出入）；"
         f"未配上（分数 ≥ 0.3）{c['unmatched_confident']} 个、（< 0.3）{c['unmatched_low']} 个：{'通过' if c['passed'] else '未通过'}。",
         "",
     ]

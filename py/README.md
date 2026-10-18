@@ -205,8 +205,8 @@ PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <�
 ```
 
 - `--fps 5,10,15,30`（默认）：要扫描的检测频率，每个值必须是有限数且 ≥ 5，不能重复；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。
-- 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 和 `flags.csv` 在且都不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（缺 `vc_detect` 或模型坏了在这里就停），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
-- 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
+- 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 和 `flags.csv` 在且都不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（缺 `vc_detect` 或模型坏了在这里就停；判定只看分数 ≥ 0.3 的配对：它们的最大角点差必须 < 1 px，至少要有一个这样的配对，没有分数 ≥ 0.3 却没配上的框；所有配对的最大差（含低分框）单独列出，只报告），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
+- 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照；时间覆盖率只在那次运行的 `stats.json` 写着 `"detect_every_frame": true`、且稀疏运行的 `masks.jsonl` 恰好覆盖第 0 到 `frames-1` 帧时才计算，缺 `stats.json`、帧数对不上都直接报错），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
 - 选定频率 = 合并覆盖率（所有留出段的目标数相加后判 P1 / P2）通过、且每一段的输出完整性（P3）都通过的最小频率；没有就显示“无满足 P1–P3 的频率”，抽查页改用最小的频率。`summary.md` 的覆盖率表每个频率先列各段、再列一行“合计”，“通过”一栏只在“合计”行，各段行仅供参考；紧接着的“低置信参照”表同样先各段后合计，只报告；`summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed` 和 `passed`）。
 - 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、时间覆盖率、完整性、误打面积、速度（标题注明段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。`--out` 和 `data/redacted` 都不能放在抽帧根目录 `data/frames/` 之下的任何位置（包括没有用 `--stems` 列出的段，那些目录会被 `vc_extract --overwrite` 整个删掉）；`--out` 也不能等于或包含 `data/frames`、`data/labels`、`data/videos`、`data/redacted`、模型目录、两个可执行文件和配置文件，也不能落在 `data/redacted/dense` 或 `data/redacted/fps<频率>` 里（`vc_redact` 写那里）。
 - `--out` 已存在且非空时直接拒绝（退出码 2）；加 `--overwrite` 才会在检查完所有输入之后先清空它（只清里面的内容，输入有问题时旧报告原样保留）。一次中途失败的运行会留下文件，重跑要加 `--overwrite`。
@@ -227,7 +227,7 @@ PYTHONPATH=py .venv/bin/python -m vc_eval temporal --dense data/redacted/dense/<
 PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source data/videos/<stem>.mp4 --redacted data/redacted/fps5/<stem>/<stem>.redacted.mp4 [--json out.json]
 ```
 
-各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
+各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`temporal` 要求 `--dense` 指向的 `detections.jsonl` 旁边有该次运行的 `stats.json`，写着 `"detect_every_frame": true` 和总帧数，且 `--sparse` 恰好覆盖第 0 到 `frames-1` 帧。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
 
 ### vc_eval 的测试
 
