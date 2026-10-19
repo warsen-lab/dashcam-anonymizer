@@ -30,8 +30,8 @@ def _parser() -> argparse.ArgumentParser:
     i.add_argument("--json", type=Path)
     v = sub.add_parser("viewing", help="masked area, flicker and boxes per frame of a masks.jsonl (every frame)")
     v.add_argument("--masks", type=Path, required=True)
-    v.add_argument("--width", type=int, required=True, help="frame width of the video in px")
-    v.add_argument("--height", type=int, required=True, help="frame height of the video in px")
+    v.add_argument("--width", type=int, required=True, help="frame width of the video in px (display size if it is rotated)")
+    v.add_argument("--height", type=int, required=True, help="frame height of the video in px (display size if it is rotated)")
     v.add_argument("--json", type=Path)
     r = sub.add_parser("run", help="detection-rate sweep, summary and spot-check page")
     r.add_argument("--stems", required=True, help="comma-separated held-out stems")
@@ -111,7 +111,7 @@ def _integrity(args) -> int:
 def _viewing(args) -> int:
     from vc_eval.viewing import evaluate_viewing, summary_line, viewing_json
 
-    r = evaluate_viewing(args.masks, args.width, args.height)
+    r = evaluate_viewing(args.masks, args.width, args.height, require_inside=True)
     print(summary_line(r))
     _write_json(args.json, viewing_json(r))
     return 0

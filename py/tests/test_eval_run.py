@@ -640,6 +640,23 @@ def test_the_viewing_metrics_of_every_run_go_into_the_summary(tmp_path, monkeypa
     assert "1/4" in section and "1%" in section
 
 
+def test_the_summary_keeps_the_area_on_screen_apart_from_the_area_of_the_boxes(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    # with a block the mosaic pixelates the box snapped to the block grid: x 32..80, y 16..80 and x 80..160, y 64..112
+    masks = (dict(MASK, block=16), dict(PLATE_MASK, block=16))
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=masks))
+    for viewing in (summary["runs"][0]["viewing"], summary["pooled"][0]["viewing"]):
+        assert viewing["area"]["mean"] == pytest.approx((192 + 240) / 1200)
+        assert viewing["box_area"] == {
+            "mean": pytest.approx(0.2025), "p95": pytest.approx(0.2025), "p99": pytest.approx(0.2025), "max": pytest.approx(0.2025),
+        }
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 观感")[1].split("\n## ")[0]
+    assert "| seg | 5 | 36.00% | 36.00% | 36.00% | 36.00% | 0.0%（0/29） | 2 | 2 | — |" in section
+    assert "| seg | 5 | 20.25% | 20.25% | 20.25% | 20.25% |" in section.split("框并集", 1)[1]
+    assert "对齐" in section and "旧基线" in section
+
+
 SPEED_HEADER = "| 段 | fps | 准备 | 解码 | 主线程 | 编码 | 检测（关键帧） | 补框 | 打码 | 总耗时 | 吞吐 |"
 
 

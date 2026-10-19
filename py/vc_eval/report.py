@@ -230,29 +230,48 @@ def _integrity_lines(runs: list[dict]) -> list[str]:
     return lines + [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
 
 
+def _area_cells(a: dict) -> str:
+    return f"{a['mean']:.2%} | {a['p95']:.2%} | {a['p99']:.2%} | {a['max']:.2%}"
+
+
 def _viewing_cells(v: dict) -> str:
-    a, fl, b = v["area"], v["flicker"], v["boxes"]
+    fl, b = v["flicker"], v["boxes"]
     flicker = DASH if fl["share"] is None else f"{fl['share']:.1%}（{fl['over']}/{fl['pairs']}）"
     multi = DASH if v["multi_box_frames"] is None else str(v["multi_box_frames"])
-    return f"{a['mean']:.2%} | {a['p95']:.2%} | {a['p99']:.2%} | {a['max']:.2%} | {flicker} | {b['median']:g} | {b['p95']:g} | {multi}"
+    return f"{_area_cells(v['area'])} | {flicker} | {b['median']:g} | {b['p95']:g} | {multi}"
 
 
 def _viewing_lines(summary: dict) -> list[str]:
     runs = summary["runs"]
+    fps_values = sorted({r["fps"] for r in runs})
     lines = [
         "",
         "## 观感（全部帧，只报告）",
         "",
-        f"按 1/{RASTER_PX} 分辨率栅格逐帧计算：打码面积是这一帧所有打码框的并集占画面的比例；"
-        f"帧间跳变是相邻两帧打码区域的异或超过画面 {FLICKER_FRACTION:.0%} 的帧对占比；"
-        "同轨多框帧是同一条轨迹在同一帧有不止一个框的帧数，应为 0（没有轨迹编号的旧输出记为 —）。合计行把各段的帧放在一起算。",
+        f"按 1/{RASTER_PX} 分辨率栅格（{RASTER_PX}×{RASTER_PX} 像素一格，碰到就算，所以区域向外取整，每边最多多算不到一格）逐帧计算。"
+        "**屏上面积**是画面上真正被马赛克盖住的部分：每个有 `block` 的框先按 `vc_redact` 的做法取整到像素、裁到画面内，"
+        "再向外对齐到以画面左上角为起点的 `block` 网格（右、下边缘到画面为止），然后取各框的并集占画面的比例；"
+        "没有 `block` 的旧输出按框本身算。分位数用线性插值（numpy 默认）。"
+        f"**帧间跳变**是相邻两帧的屏上打码区域异或超过画面 {FLICKER_FRACTION:.0%} 的帧对占比。"
+        "**同轨多框帧**是同一条轨迹在同一帧有不止一个框的帧数，应为 0（没有轨迹编号的旧输出记为 —）。合计行把各段的帧放在一起算。",
         "",
-        "| 段 | fps | 面积均值 | 面积 95 分位 | 面积 99 分位 | 面积最大 | 帧间跳变 | 每帧框数中位数 | 每帧框数 95 分位 | 同轨多框帧 |",
+        "| 段 | fps | 屏上面积均值 | 屏上面积 95 分位 | 屏上面积 99 分位 | 屏上面积最大 | 帧间跳变 | 每帧框数中位数 | 每帧框数 95 分位 | 同轨多框帧 |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for fps in sorted({r["fps"] for r in runs}):
+    for fps in fps_values:
         lines += [f"| {r['stem']} | {fps:g} | {_viewing_cells(r['viewing'])} |" for r in runs if r["fps"] == fps]
         lines.append(f"| 合计 | {fps:g} | {_viewing_cells(_pooled_at(summary, fps)['viewing'])} |")
+    lines += [
+        "",
+        "**框并集面积**只取各个打码框本身的并集，不对齐马赛克网格，和改用网格之前的旧基线可比；"
+        "同一次运行里它不会比屏上面积大。",
+        "",
+        "| 段 | fps | 框并集面积均值 | 框并集面积 95 分位 | 框并集面积 99 分位 | 框并集面积最大 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for fps in fps_values:
+        lines += [f"| {r['stem']} | {fps:g} | {_area_cells(r['viewing']['box_area'])} |" for r in runs if r["fps"] == fps]
+        lines.append(f"| 合计 | {fps:g} | {_area_cells(_pooled_at(summary, fps)['viewing']['box_area'])} |")
     return lines
 
 
