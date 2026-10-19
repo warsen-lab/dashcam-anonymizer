@@ -72,7 +72,7 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
   try {
     const std::optional<fs::path> cache =
         provider == ExecutionProvider::CoreML ? coreMlCacheDirectory(onnx) : std::nullopt;
-    OrtSession created = createOrtSession(onnx, provider, cache);
+    CreatedSession created = createOrtSession(onnx, provider, cache);
     s.session = std::move(created.session);
     s.backend = created.backend;
     s.checkShapes(onnx);  // its VcError is a model problem, never retried

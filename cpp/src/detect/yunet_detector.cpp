@@ -69,7 +69,7 @@ struct YuNetDetector::Impl {
     try {
       const std::optional<fs::path> cache =
           provider == ExecutionProvider::CoreML ? yunetCoreMlCacheDirectory(onnx, pw, ph) : std::nullopt;
-      OrtSession created = createOrtSession(onnx, provider, cache, fixSize);
+      CreatedSession created = createOrtSession(onnx, provider, cache, fixSize);
       session = std::move(created.session);
       backend = created.backend;
       checkModel(width, height, pw, ph);  // its VcError is a model problem, never retried
