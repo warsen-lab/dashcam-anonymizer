@@ -96,7 +96,7 @@ def run_vc_detect(
     frames_dir = work_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     with (frames_dir / "frames.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")  # LF, like the frames.csv vc_extract writes
         writer.writerow(["video", "frame", "pts_ms", "reason", "motion_score"])
         for ref in refs:
             link = frames_dir / f"{ref.frame:06d}.jpg"

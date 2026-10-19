@@ -64,16 +64,24 @@ Row parseRow(const std::string& line, const std::string& where) {
   return row;
 }
 
+// One line without its terminator; a CRLF file (Python's csv module writes them by default) reads
+// like the LF one vc_extract writes.
+bool readLine(std::istream& in, std::string& line) {
+  if (!std::getline(in, line)) return false;
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return true;
+}
+
 std::vector<Row> readFramesCsv(const fs::path& framesDir) {
   const fs::path csv = framesDir / "frames.csv";
   std::ifstream in(csv);
   if (!in) throw VcError("cannot read " + csv.string());
   std::string line;
-  std::getline(in, line);
+  readLine(in, line);
   if (line != kFramesHeader) throw VcError(csv.string() + ": unexpected header '" + line + "'");
   std::vector<Row> rows;
   int lineNo = 1;
-  while (std::getline(in, line)) {
+  while (readLine(in, line)) {
     ++lineNo;
     if (line.empty()) continue;
     rows.push_back(parseRow(line, csv.string() + " line " + std::to_string(lineNo)));
