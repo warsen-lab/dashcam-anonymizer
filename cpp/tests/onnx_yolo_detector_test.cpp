@@ -124,6 +124,16 @@ TEST(OnnxYoloDetector, DecodesTheConstantModelOnCpu) {
   expectConstBoxes(detector.detect(view(frame.get())), 1e-5f);
 }
 
+// onnxruntime's macOS build ships Microsoft telemetry that uploads usage events over the system
+// network stack; a detector must leave it switched off (the link is metered and the data is the
+// user's). The environment variable is what the library reads when its environment is created.
+TEST(OnnxYoloDetector, SwitchesOnnxRuntimeTelemetryOff) {
+  OnnxYoloDetector detector(constModel(), ExecutionProvider::Cpu, DecodeParams{}, 128, 128);
+  const char* value = std::getenv("ORT_DISABLE_TELEMETRY");
+  ASSERT_NE(value, nullptr);
+  EXPECT_STREQ(value, "1");
+}
+
 TEST(OnnxYoloDetector, CoreMlGivesTheSameBoxes) {
   const ScopedEnv cache("VC_CACHE", freshCacheRoot("coreml_cache_boxes").c_str());
   OnnxYoloDetector detector(constModel(), ExecutionProvider::CoreML, DecodeParams{}, 128, 128);

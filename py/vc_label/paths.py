@@ -15,7 +15,7 @@ OWLV2_REVISION = "cfd3195ba4ea9592eec887ded089f4c08eff231d"
 
 
 def offline_model_env() -> None:
-    """Points Hugging Face / torch at the shared cache and forbids Hugging Face downloads (metered link).
+    """Points Hugging Face / torch at the shared cache, forbids Hugging Face downloads and onnxruntime telemetry (metered link).
 
     HF_HUB_OFFLINE is forced to "1" rather than defaulted, so an exported HF_HUB_OFFLINE=0
     cannot re-enable downloads. Torch weights must be loaded from cached files: no env var
@@ -26,6 +26,9 @@ def offline_model_env() -> None:
     os.environ.setdefault("HF_HOME", str(CACHE / "hf"))
     os.environ.setdefault("TORCH_HOME", str(CACHE / "torch"))
     os.environ["HF_HUB_OFFLINE"] = "1"
+    # onnxruntime's macOS wheel uploads usage telemetry through the system network stack, past the proxy variables;
+    # it reads this when it creates its environment
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 
 
 def required_model_files() -> list[Path]:

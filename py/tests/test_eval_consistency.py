@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -62,8 +63,25 @@ def test_python_detections_decode_the_model(tmp_path):
     assert (plate.x1, plate.y1, plate.x2, plate.y2) == pytest.approx((64, 72, 96, 88))
 
 
+def test_python_reference_sessions_switch_onnxruntime_telemetry_off_before_the_session_exists(tmp_path, monkeypatch):
+    # onnxruntime uploads usage events to Microsoft (metered link) from a background thread. Exiting while one of those
+    # responses is being handled destroys a mutex that thread still locks: the intermittent libc++ "recursive_mutex lock
+    # failed" abort at interpreter exit. With telemetry off nothing is in flight at exit.
+    import onnxruntime as ort
+    from vc_train.ort_cpu import cpu_session
+
+    model = _const_model(tmp_path / "m")
+    calls = []
+    real_disable, real_session = ort.disable_telemetry_events, ort.InferenceSession
+    monkeypatch.setattr(ort, "disable_telemetry_events", lambda: calls.append("telemetry off") or real_disable())
+    monkeypatch.setattr(ort, "InferenceSession", lambda *a, **k: calls.append("session") or real_session(*a, **k))
+    monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    cpu_session(model / "model.onnx")
+    assert calls == ["telemetry off", "session"]
+    assert os.environ["ORT_DISABLE_TELEMETRY"] == "1"  # read when onnxruntime creates its environment
+
+
 def test_python_reference_sessions_are_single_threaded(tmp_path, monkeypatch):
-    # onnxruntime's thread pools racing interpreter teardown showed up as an intermittent libc++ abort at exit
     import vc_eval.consistency as consistency
     from vc_train.ort_cpu import cpu_session
 

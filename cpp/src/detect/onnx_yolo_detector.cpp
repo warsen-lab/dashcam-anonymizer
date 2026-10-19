@@ -26,8 +26,18 @@ namespace vc {
 namespace fs = std::filesystem;
 namespace {
 
+// onnxruntime's macOS / Linux build ships Microsoft 1DS telemetry: it uploads usage events with a
+// device id over the system network stack (proxy environment variables do not stop it) and queues
+// them in ~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime. The link is metered
+// and the data is the user's, so it is switched off before the environment exists (the variable is
+// read then) and once more through the API.
 Ort::Env& ortEnv() {
-  static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "vc");
+  static Ort::Env env = [] {
+    ::setenv("ORT_DISABLE_TELEMETRY", "1", 1);
+    Ort::Env created(ORT_LOGGING_LEVEL_WARNING, "vc");
+    created.DisableTelemetryEvents();
+    return created;
+  }();
   return env;
 }
 
