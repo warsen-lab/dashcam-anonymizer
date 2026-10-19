@@ -196,7 +196,8 @@ class Processor {
         masks_(masks),
         out_(out),
         stats_(stats),
-        timeline_(timelineFor(options.config, detector.classes()), info.width, info.height) {}
+        timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
+        blocks_(options.config.mosaic) {}
 
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
@@ -278,26 +279,31 @@ class Processor {
     return t;
   }
 
-  // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order.
+  // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order. A mask's block comes
+  // from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4).
   void emit(const std::vector<std::vector<MaskBox>>& masks) {
     if (masks.size() != buffer_.size()) throw VcError("internal error: masks do not match the buffered frames");
     for (size_t k = 0; k < buffer_.size(); ++k) {
       VideoItem& frame = buffer_[k];
-      masks_ << maskRecord(video_, frame.index, masks[k], detector_.classes());
-      if (!masks[k].empty()) {
-        const Clock::time_point started = Clock::now();
-        checkAv(av_frame_make_writable(frame.frame.get()), "make frame writable");
-        std::vector<PixelRect> rects;
-        rects.reserve(masks[k].size());
-        for (const MaskBox& m : masks[k]) {
-          rects.push_back(coveringRect(m.x1, m.y1, m.x2, m.y2, frame.frame->width, frame.frame->height));
-        }
-        applyMosaic(*frame.frame, rects, options_.config.mosaic);
-        stats_.mosaic.busySec += secondsSince(started);
-        ++stats_.maskedFrames;
-        stats_.maskBoxes += static_cast<int64_t>(masks[k].size());
+      const Clock::time_point started = Clock::now();
+      std::vector<MaskBox> boxes = masks[k];
+      std::vector<MosaicRect> rects;
+      rects.reserve(boxes.size());
+      for (MaskBox& m : boxes) {
+        const PixelRect rect = coveringRect(m.x1, m.y1, m.x2, m.y2, frame.frame->width, frame.frame->height);
+        m.block = blocks_.blockFor(m.track, rect);
+        rects.push_back(MosaicRect{rect, m.block});
       }
+      blocks_.endFrame();
+      if (!boxes.empty()) {
+        checkAv(av_frame_make_writable(frame.frame.get()), "make frame writable");
+        applyMosaic(*frame.frame, rects);
+        ++stats_.maskedFrames;
+        stats_.maskBoxes += static_cast<int64_t>(boxes.size());
+      }
+      stats_.mosaic.busySec += secondsSince(started);
       ++stats_.mosaic.items;
+      masks_ << maskRecord(video_, frame.index, boxes, detector_.classes());
       if (!out_.push(Item{std::move(frame)})) throw PipelineAborted{};
     }
     buffer_.clear();
@@ -312,6 +318,7 @@ class Processor {
   BoundedQueue<Item>& out_;
   RedactStats& stats_;
   BoxTimeline timeline_;
+  TrackBlocks blocks_;
   bool sawKeyframe_ = false;
   std::vector<VideoItem> buffer_;
   std::optional<KeyframeDetections> pending_;

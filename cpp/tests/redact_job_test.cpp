@@ -144,14 +144,21 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
   const auto out = decodeAll(s.video);
   ASSERT_EQ(out.size(), 60u);
   ASSERT_EQ(in.size(), 60u);
-  // The mask is the fake box grown by 15 % per side, (85, 88)-(215, 192), in 17 px blocks: the
-  // block [102, 119) x [105, 122) is flat in the output and noisy in the input, on every frame.
+  // The mask is the fake box grown by 15 % per side, (85, 88)-(215, 192); its long side asks for ceil(130 / 8) = 17 px
+  // blocks, the ladder's 24, on the frame's grid: the cell [96, 120) x [96, 120) is flat in the output and noisy in
+  // the input, on every frame.
   for (size_t i = 0; i < out.size(); ++i) {
-    EXPECT_LT(lumaStd(*out[i], 104, 107, 117, 120), 4.0) << "frame " << i;
-    EXPECT_GT(lumaStd(*in[i], 104, 107, 117, 120), 15.0) << "frame " << i;
+    EXPECT_LT(lumaStd(*out[i], 96, 96, 120, 120), 4.0) << "frame " << i;
+    EXPECT_GT(lumaStd(*in[i], 96, 96, 120, 120), 15.0) << "frame " << i;
     // Far from the mask the picture is kept: same brightness, still detailed.
     EXPECT_NEAR(lumaMean(*out[i], 400, 220, 560, 330), lumaMean(*in[i], 400, 220, 560, 330), 3.0) << "frame " << i;
     EXPECT_GT(lumaStd(*out[i], 400, 220, 560, 330), 10.0) << "frame " << i;
+  }
+
+  // Every mask records the block it was pixelated with; one static target keeps one block.
+  std::ifstream masksFile(dir / "masks.jsonl");
+  for (std::string line; std::getline(masksFile, line);) {
+    for (const auto& box : nlohmann::json::parse(line).at("boxes")) EXPECT_EQ(box.at("block").get<int>(), 24) << line;
   }
 }
 

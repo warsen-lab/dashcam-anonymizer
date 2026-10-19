@@ -71,6 +71,7 @@ std::string maskRecord(const std::string& video, int64_t frame, const std::vecto
     b["y2"] = round1(m.y2, "y2");
     b["track"] = m.track;
     b["origin"] = toString(m.origin);
+    b["block"] = m.block;
     j["boxes"].push_back(b);
   }
   return jsonLine(j);

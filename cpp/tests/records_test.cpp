@@ -33,9 +33,9 @@ TEST(Records, DetectionLineCarriesTheConfirmationWhenGiven) {
 }
 
 TEST(Records, MaskLineListsBoxesWithTheirTrackAndOrigin) {
-  const std::vector<MaskBox> boxes{MaskBox{1, 1.0f, 2.0f, 3.5f, 4.0f, MaskOrigin::Interpolated, 7}};
+  const std::vector<MaskBox> boxes{MaskBox{1, 1.0f, 2.0f, 3.5f, 4.0f, MaskOrigin::Interpolated, 7, 24}};
   EXPECT_EQ(maskRecord("a.mp4", 3, boxes, kClasses),
-            R"({"video":"a.mp4","frame":3,"boxes":[{"cls":"plate","x1":1.0,"y1":2.0,"x2":3.5,"y2":4.0,"track":7,"origin":"interpolated"}]})"
+            R"({"video":"a.mp4","frame":3,"boxes":[{"cls":"plate","x1":1.0,"y1":2.0,"x2":3.5,"y2":4.0,"track":7,"origin":"interpolated","block":24}]})"
             "\n");
   EXPECT_EQ(maskRecord("a.mp4", 4, {}, kClasses), R"({"video":"a.mp4","frame":4,"boxes":[]})" "\n");
 }
@@ -83,7 +83,7 @@ TEST(Records, WritesNegativeZeroAsZero) {
             "\n");
   const std::vector<MaskBox> boxes{MaskBox{1, -0.0f, -0.04f, 1.0f, 1.0f, MaskOrigin::Held, 1}};
   EXPECT_EQ(maskRecord("a.mp4", 0, boxes, kClasses),
-            R"({"video":"a.mp4","frame":0,"boxes":[{"cls":"plate","x1":0.0,"y1":0.0,"x2":1.0,"y2":1.0,"track":1,"origin":"held"}]})"
+            R"({"video":"a.mp4","frame":0,"boxes":[{"cls":"plate","x1":0.0,"y1":0.0,"x2":1.0,"y2":1.0,"track":1,"origin":"held","block":0}]})"
             "\n");
 }
 

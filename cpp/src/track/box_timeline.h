@@ -23,6 +23,7 @@ struct MaskBox {
   float y2 = 0;
   MaskOrigin origin = MaskOrigin::Detected;
   int64_t track = 0;  // the track the mask is for (ids from 1); a track has at most one mask per frame
+  int block = 0;      // mosaic block size in px; BoxTimeline leaves 0, vc_redact fills it in (spec §4)
 };
 
 struct FrameTime {
