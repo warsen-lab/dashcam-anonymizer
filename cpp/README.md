@@ -117,8 +117,8 @@ cmake --build build/cpp -j 4
 | `--out` | 必填 | 输出根目录 |
 | `--model <dir>` | | 含 `model.onnx` 和 `model.json` 的目录（`vc_train export` 的产物）；与 `--fake-detections` 恰好给一个 |
 | `--fake-detections <jsonl>` | | 回放一份现成的 `detections.jsonl`，不跑模型；用于冒烟和复现 |
-| `--config <json>` | 内置默认值 | 参数文件，格式见 `configs/redact.json`；省略的键取默认值，未知键、类型不对或越界的值会报错（退出码 2） |
-| `--detect-fps <n>` | 5 | 基础关键帧检测频率，不能低于 5，覆盖配置里的 `detect_fps`；比 `max_detect_fps` 大时后者同步提高 |
+| `--config <json>` | 内置默认值 | 参数文件，格式见 `configs/redact.json`；省略的键取默认值，未知键、类型不对或越界的值会报错（退出码 2）。内置默认值与仓库里的 `configs/redact.json` 相同，其中检测频率 10 fps、分数阈值 0.05、外扩 0.3 是 2026-10-18 代理验证选定的（见 `docs/reports/proxy-validation-2026-10-18.md`） |
+| `--detect-fps <n>` | 10 | 基础关键帧检测频率，不能低于 5，覆盖配置里的 `detect_fps`；比 `max_detect_fps` 大时后者同步提高 |
 | `--detect-every-frame` | 关闭 | 每一帧都检测，用来做时间覆盖率评测的对照 |
 | `--ep` | coreml | `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者 |
 | `--hwaccel` | none | 解码方式：`none` / `auto` / `videotoolbox`（与 `vc_extract` 不同，默认不用硬解） |

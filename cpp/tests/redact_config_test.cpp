@@ -45,7 +45,7 @@ void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{})
 // most six decimals, so a JSON round trip reproduces them.
 RedactConfig nonDefaultConfig() {
   RedactConfig c;
-  c.detectFps = 10.0;
+  c.detectFps = 12.0;
   c.maxDetectFps = 30.0;
   c.motionThreshold = 0.125;
   c.decode.scoreThreshold = 0.25f;
@@ -68,6 +68,17 @@ void expectRejected(const std::string& text) {
   } catch (const VcError& e) {
     EXPECT_EQ(std::string(e.what()).rfind("cfg: ", 0), 0u) << e.what();
   }
+}
+
+// vc_redact's defaults are the ones the 2026-10-18 proxy validation chose (10 fps, score 0.05, expand
+// 0.3); the lower-level structs keep their own, which vc_detect and the unit tests use.
+TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
+  const RedactConfig c;
+  EXPECT_DOUBLE_EQ(c.detectFps, 10.0);
+  EXPECT_FLOAT_EQ(c.decode.scoreThreshold, 0.05f);
+  EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.3);
+  EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
+  EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
 }
 
 TEST(RedactConfig, RepositoryFileMatchesTheDefaults) {
@@ -204,13 +215,13 @@ TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
   EXPECT_EQ(j.size(), 12u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
-  EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 5.0);
+  EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
 }
 
 TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.at("score_threshold").dump(), "0.15");
+  EXPECT_EQ(j.at("score_threshold").dump(), "0.05");
   EXPECT_EQ(j.at("nms_iou").dump(), "0.5");
 }
 
