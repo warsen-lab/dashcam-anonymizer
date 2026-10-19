@@ -172,7 +172,16 @@ PYTHONPATH=py .venv/bin/python -m vc_train export --run data/models/r1 --dataset
 - 所有子命令一开始就把 ultralytics 设成离线模式（`YOLO_OFFLINE=1` 等，见上），读 checkpoint 也不例外。
 - 退出码：0 成功；`export --check-frames` 的一致性检查不通过为 1；参数或输入错误为 2，错误信息写到 stderr，以 `vc_train:` 开头。
 
-测试：`.venv/bin/pytest -q py/tests/test_train_geometry.py py/tests/test_train_dataset.py py/tests/test_train_cli.py`；
+```bash
+# 4. 人脸模型：把缓存里的 YuNet 转成任意输入尺寸，给 vc_redact --face-model 用（不需要 ultralytics，不联网）
+PYTHONPATH=py .venv/bin/python -m vc_train yunet --out data/models/yunet
+```
+
+- `yunet` 读 `--source`（缺省为上面“模型权重”表里缓存的 `face_detection_yunet_2023mar.onnx`），把输入的高宽改成符号维度 `H`、`W`、12 个输出的锚点数改成 `N`，去掉记录着 640×640 中间形状的 `value_info`，权重原样不动；写出前先用 onnxruntime 在 96×64 的输入上跑一遍，核对每个输出的锚点数。`model.json` 为 `{"name": "yunet-2023mar", "classes": ["face"], "input": {"color": "BGR", "scale": 1.0, "letterbox": "top_left", "pad_value": 0, "pad_multiple": 32}, "output_format": "yunet", "source_sha256": <源文件 sha256>}`。
+- `--out` 已存在且非空、位于 `--frames-root`（默认 `data/frames`）之下、源文件不存在或不是 YuNet（输入不是 `[1, 3, H, W]`、缺 `cls_8` … `kps_32` 中任何一个输出），都在写任何文件之前报错，退出码 2。
+- `vc_train.yunet.decode_yunet` 是 C++ `YuNetDetector` 照着实现的参考解码器，规则与 `cv2.FaceDetectorYN` 相同（见 `cpp/README.md` 的“人脸模型”），测试里在一张合成图上与 cv2 的结果逐框比对。
+
+测试：`.venv/bin/pytest -q py/tests/test_train_geometry.py py/tests/test_train_dataset.py py/tests/test_train_cli.py py/tests/test_train_yunet.py`（`test_train_yunet.py` 里用真模型的用例在缺缓存的 YuNet 文件时跳过）；
 `.venv/bin/pytest -q py/tests/test_train_yolo.py`（在 CPU 上训一个 64px 小模型，约 1 分钟，缺权重时跳过）。
 
 ## vc_eval：代理评测
@@ -208,6 +217,7 @@ cmake -S cpp -B build/cpp-release -DCMAKE_BUILD_TYPE=Release -DVC_BUILD_TESTS=OF
 PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <模型目录> --out data/reports/<run>
 ```
 
+- `--face-model <目录>`（可选）：`vc_train yunet` 写出的人脸模型，原样传给每一次 `vc_redact`（逐帧参照和每个频率）作 `--face-model`；C++ / Python 一致性检查仍只比学生模型。`summary.json` 的 `face_model` 和 `summary.md` 开头一行写明用的是哪个（没有时为 `null` / “无”）。目录里缺 `model.onnx` 或 `model.json` 时开跑前就报错，`--out` 也不能与它重叠。
 - `--fps 5,10,15,30`（默认）：要扫描的检测频率，每个值必须是有限数且 ≥ 5，不能重复；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。`--redacted-root`（默认 `data/redacted`）是打码视频的输出目录：换一份 `--config` 时给它另一个目录，否则会覆盖前一份报告链接的视频。
 - 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 和 `flags.csv` 在且都不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（两边读的是同一批帧重新存成 4:4:4、质量 100 的 JPEG，放在 `<out>/consistency/same_pixels/`：FFmpeg 和 OpenCV 对 4:2:0 色度的上采样不同，在原始帧上单这一项就让框差出 1 px 以上；缺 `vc_detect` 或模型坏了在这里就停；判定只看分数 ≥ 0.3 的配对：它们的最大角点差必须 < 1 px，至少要有一个这样的配对，没有分数 ≥ 0.3 却没配上的框；所有配对的最大差（含低分框）单独列出，只报告），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
 - 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照；时间覆盖率只在那次运行的 `stats.json` 写着 `"detect_every_frame": true`、且稀疏运行的 `masks.jsonl` 恰好覆盖第 0 到 `frames-1` 帧时才计算，缺 `stats.json`、帧数对不上都直接报错），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
