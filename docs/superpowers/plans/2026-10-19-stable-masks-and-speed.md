@@ -2731,7 +2731,7 @@ git commit -m "feat: one mask per track per frame in BoxTimeline, held and ghost
 
 ### Task 5: 大小迟滞与面积上限
 
-本设计 §3.1 的"变大及时、变小慢"和面积上限，加两个配置键。
+本设计 §3.1 的"变大及时、变小慢"和面积上限，加两个配置键。平滑的是**大小**（宽、高），不是各条边：输出框始终以当帧原始框的中心为中心，所以跟着目标走，快速移动的目标不会沿运动方向拉长。
 
 **Files:**
 - Modify: `cpp/src/track/box_timeline.h`（`TimelineConfig`、类注释、私有成员）、`cpp/src/track/box_timeline.cpp`（`validConfig`、`emit`、`hold`、`advance` 末尾、`finish` 末尾，新增 `smoothed`、`cappedArea`）
@@ -2740,19 +2740,23 @@ git commit -m "feat: one mask per track per frame in BoxTimeline, held and ghost
 - Test: `cpp/tests/box_timeline_test.cpp`（改 `config()`，追加测试）、`cpp/tests/redact_config_test.cpp`
 
 **Interfaces:**
-- Consumes: Task 4 的 `BoxTimeline`、`Track::id`。
+- Consumes: Task 4 的 `BoxTimeline`、`Track::id`、`MaskOrigin::Held`。
 - Produces:
   - `TimelineConfig::shrinkPerFrame`（默认 0.02，范围 (0, 1]）、`TimelineConfig::maxMaskAreaRatio`（默认 4.0，≥ 1）。
-  - 每条轨迹维护上一帧输出的框：每条边需要外扩时立刻扩到原始框（外扩、撑最小尺寸、裁剪之后的框），需要收缩时每帧最多收缩 `shrinkPerFrame` × 上一帧输出框的边长（x 两边用宽、y 两边用高），且不越过原始框——所以输出框总包含原始框；然后若面积超过 `maxMaskAreaRatio` × 原始框面积，四条边按同一比例 s 向原始框收缩，s 取恰好满足上限的最小值。轨迹结束或框整个落在画面外时忘掉它的状态。
+  - 每条轨迹保存平滑后的宽 W、高 H（`shown_`）。每一帧，原始框（插值或保持后的框，按 `expand_fraction` / `motion_expand_fraction` 外扩、撑到 `min_box_px`，**裁剪之前**）宽 w、高 h、中心 c：
+    - w ≥ W 时 W′ = w，否则 W′ = max(w, W·(1 − shrinkPerFrame))；H′ 同理；`origin` 为 `held` 的帧不收缩（W′ = max(W, w)，H′ = max(H, h)），即丢失后保留最后的大小、放在保持的位置上；
+    - 若 W′·H′ > maxMaskAreaRatio·w·h，W′、H′ 按同一比例 f 向 w、h 收缩：W″ = w + f·(W′ − w)、H″ = h + f·(H′ − h)，f 取恰好满足上限的值（闭式解 f = 2q / (p + √(p² + 4abq))，a = W′ − w，b = H′ − h，p = a·h + b·w，q = ratio·w·h − w·h）；
+    - 输出框以 c 为中心、大小 W″ × H″，再裁到画面内；所以它总包含原始框，宽、高不超过 max(原始框的、上一帧平滑后的)。
+    - 新轨迹从 W = w、H = h 开始；原始框整个落在画面外时，或轨迹结束时，忘掉它的大小。`shrinkPerFrame = 1` 时平滑不起作用（每个框就是它自己）。
   - 配置键 `shrink_per_frame`（`"shrink_per_frame must be in (0, 1]"`）、`max_mask_area_ratio`（`"max_mask_area_ratio must be >= 1"`），放在 `min_box_px` 之后。
 
 - [ ] **Step 1: 写失败的测试**
 
-`cpp/tests/box_timeline_test.cpp`：`config()` 换成下面这样（之前的测试都按"每个框就是它自己"写的期望，所以关掉平滑），并在 `exact()` 之后加 `smooth()`：
+`cpp/tests/box_timeline_test.cpp`：`config()` 换成下面这样（之前的测试都按"每个框就是它自己"写的期望，`shrinkPerFrame = 1` 时平滑不起作用），并在 `exact()` 之后加 `smooth()`：
 
 ```cpp
 // Margins and minimum size as given, everything else at its default except the mask smoothing, which is off:
-// with shrinkPerFrame 1 a mask edge may move in by the mask's whole side per frame, so each mask is its own box.
+// with shrinkPerFrame 1 a mask may shrink to its box at once, so each mask is its own box.
 TimelineConfig config(double expand, double motion, double minBox) {
   TimelineConfig c;
   c.expandFraction = expand;
@@ -2786,22 +2790,43 @@ TEST(BoxTimeline, AMaskGrowsAtOnce) {
   expectBox(masks[1][0], 112.5f, 112.5f, 187.5f, 187.5f, MaskOrigin::Interpolated);
 }
 
-// ... and shrinks slowly: each edge moves in by at most shrinkPerFrame of the mask's side per frame. The face
-// halves in 2 frames (12.5 px per edge per frame) and then stays; with 10 % per frame the edges go
-// 100 -> 110 -> 118 -> 124.4 -> 125.
+// ... and shrinks slowly: its width and height by at most shrinkPerFrame of themselves per frame, never below the
+// box's, around the box's centre. The face halves in 2 frames (100 -> 75 -> 50 px) and then stays; with 10 % per
+// frame the mask's side goes 100, 90, 81, 72.9, 65.61, 59.049, 53.1441, then 50 (0.9 x 53.1441 is less).
 TEST(BoxTimeline, AMaskShrinksByAtMostItsShrinkFractionPerFrame) {
   BoxTimeline timeline(smooth(0.1, 100.0), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
   std::vector<std::vector<MaskBox>> masks = timeline.advance(frames(0, 2), key(2, {face(125, 125, 175, 175)})).masks;
-  for (auto& m : timeline.finish(frames(2, 6)).masks) masks.push_back(std::move(m));
-  ASSERT_EQ(masks.size(), 6u);
-  const float edges[] = {100, 110, 118, 124.4f, 125, 125};
-  const MaskOrigin origins[] = {MaskOrigin::Detected, MaskOrigin::Interpolated, MaskOrigin::Detected,
-                                MaskOrigin::Held,     MaskOrigin::Held,         MaskOrigin::Held};
+  for (auto& m : timeline.advance(frames(2, 8), key(8, {face(125, 125, 175, 175)})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 8u);
+  const double sides[] = {100, 90, 81, 72.9, 65.61, 59.049, 53.1441, 50};
   for (size_t k = 0; k < masks.size(); ++k) {
     SCOPED_TRACE("frame " + std::to_string(k));
     ASSERT_EQ(masks[k].size(), 1u);
-    expectBox(masks[k][0], edges[k], edges[k], 300 - edges[k], 300 - edges[k], origins[k]);
+    const auto half = static_cast<float>(sides[k] / 2);
+    expectBox(masks[k][0], 150 - half, 150 - half, 150 + half, 150 + half,
+              k == 0 || k == 2 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+}
+
+// A lost target's mask keeps its smoothed size while it is held, and moves with the held box. The face shrinks to
+// 50 px while moving 2 px a frame (masks of 100, 90 and 81 px), then is missed at keyframe 6: frames 3 to 5 keep
+// 81 px around the held centre.
+TEST(BoxTimeline, AHeldMaskKeepsItsSmoothedSizeAtTheHeldPosition) {
+  BoxTimeline timeline(smooth(0.1, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
+  std::vector<std::vector<MaskBox>> masks = timeline.advance(frames(0, 2), key(2, {face(129, 125, 179, 175)})).masks;
+  for (auto& m : timeline.advance(frames(2, 6), key(6, {})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 6u);
+  ASSERT_EQ(masks[1].size(), 1u);
+  expectBox(masks[1][0], 107, 105, 197, 195, MaskOrigin::Interpolated);  // 90 px around (152, 150)
+  ASSERT_EQ(masks[2].size(), 1u);
+  expectBox(masks[2][0], 113.5f, 109.5f, 194.5f, 190.5f, MaskOrigin::Detected);  // 81 px around (154, 150)
+  for (size_t k = 3; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(masks[k].size(), 1u);
+    const float cx = 154 + 2.0f * static_cast<float>(k - 2);  // held along the velocity
+    expectBox(masks[k][0], cx - 40.5f, 109.5f, cx + 40.5f, 190.5f, MaskOrigin::Held);
   }
 }
 
@@ -2812,27 +2837,54 @@ bool covers(const std::vector<MaskBox>& masks, float x1, float y1, float x2, flo
   });
 }
 
-// The mask always contains its box, also when the target moves faster than the trailing edge may follow: the
-// leading edge jumps, the trailing one moves 2 % of the mask's width per frame.
-TEST(BoxTimeline, AMaskAlwaysContainsItsBox) {
-  BoxTimeline timeline(smooth(0.02, 100.0), 1000, 1000);
-  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
-  const auto masks = timeline.advance(frames(0, 12), key(12, {face(160, 100, 180, 120)})).masks;  // 5 px per frame
+// The smoothing is of the size, around the box's own centre (spec §3.1): a fast target's mask follows it instead
+// of trailing behind. Its width and height never exceed the larger of the box's and the previous mask's, and its
+// centre is the box's.
+TEST(BoxTimeline, AFastTargetIsNotSmearedAlongItsMotion) {
+  // A 20 px face at 5 px a frame: every mask is the box itself, nothing is left behind.
+  BoxTimeline steady(smooth(0.02, 4.0), 1000, 1000);
+  steady.advance({}, key(0, {face(100, 100, 120, 120)}));
+  std::vector<std::vector<MaskBox>> masks = steady.advance(frames(0, 12), key(12, {face(160, 100, 180, 120)})).masks;
+  for (auto& m : steady.advance(frames(12, 24), key(24, {face(220, 100, 240, 120)})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 24u);
   for (size_t k = 0; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
     ASSERT_EQ(masks[k].size(), 1u);
     const float x = 100 + 5.0f * static_cast<float>(k);
-    EXPECT_TRUE(covers(masks[k], x, 100, x + 20, 120)) << "frame " << k;
-    EXPECT_NEAR(masks[k][0].x2, x + 20, 1e-3) << "frame " << k;
-    if (k > 0) {
-      const MaskBox& before = masks[k - 1][0];
-      EXPECT_NEAR(masks[k][0].x1, before.x1 + 0.02f * (before.x2 - before.x1), 1e-3) << "frame " << k;
-    }
+    expectBox(masks[k][0], x, 100, x + 20, 120, k % 12 == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+
+  // A face shrinking from 100 to 50 px while it moves 175 px in 12 frames: the mask's side shrinks 2 % a frame,
+  // centred on the box wherever the box is.
+  BoxTimeline shrinking(smooth(0.02, 4.0), 1000, 1000);
+  shrinking.advance({}, key(0, {face(100, 100, 200, 200)}));
+  const auto moving = shrinking.advance(frames(0, 12), key(12, {face(300, 125, 350, 175)})).masks;
+  ASSERT_EQ(moving.size(), 12u);
+  double side = 0;
+  for (size_t k = 0; k < moving.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(moving[k].size(), 1u);
+    const MaskBox& m = moving[k][0];
+    const double t = static_cast<double>(k) / 12;
+    const double cx = 150 + 175 * t;  // the interpolated box's centre (its y stays 150)
+    const double box = 100 - 50 * t;  // and its width and height
+    const double previous = side;
+    side = k == 0 ? box : std::max(box, 0.98 * side);
+    EXPECT_NEAR((m.x1 + m.x2) / 2, cx, 1e-3);
+    EXPECT_NEAR((m.y1 + m.y2) / 2, 150, 1e-3);
+    EXPECT_NEAR(m.x2 - m.x1, side, 1e-3);
+    EXPECT_NEAR(m.y2 - m.y1, side, 1e-3);
+    EXPECT_LE(m.x2 - m.x1, std::max(box, previous) + 1e-3);
+    EXPECT_LE(m.y2 - m.y1, std::max(box, previous) + 1e-3);
+    EXPECT_TRUE(covers(moving[k], static_cast<float>(cx - box / 2), static_cast<float>(150 - box / 2),
+                       static_cast<float>(cx + box / 2), static_cast<float>(150 + box / 2)));
   }
 }
 
-// A mask covers at most max_mask_area_ratio times its box: beyond that every edge moves the same fraction of its
-// way towards the box. Frame 1's box is 120..180 (3600 px^2); shrinking 2 % per frame from 100..200 leaves
-// 102..198 (9216 px^2, 2.56 times), so the mask is pulled in to 2 x 3600 = 7200 px^2, sqrt(7200) px square.
+// A mask covers at most max_mask_area_ratio times its box: beyond that its width and height are pulled the same
+// fraction of their way towards the box's. Frame 1's box is 120..180 (60 px, 3600 px^2); the side may only shrink
+// from 100 to 98 (9604 px^2, 2.67 times), so it is pulled towards 60 until the mask is 2 x 3600 = 7200 px^2:
+// sqrt(7200) px square around the box's centre.
 TEST(BoxTimeline, CapsTheMaskAreaAtTheConfiguredMultipleOfItsBox) {
   BoxTimeline timeline(smooth(0.02, 2.0), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
@@ -2846,9 +2898,10 @@ TEST(BoxTimeline, CapsTheMaskAreaAtTheConfiguredMultipleOfItsBox) {
   EXPECT_NEAR(m.y2, 150 + half, 1e-3);
 }
 
-// Frame 1's box is 145..255 x 100..120 (2200 px^2); 2 % per frame leaves 104..296 (3840 px^2). Only the x edges
-// stick out, and both move 13.5 of their 41 px towards the box, to 1.5 x 2200 = 3300 px^2.
-TEST(BoxTimeline, TheAreaCapMovesOnlyTheEdgesBeyondTheBox) {
+// Frame 1's box is 145..255 x 100..120 (110 x 20 = 2200 px^2); the width may only shrink from 200 to 196 (3920 px^2),
+// the height is the box's. The width is pulled towards 110 until the mask is 1.5 x 2200 = 3300 px^2: 165 x 20 around
+// the box's centre.
+TEST(BoxTimeline, TheAreaCapPullsBothSidesTowardsTheBox) {
   BoxTimeline timeline(smooth(0.02, 1.5), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 300, 120)}));
   const auto masks = timeline.advance(frames(0, 2), key(2, {face(190, 100, 210, 120)})).masks;
@@ -2895,7 +2948,7 @@ TEST(BoxTimeline, RejectsAnInvalidShrinkOrAreaRatio) {
 - 加一个测试：
 
 ```cpp
-// Mask smoothing (spec 2026-10-19 §3.1): a mask edge moves in by at most 2 % of its side per frame, and a mask
+// Mask smoothing (spec 2026-10-19 §3.1): a mask's width and height shrink by at most 2 % per frame, and a mask
 // covers at most 4 times its box. The values are calibrated in the last task of the plan.
 TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
   EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.shrinkPerFrame, 0.02);
@@ -2924,40 +2977,47 @@ SB=(sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip
 - `TimelineConfig` 在 `matchMaxDistanceLoose` 之后加：
 
 ```cpp
-  double shrinkPerFrame = 0.02;   // per frame a mask edge moves in by at most this fraction of the mask's side, (0, 1]
+  double shrinkPerFrame = 0.02;   // per frame a mask's width and height shrink by at most this fraction, (0, 1]
   double maxMaskAreaRatio = 4.0;  // a mask covers at most this many times the area of its box, >= 1
 ```
 
 - 类注释在 "…clipped to the frame." 之后、"A track's velocity runs…" 之前插入：
 
 ```
-// Each track's mask is then smoothed over frames (spec §3.1): every edge moves out to that box at once
-// but in by at most shrinkPerFrame of the mask's side per frame (never past the box, so the mask always
-// contains it), and a mask larger than maxMaskAreaRatio times the box is pulled in towards it, every edge
-// by the same fraction of its way, until it is exactly that large.
+// The mask's size is smoothed per track (spec §3.1), around the centre of the box it is for: its width and
+// height grow to the box's at once but shrink by at most shrinkPerFrame of themselves per frame, never
+// below the box's (not at all while the track is held), so the mask always contains the box and follows a
+// moving target without trailing behind it. A mask larger than maxMaskAreaRatio times the box has both
+// sides pulled the same fraction of their way towards the box's until it is exactly that large.
 ```
 
 - `private:` 里 `Match` 之后加：
 
 ```cpp
-  // A mask in frame pixels.
-  struct Rect {
-    double x1 = 0;
-    double y1 = 0;
-    double x2 = 0;
-    double y2 = 0;
+  // A track's smoothed mask size (spec §3.1).
+  struct Size {
+    double w = 0;
+    double h = 0;
   };
 
-  // `shown` moved towards `raw`: each edge out to raw's at once, in by at most `shrink` of the side (the
-  // width for x1 / x2, the height for y1 / y2) and never past raw's, so the result contains raw.
-  static Rect smoothed(const Rect& shown, const Rect& raw, double shrink);
-  // `mask` (which contains `raw`) with every edge moved the same fraction of its way towards raw's, just
-  // enough to bring its area down to `ratio` times raw's; unchanged when it is no larger than that.
-  static Rect cappedArea(const Rect& mask, const Rect& raw, double ratio);
+  // The smoothed size after `shown` for a box of size `raw`: each side grows to raw's at once and otherwise
+  // shrinks by at most `shrink` of itself, never below raw's; while `held` it does not shrink at all.
+  static Size smoothed(Size shown, Size raw, double shrink, bool held);
+  // `size` (at least `raw` on each side) with both sides pulled the same fraction of their way towards raw's,
+  // just enough to bring its area down to `ratio` times raw's; unchanged when it is no larger than that.
+  static Size cappedArea(Size size, Size raw, double ratio);
 ```
 
-- `emit` 和 `hold` 的声明去掉末尾的 `const`；`emit` 的注释末尾加一句 "Smoothed against the track's previous mask (shown_)."
-- 成员里 `int64_t nextId_ = 1;` 之后加 `std::unordered_map<int64_t, Rect> shown_;  // each live track's mask on the last frame it had one`。
+- `emit` 和 `hold` 的声明去掉末尾的 `const`；`emit` 的注释换成：
+
+```cpp
+  // Appends the mask of `track` for `region`: the region grown by expandFraction of its size plus
+  // motionExpandFraction of `motion` per axis and to at least minBoxPx (the raw box), its size smoothed
+  // against the track's previous mask (shown_) around the raw box's centre, clipped to the frame; nothing
+  // when the raw box lies outside the frame.
+```
+
+- 成员里 `int64_t nextId_ = 1;` 之后加 `std::unordered_map<int64_t, Size> shown_;  // each live track's smoothed mask size`。
 
 `cpp/src/track/box_timeline.cpp`：
 
@@ -2966,33 +3026,26 @@ SB=(sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip
 - 在 `heldShift` 之前加两个静态成员函数：
 
 ```cpp
-BoxTimeline::Rect BoxTimeline::smoothed(const Rect& shown, const Rect& raw, double shrink) {
-  const double stepX = shrink * (shown.x2 - shown.x1);
-  const double stepY = shrink * (shown.y2 - shown.y1);
-  return Rect{raw.x1 < shown.x1 ? raw.x1 : std::min(raw.x1, shown.x1 + stepX),
-              raw.y1 < shown.y1 ? raw.y1 : std::min(raw.y1, shown.y1 + stepY),
-              raw.x2 > shown.x2 ? raw.x2 : std::max(raw.x2, shown.x2 - stepX),
-              raw.y2 > shown.y2 ? raw.y2 : std::max(raw.y2, shown.y2 - stepY)};
+BoxTimeline::Size BoxTimeline::smoothed(Size shown, Size raw, double shrink, bool held) {
+  const auto side = [shrink, held](double previous, double wanted) {
+    if (wanted >= previous) return wanted;
+    return held ? previous : std::max(wanted, previous * (1 - shrink));
+  };
+  return Size{side(shown.w, raw.w), side(shown.h, raw.h)};
 }
 
-BoxTimeline::Rect BoxTimeline::cappedArea(const Rect& mask, const Rect& raw, double ratio) {
-  const double bigW = mask.x2 - mask.x1;
-  const double bigH = mask.y2 - mask.y1;
-  const double w = raw.x2 - raw.x1;
-  const double h = raw.y2 - raw.y1;
-  const double limit = ratio * w * h;
-  if (bigW * bigH <= limit) return mask;
-  // Moving every edge a fraction s of its way leaves (bigW - s a) x (bigH - s b), a = bigW - w, b = bigH - h:
-  // a b s^2 - (a bigH + b bigW) s + (bigW bigH - limit) = 0. At s = 0 the left side is positive, at s = 1 it
-  // is w h - limit <= 0 (ratio >= 1), so the smaller root lies in (0, 1].
-  const double a = bigW - w;
-  const double b = bigH - h;
-  const double p = a * bigH + b * bigW;
-  const double q = bigW * bigH - limit;
-  const double s = a * b > 0 ? (p - std::sqrt(std::max(0.0, p * p - 4 * a * b * q))) / (2 * a * b) : q / p;
-  const double f = std::clamp(s, 0.0, 1.0);
-  const auto toward = [f](double from, double to) { return from + f * (to - from); };
-  return Rect{toward(mask.x1, raw.x1), toward(mask.y1, raw.y1), toward(mask.x2, raw.x2), toward(mask.y2, raw.y2)};
+BoxTimeline::Size BoxTimeline::cappedArea(Size size, Size raw, double ratio) {
+  const double limit = ratio * raw.w * raw.h;
+  if (size.w * size.h <= limit) return size;
+  // Both sides a fraction f of their way out from raw's, (w + f a) x (h + f b) with a = W - w, b = H - h, is an
+  // area that grows with f from w h <= limit (ratio >= 1) to W H > limit. It equals the limit at the positive root
+  // of a b f^2 + p f - q = 0, p = a h + b w > 0, q = limit - w h >= 0, written in a form that also holds for a b = 0.
+  const double a = size.w - raw.w;
+  const double b = size.h - raw.h;
+  const double p = a * raw.h + b * raw.w;
+  const double q = limit - raw.w * raw.h;
+  const double f = std::clamp(2 * q / (p + std::sqrt(p * p + 4 * a * b * q)), 0.0, 1.0);
+  return Size{raw.w + f * a, raw.h + f * b};
 }
 ```
 
@@ -3009,22 +3062,25 @@ void BoxTimeline::emit(std::vector<MaskBox>& out, const Track& track, const Box&
   double y2 = region.y2 + my;
   growTo(x1, x2, config_.minBoxPx);
   growTo(y1, y2, config_.minBoxPx);
-  x1 = std::clamp(x1, 0.0, static_cast<double>(width_));
-  x2 = std::clamp(x2, 0.0, static_cast<double>(width_));
-  y1 = std::clamp(y1, 0.0, static_cast<double>(height_));
-  y2 = std::clamp(y2, 0.0, static_cast<double>(height_));
-  if (!(x2 > x1) || !(y2 > y1)) {
+  const auto frameW = static_cast<double>(width_);
+  const auto frameH = static_cast<double>(height_);
+  if (!(std::min(x2, frameW) > std::max(x1, 0.0)) || !(std::min(y2, frameH) > std::max(y1, 0.0))) {
     shown_.erase(track.id);  // off the frame: a mask that comes back starts afresh
     return;
   }
-  const Rect raw{x1, y1, x2, y2};
+  const Size raw{x2 - x1, y2 - y1};
   const auto it = shown_.find(track.id);
-  const Rect mask = it == shown_.end()
-                        ? raw
-                        : cappedArea(smoothed(it->second, raw, config_.shrinkPerFrame), raw, config_.maxMaskAreaRatio);
-  shown_[track.id] = mask;
-  out.push_back(MaskBox{region.cls, static_cast<float>(mask.x1), static_cast<float>(mask.y1),
-                        static_cast<float>(mask.x2), static_cast<float>(mask.y2), origin, track.id});
+  const Size size = it == shown_.end() ? raw
+                                       : cappedArea(smoothed(it->second, raw, config_.shrinkPerFrame,
+                                                             origin == MaskOrigin::Held),
+                                                    raw, config_.maxMaskAreaRatio);
+  shown_[track.id] = size;
+  const double cx = (x1 + x2) / 2.0;
+  const double cy = (y1 + y2) / 2.0;
+  out.push_back(MaskBox{region.cls, static_cast<float>(std::clamp(cx - size.w / 2.0, 0.0, frameW)),
+                        static_cast<float>(std::clamp(cy - size.h / 2.0, 0.0, frameH)),
+                        static_cast<float>(std::clamp(cx + size.w / 2.0, 0.0, frameW)),
+                        static_cast<float>(std::clamp(cy + size.h / 2.0, 0.0, frameH)), origin, track.id});
 }
 ```
 
@@ -3080,13 +3136,13 @@ void BoxTimeline::emit(std::vector<MaskBox>& out, const Track& track, const Box&
   "max_mask_area_ratio": 4.0,
 ```
 
-`cpp/README.md` 的"补框：一个目标一个框"一条末尾加：`每条轨迹的打码框还会平滑：需要变大时立刻变大，需要变小时每帧每条边最多收进 shrink_per_frame（默认 0.02）× 当前边长，所以打码框总包含当帧要盖的框；面积超过 max_mask_area_ratio（默认 4）倍时，四条边按同一比例向要盖的框收缩到恰好 4 倍。注意按边收缩意味着快速移动目标的"后沿"跟得慢，框会沿运动方向拉长，直到面积上限。`
+`cpp/README.md` 的"补框：一个目标一个框"一条末尾加：`每条轨迹的打码框大小还会平滑（平滑的是宽、高，不是各条边）：需要变大时立刻变大，需要变小时宽、高每帧最多缩小 shrink_per_frame（默认 0.02），且不小于当帧要盖的框；框始终以当帧要盖的框的中心为中心，所以快速移动的目标不会被拖出一条长尾；目标丢失、原地保持的那几帧不缩小。面积超过 max_mask_area_ratio（默认 4）倍时，宽、高按同一比例向要盖的框收缩到恰好 4 倍。`
 
 `docs/USAGE.md` §4 表格在 `expand_fraction` 一行之后加两行：
 
 ```
-| `shrink_per_frame` | 0.02 | 打码框每帧每条边最多收缩的比例。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
-| `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小，快速移动的目标后沿更贴身 |
+| `shrink_per_frame` | 0.02 | 打码框的宽、高每帧最多缩小的比例（变大不受限）。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
+| `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小 |
 ```
 
 - [ ] **Step 4: 运行，确认通过**
@@ -3096,13 +3152,13 @@ SB=(sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip
 "${SB[@]}" cmake --build build/cpp -j 4 && "${SB[@]}" ./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:RedactConfig.*:RedactJob.*'
 ```
 
-预期：全部 PASSED（`BoxTimeline` 44 个），零警告。
+预期：全部 PASSED（`BoxTimeline` 45 个），零警告。
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add cpp/src/track/box_timeline.h cpp/src/track/box_timeline.cpp cpp/tests/box_timeline_test.cpp cpp/apps/vc_redact/redact_config.h cpp/apps/vc_redact/redact_config.cpp configs/redact.json cpp/tests/redact_config_test.cpp cpp/README.md docs/USAGE.md
-git commit -m "feat: mask size hysteresis and an area cap per track"
+git commit -m "feat: per-track mask size hysteresis and an area cap"
 ```
 
 ---
@@ -3741,7 +3797,7 @@ SB=(sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip
 cd py && "${SB[@]}" /Users/warsen/Projects/video-compliance-process/.venv/bin/python -m pytest tests/test_eval_coverage.py -p no:cacheprovider -q
 ```
 
-预期：gtest 全部 PASSED（`BoxTimeline` 49 个），零警告；pytest 全部通过。
+预期：gtest 全部 PASSED（`BoxTimeline` 50 个），零警告；pytest 全部通过。
 
 - [ ] **Step 6: 提交**
 
@@ -5932,7 +5988,7 @@ done
 （Step 10 的 6 个路径）
 
 ## 已知问题
-（例如快速移动目标的后沿按边收缩造成的拉长，在对比图或 index.html 里看到的具体例子；没看到就写没看到）
+（在对比图或 index.html 里看到的大片误打、打码框跳动或漏打的具体例子，写明帧号和原因；没看到就写没看到）
 ```
 
 `docs/USAGE.md`：
@@ -5968,8 +6024,8 @@ Step 7、8 的十项全部 PASS 时：按 superpowers:finishing-a-development-br
 6. 宽松配对配上的轨迹不再另留幽灵（旧代码为防配错留的），因为那会让同一目标出现两个框；配错的代价按 §3.5 接受。
 7. 没确认的低分轨迹没配上就结束，不留幽灵："相邻两个关键帧"不包括隔一个关键帧再出现。
 8. `detections.jsonl` 的每一行都写 `confirmed`（`true` / `false`），写出时间推迟到下一个关键帧；`vc_detect` 的输出不变（没有这个字段）。`vc_eval temporal` 的逐帧参照去掉 `confirmed: false` 的框。
-9. 大小迟滞严格按规格"按边"实现：快速移动目标的后沿每帧只能收缩 `shrink_per_frame` × 边长，框会沿运动方向拉长，直到面积上限把它拉回。这是规格的直接后果，校准（Task 11 A 阶段）和全片观感指标会暴露它；若验收因此不过，按 Task 11 Step 12 交给用户决定，不在本计划里改成"按大小"迟滞。
-10. 面积上限用"四条边同一比例 s 向原始框收缩"的闭式解（二次方程的较小根，一条轴不超出时退化为一次方程）。`shrink_per_frame` 的范围定为 (0, 1]，`max_mask_area_ratio` ≥ 1。
+9. 大小迟滞平滑的是**大小**，不是各条边（规格 §3.1 已按协调者确认的规则改写）：每条轨迹保存平滑后的宽、高，输出框以当帧原始框的中心为中心，所以快速移动的目标不会沿运动方向拉长；原始框按裁剪前的大小算，输出框最后再裁到画面内；`origin` 为 `held` 的帧不收缩（丢失后保留最后的大小、放在保持位置上），检出帧和插值帧照常收缩。
+10. 面积上限让宽、高按同一比例 f 向原始框的宽、高收缩，用闭式解 f = 2q / (p + √(p² + 4abq))（一条轴没超出时 a·b = 0，同一式子仍成立）。`shrink_per_frame` 的范围定为 (0, 1]（取 1 时平滑不起作用），`max_mask_area_ratio` ≥ 1。
 11. 块大小档位最高 256：计算值超过 256 时用 256（所以 `mosaic_min_block_px` 大于 256 不再起作用）；块大小必须是 ≥ 2 的偶数，保证 4:2:0 / 4:2:2 色度网格与亮度网格对齐。
 12. 观感指标要求 `masks.jsonl` 一帧一行、帧号从 0 连续；没有 `track` 字段的旧输出把"同轨多框帧"记为 `null` / "—"。另加了 `vc_eval viewing` 子命令，因为 64 分钟全片没有参照标注，`vc_eval run` 用不了。
 13. 被排除的参照框同时退出误打面积的"参照"（打在误检上的码算误打）；一个参照框都没配上的排除行在报告里单独提醒；`summary.json` 增加 `miss_list` 便于写排除表。
