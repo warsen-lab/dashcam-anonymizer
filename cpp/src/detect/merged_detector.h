@@ -21,13 +21,16 @@ std::vector<SourcedBox> mergeDetections(const std::vector<SourcedBox>& first, co
                                         float iouThreshold);
 
 // Runs two detectors on every frame and merges their boxes (mergeDetections). The classes are the
-// first detector's; the second's boxes are mapped onto them by class name. detect() times both.
+// first detector's; the second's boxes are mapped onto them by class name. detectSourced() runs the
+// two at the same time (spec 2026-10-19 §2): the first on the calling thread, the second on a thread of
+// its own; each holds its own onnxruntime session and buffers, and both only read the frame.
 class MergedDetector : public Detector {
  public:
   // Throws VcError when a class of `second` is not one of `first`'s classes.
   MergedDetector(std::unique_ptr<Detector> first, std::unique_ptr<Detector> second, float iouThreshold = kMergeIou);
 
   std::vector<Box> detect(const VideoFrame& frame) override;
+  // Either detector throwing fails the call, once the other one has returned (the first's error wins).
   std::vector<SourcedBox> detectSourced(const VideoFrame& frame) override;
   const std::vector<std::string>& classes() const override { return first_->classes(); }
   // "student+yunet"
@@ -35,11 +38,17 @@ class MergedDetector : public Detector {
   // "student/CoreML + yunet/CPU"
   std::string description() const override;
 
+  // Seconds each detector has spent in detectSourced() so far; the two overlap.
+  double firstBusySec() const { return firstBusySec_; }
+  double secondBusySec() const { return secondBusySec_; }
+
  private:
   std::unique_ptr<Detector> first_;
   std::unique_ptr<Detector> second_;
   float iouThreshold_;
   std::vector<int> secondClassMap_;  // second's class index -> first's
+  double firstBusySec_ = 0;
+  double secondBusySec_ = 0;
 };
 
 }  // namespace vc

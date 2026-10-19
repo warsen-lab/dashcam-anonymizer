@@ -460,7 +460,14 @@ TEST(RedactJob, AFaceModelAddsItsBoxesAndMergesTheOnesBothDetectorsFind) {
   }
   EXPECT_EQ(maskedFrames, 60);
   std::ifstream statsFile(s.outputDir / "stats.json");
-  EXPECT_EQ(nlohmann::json::parse(statsFile).at("detector").get<std::string>(), "fake + yunet/CPU");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("detector").get<std::string>(), "fake + yunet/CPU");
+  // Both detectors' own busy times, one item per keyframe each; detect is the wall time of the two together.
+  EXPECT_EQ(s.detectStudent.items, s.keyframes);
+  EXPECT_EQ(s.detectFace.items, s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("detect_student").at("items").get<int64_t>(), s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("detect_face").at("items").get<int64_t>(), s.keyframes);
+  EXPECT_GT(s.detectFace.busySec, 0.0);
 }
 
 TEST(RedactJob, ChecksTheFaceModelBeforeCreatingAnything) {
@@ -741,6 +748,12 @@ TEST(RedactJob, ReportsTheMainStageAndTheSetupTime) {
   for (const char* stage : {"decode", "detect", "track", "mosaic", "encode"}) {
     EXPECT_TRUE(stats.at("stages").contains(stage)) << stage;
   }
+  // Without a face model the student is the only detector: its busy time is detect's, the face model has none.
+  EXPECT_DOUBLE_EQ(s.detectStudent.busySec, s.detect.busySec);
+  EXPECT_EQ(s.detectStudent.items, s.detect.items);
+  EXPECT_EQ(s.detectFace.items, 0);
+  EXPECT_TRUE(stats.at("stages").contains("detect_student"));
+  EXPECT_TRUE(stats.at("stages").contains("detect_face"));
 }
 
 TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
@@ -751,6 +764,8 @@ TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
   s.decode = StageStat{0.5, 600};
   s.main = StageStat{2.0, 600};
   s.detect = StageStat{1.5, 50};
+  s.detectStudent = StageStat{1.2, 50};
+  s.detectFace = StageStat{0.6, 50};
   s.track = StageStat{0.25, 600};
   s.mosaic = StageStat{0.25, 600};
   s.encode = StageStat{2.4, 600};
@@ -765,6 +780,11 @@ TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
       << summary;
   EXPECT_NE(summary.find("detect rate:   9.99 /s (every 6 frames of a 59.94 fps video)\n"), std::string::npos) << summary;
   EXPECT_NE(summary.find("elapsed:       3.00 s (200.0 fps)"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("detectors:     student 24.0 ms + face 12.0 ms per keyframe, run in parallel: 30.0 ms\n"),
+            std::string::npos)
+      << summary;
+  s.detectFace = StageStat{};
+  EXPECT_EQ(redactSummary(s).find("detectors:"), std::string::npos);  // one detector: no such line
 }
 
 TEST(RedactJob, QueueCapacityIsBoundedByBytesPerFrame) {

@@ -36,6 +36,8 @@ add_library(vc_core STATIC
 target_include_directories(vc_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)
 
+find_package(Threads REQUIRED)
+
 add_library(vc_detect_lib STATIC
   src/detect/fake_detector.cpp
   src/detect/merged_detector.cpp
@@ -47,7 +49,7 @@ add_library(vc_detect_lib STATIC
   src/detect/yunet_detector.cpp
 )
 # Only the .cpp files of this library include nlohmann/json; its headers do not.
-target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime PRIVATE vc_nlohmann_json)
+target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime Threads::Threads PRIVATE vc_nlohmann_json)
 
 add_library(vc_extract_lib STATIC
   apps/vc_extract/extract_cli.cpp
@@ -55,8 +57,6 @@ add_library(vc_extract_lib STATIC
 )
 target_include_directories(vc_extract_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
 target_link_libraries(vc_extract_lib PUBLIC vc_core)
-
-find_package(Threads REQUIRED)
 
 add_library(vc_redact_lib STATIC
   apps/vc_detect/detect_cli.cpp

@@ -64,7 +64,10 @@ struct RedactStats {
   // runs detect, track and mosaic one after another (its busy time is their sum).
   StageStat decode;
   StageStat main;    // items = frames
-  StageStat detect;  // items = keyframes; with a face model both detectors and the merge
+  StageStat detect;         // items = keyframes; wall time of each keyframe's detection (with a face model both
+                            // detectors at once, plus the merge)
+  StageStat detectStudent;  // the student (or fake) detector's own busy time; equals detect without a face model
+  StageStat detectFace;     // the face model's own busy time (it overlaps detectStudent); {0, 0} without one
   StageStat track;   // keyframe choice + BoxTimeline; items = frames
   StageStat mosaic;
   StageStat encode;

@@ -508,6 +508,8 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["stages"]["main"] = stageJson(s.main);
   j["stages"]["encode"] = stageJson(s.encode);
   j["stages"]["detect"] = stageJson(s.detect);
+  j["stages"]["detect_student"] = stageJson(s.detectStudent);
+  j["stages"]["detect_face"] = stageJson(s.detectFace);
   j["stages"]["track"] = stageJson(s.track);
   j["stages"]["mosaic"] = stageJson(s.mosaic);
   j["setup_s"] = s.setupSec;
@@ -558,6 +560,13 @@ std::string redactSummary(const RedactStats& s) {
                    s.setupSec);
   out += formatted("stages (fps):  decode %.1f, main %.1f (detect %.1f, track %.1f, mosaic %.1f), encode %.1f\n",
                    s.decode.fps(), s.main.fps(), s.detect.fps(), s.track.fps(), s.mosaic.fps(), s.encode.fps());
+  if (s.detectFace.items > 0) {
+    const auto perKeyframeMs = [](const StageStat& stage) {
+      return stage.items > 0 ? 1000.0 * stage.busySec / static_cast<double>(stage.items) : 0.0;
+    };
+    out += formatted("detectors:     student %.1f ms + face %.1f ms per keyframe, run in parallel: %.1f ms\n",
+                     perKeyframeMs(s.detectStudent), perKeyframeMs(s.detectFace), perKeyframeMs(s.detect));
+  }
   out += formatted("decode errors: %lld\n", static_cast<long long>(s.decodeErrors));
   out += formatted("elapsed:       %.2f s (%.1f fps)\n", s.elapsedSec, fps);
   return out;
@@ -613,6 +622,12 @@ RedactStats runRedact(const RedactOptions& options) {
     stats.droppedStreams = reader.droppedStreams();
     stats.audioStreams = reader.audioStreams().size();
     stats.detector = detector->description();
+    if (const auto* merged = dynamic_cast<const MergedDetector*>(detector.get())) {
+      stats.detectStudent = StageStat{merged->firstBusySec(), stats.detect.items};
+      stats.detectFace = StageStat{merged->secondBusySec(), stats.detect.items};
+    } else {
+      stats.detectStudent = stats.detect;
+    }
     stats.elapsedSec = secondsSince(started);
     writeStats(stats.outputDir / kStatsFile, stats, options);
     return stats;
