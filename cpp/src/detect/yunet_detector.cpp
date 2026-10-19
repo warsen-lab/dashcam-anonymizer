@@ -3,7 +3,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <new>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -46,7 +49,6 @@ struct YuNetDetector::Impl {
   Ort::Session session{nullptr};
   std::string backend = "CPU";
   std::string inputName;
-  std::array<std::string, kOutputs.size()> outputNames;
   int frameWidth = 0;
   int frameHeight = 0;
   int padWidth = 0;
@@ -56,7 +58,10 @@ struct YuNetDetector::Impl {
   av::FramePtr bgr = av::allocFrame();
   Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-  // (Re)builds the session for frames of width x height.
+  // (Re)builds the session for frames of width x height. Everything is built in locals and committed
+  // at the end by moves and swaps that cannot throw, so a failure anywhere leaves the detector as it
+  // was: the next frame of the old size still runs on the old session and buffer, and a frame of the
+  // size that failed is refused again instead of running on half a state.
   void open(int width, int height) {
     if (width <= 0 || height <= 0) throw VcError("face detector: frame size " + sizeText(width, height));
     const int pw = padded(width, info.padMultiple);
@@ -66,29 +71,43 @@ struct YuNetDetector::Impl {
       options.AddFreeDimensionOverrideByName("H", ph);
       options.AddFreeDimensionOverrideByName("W", pw);
     };
+    CreatedSession created;
+    std::string newInputName;
     try {
       const std::optional<fs::path> cache =
           provider == ExecutionProvider::CoreML ? yunetCoreMlCacheDirectory(onnx, pw, ph) : std::nullopt;
-      CreatedSession created = createOrtSession(onnx, provider, cache, fixSize);
-      session = std::move(created.session);
-      backend = created.backend;
-      checkModel(width, height, pw, ph);  // its VcError is a model problem, never retried
+      created = createOrtSession(onnx, provider, cache, fixSize);
+      newInputName = checkModel(created.session, width, height, pw, ph);  // its VcError is a model problem, never retried
     } catch (const Ort::Exception& e) {
       throw VcError("onnxruntime: " + onnx.string() + ": " + e.what());
     }
+    // The padding stays 0: fill() only ever writes the frame's own pixels.
+    std::vector<float> buffer;
+    try {
+      buffer.assign(3 * static_cast<size_t>(pw) * static_cast<size_t>(ph), 0.0f);
+    } catch (const std::bad_alloc&) {
+      throw VcError("face detector: no memory for the input of a " + sizeText(width, height) + " frame");
+    } catch (const std::length_error&) {
+      throw VcError("face detector: the input of a " + sizeText(width, height) + " frame is too large");
+    }
+    static_assert(std::is_nothrow_move_assignable_v<Ort::Session> && std::is_nothrow_move_assignable_v<std::string>);
+    input.swap(buffer);  // before the sizes: fill() trusts them to describe `input`
+    session = std::move(created.session);
+    backend = std::move(created.backend);
+    inputName = std::move(newInputName);
     frameWidth = width;
     frameHeight = height;
     padWidth = pw;
     padHeight = ph;
-    // The padding stays 0: fill() only ever writes the frame's own pixels.
-    input.assign(3 * static_cast<size_t>(pw) * static_cast<size_t>(ph), 0.0f);
   }
 
-  void checkModel(int width, int height, int pw, int ph) {
-    if (session.GetInputCount() != 1) throw VcError(onnx.string() + ": expected one input");
+  // Checks the input and the outputs (found by the names in kOutputs) of `checked` for a frame of
+  // width x height padded to pw x ph; returns the input's name.
+  std::string checkModel(const Ort::Session& checked, int width, int height, int pw, int ph) const {
+    if (checked.GetInputCount() != 1) throw VcError(onnx.string() + ": expected one input");
     Ort::AllocatorWithDefaultOptions allocator;
-    inputName = session.GetInputNameAllocated(0, allocator).get();
-    const std::vector<int64_t> in = readFloatTensorSpec(session.GetInputTypeInfo(0), "input", onnx).shape;
+    std::string name = checked.GetInputNameAllocated(0, allocator).get();
+    const std::vector<int64_t> in = readFloatTensorSpec(checked.GetInputTypeInfo(0), "input", onnx).shape;
     if (in.size() != 4 || (in[0] != 1 && in[0] != -1) || in[1] != 3) {
       throw VcError(onnx.string() + ": input shape " + shapeText(in) + " is not [1, 3, H, W]");
     }
@@ -99,19 +118,19 @@ struct YuNetDetector::Impl {
     }
     for (size_t i = 0; i < kOutputs.size(); ++i) {
       bool found = false;
-      for (size_t k = 0; k < session.GetOutputCount() && !found; ++k) {
-        if (std::string(session.GetOutputNameAllocated(k, allocator).get()) != kOutputs[i]) continue;
+      for (size_t k = 0; k < checked.GetOutputCount() && !found; ++k) {
+        if (std::string(checked.GetOutputNameAllocated(k, allocator).get()) != kOutputs[i]) continue;
         found = true;
         const std::vector<int64_t> shape =
-            readFloatTensorSpec(session.GetOutputTypeInfo(k), std::string("output ") + kOutputs[i], onnx).shape;
+            readFloatTensorSpec(checked.GetOutputTypeInfo(k), std::string("output ") + kOutputs[i], onnx).shape;
         if (shape.size() != 3 || shape[2] != valuesPerAnchor(i)) {
           throw VcError(onnx.string() + ": output " + kOutputs[i] + " has shape " + shapeText(shape) +
                         ", expected [1, N, " + std::to_string(valuesPerAnchor(i)) + "]");
         }
       }
       if (!found) throw VcError(onnx.string() + ": no output " + kOutputs[i] + " (not a YuNet model?)");
-      outputNames[i] = kOutputs[i];
     }
+    return name;
   }
 
   // Frame -> BGR floats 0-255 in the top-left corner of the input.
@@ -140,10 +159,8 @@ struct YuNetDetector::Impl {
     Ort::Value tensor =
         Ort::Value::CreateTensor<float>(memory, input.data(), input.size(), shape.data(), shape.size());
     const char* inputs[] = {inputName.c_str()};
-    std::array<const char*, kOutputs.size()> outputs{};
-    for (size_t i = 0; i < outputs.size(); ++i) outputs[i] = outputNames[i].c_str();
     std::vector<Ort::Value> result =
-        session.Run(Ort::RunOptions{nullptr}, inputs, &tensor, 1, outputs.data(), outputs.size());
+        session.Run(Ort::RunOptions{nullptr}, inputs, &tensor, 1, kOutputs.data(), kOutputs.size());
     std::array<const float*, kOutputs.size()> data{};
     for (size_t i = 0; i < kOutputs.size(); ++i) {
       const int s = strideOf(i);
