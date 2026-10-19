@@ -1066,3 +1066,64 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert "vc_eval:" in capsys.readouterr().err
     assert main(["run", "--stems", "a", "--model", "m", "--out", str(out), "--fps", "five"]) == 2
     assert "vc_eval:" in capsys.readouterr().err
+
+
+def test_a_face_model_goes_to_every_vc_redact_run_and_is_named_in_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    face = tmp_path / "yunet"
+    face.mkdir()
+    (face / "model.onnx").write_bytes(b"onnx")  # only vc_redact reads them; run_all checks that they are there
+    (face / "model.json").write_text("{}")
+    calls = []
+    summary = run_all(_cfg(tmp_path, face_model=face), runner=_fake_runner(calls))
+
+    redact = [c for c in calls if c[0].endswith("vc_redact")]
+    assert len(redact) == 3  # dense + 2 fps
+    for command in redact:
+        assert command[command.index("--face-model") + 1] == str(face)
+    # the C++ / Python consistency check compares the student alone
+    assert all("--face-model" not in c for c in calls if c[0].endswith("vc_detect"))
+    assert summary["face_model"] == str(face)
+    assert json.loads((tmp_path / "report" / "summary.json").read_text())["face_model"] == str(face)
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert f"人脸模型：{face}" in md
+
+
+def test_without_a_face_model_vc_redact_runs_as_before_and_the_summary_says_so(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    calls = []
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner(calls))
+    assert all("--face-model" not in c for c in calls)
+    assert summary["face_model"] is None
+    assert "人脸模型：无" in (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+
+
+def test_a_missing_face_model_is_refused_before_any_run(tmp_path):
+    _setup(tmp_path)
+    calls = []
+    with pytest.raises(ValueError, match="yunet"):
+        run_all(_cfg(tmp_path, face_model=tmp_path / "yunet"), runner=_fake_runner(calls))
+    assert calls == []
+
+
+def test_overwrite_never_clears_the_face_model(tmp_path):
+    _setup(tmp_path)
+    face = tmp_path / "report" / "yunet"
+    face.mkdir(parents=True)
+    calls = []
+    with pytest.raises(ValueError, match="overlaps"):
+        run_all(_cfg(tmp_path, face_model=face, overwrite=True), runner=_fake_runner(calls))
+    assert calls == [] and face.is_dir()
+
+
+def test_cli_run_passes_the_face_model(tmp_path, monkeypatch):
+    import vc_eval.run as run_module
+
+    seen = []
+    monkeypatch.setattr(run_module, "run_all", lambda cfg: seen.append(cfg) or {"chosen_fps": 10.0})
+    argv = ["run", "--stems", "a", "--model", str(tmp_path / "m"), "--out", str(tmp_path / "rep")]
+    assert main(argv) == 0 and seen[-1].face_model is None
+    assert main([*argv, "--face-model", str(tmp_path / "yunet")]) == 0
+    assert seen[-1].face_model == tmp_path / "yunet"
