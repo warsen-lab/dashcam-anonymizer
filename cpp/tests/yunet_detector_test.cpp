@@ -197,6 +197,55 @@ TEST(YuNetDetector, RejectsAStaticModelOfAnotherSize) {
   }
 }
 
+// A copy of const_yunet in a directory of its own, so that a test can change its model.onnx.
+fs::path copiedConstModel(const std::string& name) {
+  const fs::path dir = test::tmpDir() / name;
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  fs::copy_file(constModel() / "model.json", dir / "model.json");
+  fs::copy_file(constModel() / "model.onnx", dir / "model.onnx");
+  return dir;
+}
+
+// A re-open that fails must leave the detector as it was: the frames of the old size still run on the
+// old session, with the old names and buffer.
+TEST(YuNetDetector, AFailedReopenLeavesTheDetectorAsItWas) {
+  const fs::path dir = copiedConstModel("yunet_failed_reopen");
+  YuNetDetector detector(dir, ExecutionProvider::Cpu, YuNetParams{}, 100, 30);  // pads to 128x32
+  const auto wide = bgrFrame(100, 30, kRed, 64, 0, 96, 30, kCyan);
+  std::vector<Box> boxes = detector.detect(view(wide.get()));
+  ASSERT_EQ(boxes.size(), 1u);
+  expectBox(boxes[0], 64, 0, 96, 30, 30.0f / 32.0f);
+
+  // The model file is replaced by one fixed at 64x64: a 100x64 frame (128x64) opens a session on it,
+  // but the model check refuses it.
+  fs::copy_file(fs::path(VC_TEST_DATA_DIR) / "const_yunet_static" / "model.onnx", dir / "model.onnx",
+                fs::copy_options::overwrite_existing);
+  const auto taller = bgrFrame(100, 64, kRed, 64, 0, 96, 32, kCyan);
+  EXPECT_THROW(detector.detect(view(taller.get())), VcError);
+  EXPECT_THROW(detector.detect(view(taller.get())), VcError);  // again: it is refused again, not run on stale state
+
+  // The next frame of the old size runs as before (a session on the fixed model would refuse a 128x32 input).
+  boxes = detector.detect(view(wide.get()));
+  ASSERT_EQ(boxes.size(), 1u);
+  expectBox(boxes[0], 64, 0, 96, 30, 30.0f / 32.0f);
+}
+
+// A frame size whose input buffer cannot exist is a VcError (not a bare std::length_error), and the
+// detector keeps working at its own size afterwards.
+TEST(YuNetDetector, AFrameSizeNoBufferCanHoldIsRefusedWithAVcError) {
+  YuNetDetector detector(constModel(), ExecutionProvider::Cpu, YuNetParams{}, 64, 64);
+  av::FramePtr huge = av::allocFrame();  // only its size is read before the buffer fails
+  huge->format = AV_PIX_FMT_BGR24;
+  huge->width = 1 << 30;
+  huge->height = 1 << 30;
+  EXPECT_THROW(detector.detect(view(huge.get())), VcError);
+  const auto frame = bgrFrame(64, 64, kRed, 32, 0, 64, 32, kCyan);
+  const std::vector<Box> boxes = detector.detect(view(frame.get()));
+  ASSERT_EQ(boxes.size(), 1u);
+  expectBox(boxes[0], 32, 0, 64, 32, 1.0f);
+}
+
 TEST(YuNetDetector, RejectsAStudentModelAndMissingFiles) {
   try {
     YuNetDetector detector(fs::path(VC_TEST_DATA_DIR) / "const_yolo", ExecutionProvider::Cpu, YuNetParams{}, 64, 64);

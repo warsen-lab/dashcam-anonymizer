@@ -42,7 +42,9 @@ class YuNetDetector : public Detector {
 
   // Any pixel format FFmpeg converts to BGR24. Throws VcError when the frame has no pixels, when an
   // output does not have the expected anchor count, for non-finite values (decodeYuNet), and when
-  // onnxruntime fails.
+  // onnxruntime fails. When the session for a new frame size cannot be set up (the checks of the
+  // constructor, or no memory for the input), the detector stays as it was: frames of its previous
+  // size still work, and a frame of the new size is refused again.
   std::vector<Box> detect(const VideoFrame& frame) override;
   const std::vector<std::string>& classes() const override;
   std::string source() const override { return "yunet"; }

@@ -364,6 +364,29 @@ TEST(RedactJob, AFaceModelAddsItsBoxesAndMergesTheOnesBothDetectorsFind) {
   for (const auto& [frame, counts] : sources) {
     EXPECT_EQ(counts, (std::map<std::string, int>{{"fake+yunet", 1}, {"yunet", 219}})) << "frame " << frame;
   }
+
+  // The YuNet boxes are masked, not just detected: on every frame each of the 220 full cells (the
+  // 20 x 11 grid of 32x32 cells) lies inside one mask, and nothing but faces is masked.
+  std::ifstream masks(s.outputDir / "masks.jsonl");
+  int maskedFrames = 0;
+  for (std::string line; std::getline(masks, line);) {
+    const nlohmann::json record = nlohmann::json::parse(line);
+    const int frame = record.at("frame").get<int>();
+    ++maskedFrames;
+    for (const auto& box : record.at("boxes")) EXPECT_EQ(box.at("cls").get<std::string>(), "face") << "frame " << frame;
+    for (int row = 0; row < 11; ++row) {
+      for (int col = 0; col < 20; ++col) {
+        bool covered = false;
+        for (const auto& box : record.at("boxes")) {
+          covered = covered || (box.at("x1").get<double>() <= 32 * col + 0.1 && box.at("y1").get<double>() <= 32 * row + 0.1 &&
+                                box.at("x2").get<double>() >= 32 * (col + 1) - 0.1 &&
+                                box.at("y2").get<double>() >= 32 * (row + 1) - 0.1);
+        }
+        EXPECT_TRUE(covered) << "frame " << frame << " cell row " << row << " col " << col;
+      }
+    }
+  }
+  EXPECT_EQ(maskedFrames, 60);
   std::ifstream statsFile(s.outputDir / "stats.json");
   EXPECT_EQ(nlohmann::json::parse(statsFile).at("detector").get<std::string>(), "fake + yunet/CPU");
 }

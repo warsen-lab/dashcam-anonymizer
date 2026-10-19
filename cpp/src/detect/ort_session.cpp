@@ -172,9 +172,9 @@ ExecutionProvider parseExecutionProvider(const std::string& text) {
   throw std::invalid_argument("unknown execution provider '" + text + "' (coreml|cpu)");
 }
 
-OrtSession createOrtSession(const fs::path& onnx, ExecutionProvider provider,
-                            const std::optional<fs::path>& coreMlCache, const SessionConfigurer& configure) {
-  OrtSession result;
+CreatedSession createOrtSession(const fs::path& onnx, ExecutionProvider provider,
+                                const std::optional<fs::path>& coreMlCache, const SessionConfigurer& configure) {
+  CreatedSession result;
   if (provider == ExecutionProvider::CoreML) {
     const std::optional<fs::path> cache = usableCoreMlCache(coreMlCache);
     CoreMlAttempt coreMl = attemptCoreMl(onnx, cache, configure);

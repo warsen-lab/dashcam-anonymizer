@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -60,6 +62,8 @@ def preprocess(bgr: np.ndarray) -> np.ndarray:
 def _level(outputs: Mapping[str, np.ndarray], kind: str, stride: int, anchors: int) -> np.ndarray:
     name = f"{kind}_{stride}"
     width = OUTPUT_WIDTHS[kind]
+    if name not in outputs:
+        raise ValueError(f"the model outputs have no {name}")
     value = np.asarray(outputs[name], dtype=np.float32)
     if value.shape != (1, anchors, width):
         raise ValueError(f"{name} has shape {list(value.shape)}, expected [1, {anchors}, {width}]")
@@ -201,29 +205,69 @@ def make_dynamic(model):
     dims = dynamic.graph.input[0].type.tensor_type.shape.dim
     dims[2].dim_param = "H"
     dims[3].dim_param = "W"
+    # only the twelve known outputs, which _check_source has shown to be rank 3: any other output is left as it is
+    known = {f"{kind}_{s}" for kind in OUTPUT_WIDTHS for s in STRIDES}
     for output in dynamic.graph.output:
-        output.type.tensor_type.shape.dim[1].dim_param = "N"
+        if output.name in known:
+            output.type.tensor_type.shape.dim[1].dim_param = "N"
     del dynamic.graph.value_info[:]
-    onnx.checker.check_model(dynamic)
+    try:
+        onnx.checker.check_model(dynamic)
+    except Exception as e:  # onnx.checker.ValidationError, and whatever else the checker's own parsing raises
+        raise ValueError(f"the model with a free input size is not valid ONNX: {e}") from e
     return dynamic
 
 
 def _check_runs(onnx_path: Path) -> None:
     """Runs the written model on a small input that is not 640x640 and checks every output's anchor count."""
     width, height = _CHECK_SIZE
-    session = yunet_session(onnx_path)
-    names = [o.name for o in session.get_outputs()]
-    results = dict(zip(names, session.run(None, {INPUT: np.zeros((1, 3, height, width), np.float32)})))
+    try:
+        session = yunet_session(onnx_path)
+        names = [o.name for o in session.get_outputs()]
+        results = dict(zip(names, session.run(None, {INPUT: np.zeros((1, 3, height, width), np.float32)})))
+    except ImportError:
+        raise  # onnxruntime is not installed: not a problem with the model
+    except Exception as e:  # onnxruntime raises its own types (a graph with a hard-coded Reshape fails here)
+        raise ValueError(f"the model with a free input size does not run on a {width}x{height} input: {e}") from e
     for kind in OUTPUT_WIDTHS:
         for s in STRIDES:
             _level(results, kind, s, (width // s) * (height // s))
 
 
+def _dir_mode(out_dir: Path) -> int:
+    """The permissions the directory put in place by os.replace should have: an existing out_dir keeps its own, a new one
+    gets what mkdir would give it (the staging directory is made by mkdtemp, which allows its owner only)."""
+    if out_dir.is_dir():
+        return stat.S_IMODE(out_dir.stat().st_mode)
+    mask = os.umask(0)
+    os.umask(mask)
+    return 0o777 & ~mask
+
+
+def _publish(model_file: Path, meta: dict, out_dir: Path) -> None:
+    """out_dir holding a copy of model_file as model.onnx and model.json, all at once.
+
+    Both files are written into a staging directory beside out_dir (the same file system), which one os.replace then puts
+    in place of out_dir (absent or empty). A failure at any step leaves neither a half-written out_dir, nor a model.onnx
+    without its model.json that vc_redact would reject far from here, nor the staging directory.
+    """
+    parent = out_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.", dir=parent))
+    try:
+        shutil.copyfile(model_file, staging / MODEL_ONNX)
+        (staging / MODEL_JSON).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        os.chmod(staging, _dir_mode(out_dir))
+        os.replace(staging, out_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)  # gone already after a successful os.replace
+
+
 def write_yunet_model(source: Path, out_dir: Path) -> Path:
     """model.onnx (free input size) + model.json into out_dir, which must not exist or be empty.
 
-    Everything is checked before out_dir receives a file: the source is YuNet, and the converted model runs at a size
-    other than 640x640 with the expected anchor counts.
+    Everything is checked before out_dir is touched: the source is YuNet, and the converted model runs at a size other than
+    640x640 with the expected anchor counts. out_dir then appears with both files at once (see _publish).
     """
     import onnx
 
@@ -245,10 +289,8 @@ def write_yunet_model(source: Path, out_dir: Path) -> Path:
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
     }
     with tempfile.TemporaryDirectory() as tmp:
-        staged = Path(tmp) / MODEL_ONNX
-        onnx.save(dynamic, str(staged))
-        _check_runs(staged)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged), out_dir / MODEL_ONNX)
-    (out_dir / MODEL_JSON).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        checked = Path(tmp) / MODEL_ONNX
+        onnx.save(dynamic, str(checked))
+        _check_runs(checked)
+        _publish(checked, meta, out_dir)
     return out_dir / MODEL_ONNX

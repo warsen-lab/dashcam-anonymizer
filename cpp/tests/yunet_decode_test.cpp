@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -107,6 +108,22 @@ TEST(YuNetDecode, ClampsClsAndObjToZeroOneBeforeTheRoot) {
   for (size_t i = 1; i < boxes.size(); ++i) EXPECT_EQ(boxes[i].score, 0.0f);
 }
 
+TEST(YuNetDecode, TheLowerClampMakesANegativeScoreZero) {
+  // Unclamped, cls = obj = -0.5 would score sqrt(0.25) = 0.5.
+  Outputs out(64, 32);
+  out.set(32, 0, 1, -0.5f, -0.5f, bboxFor(32, 0, 1, 40, 4, 20, 10));
+  EXPECT_TRUE(out.decode(params(0.3f)).empty());
+  // At threshold 0 every anchor is kept and nothing is suppressed (IoU is never above 1): the clamped
+  // one scores exactly 0.
+  const std::vector<Box> all = out.decode(params(0.0f, 1.0f));
+  const auto it = std::find_if(all.begin(), all.end(), [](const Box& b) {
+    return std::abs(b.x1 - 40) < 1e-3f && std::abs(b.y1 - 4) < 1e-3f && std::abs(b.x2 - 60) < 1e-3f &&
+           std::abs(b.y2 - 14) < 1e-3f;
+  });
+  ASSERT_NE(it, all.end());
+  EXPECT_EQ(it->score, 0.0f);
+}
+
 TEST(YuNetDecode, KeepsAScoreEqualToTheThreshold) {
   Outputs out(64, 32);
   out.set(32, 0, 0, 0.25f, 0.25f, {0.5f, 0.5f, 0, 0});  // sqrt(0.0625) = 0.25 exactly
@@ -149,6 +166,44 @@ TEST(YuNetDecode, RunsHighestScoreFirstAndKeepsTheTopK) {
   EXPECT_NEAR(top[1].score, 0.8f, 1e-6f);
 }
 
+// OpenCV keeps the topK best candidates BEFORE it suppresses: a candidate that only the suppressed
+// ones would have made room for does not come back.
+TEST(YuNetDecode, TheTopKCutComesBeforeNms) {
+  // A (0.9) and B (0.8) overlap with IoU 0.5; C (0.6) is separate.
+  Outputs out(64, 32);
+  out.set(8, 0, 0, 1.0f, 0.81f, bboxFor(8, 0, 0, 0, 0, 20, 10));
+  out.set(8, 0, 1, 1.0f, 0.64f, bboxFor(8, 0, 1, 0, 0, 10, 10));
+  out.set(8, 2, 4, 1.0f, 0.36f, {0.5f, 0.5f, 0, 0});
+  const std::vector<Box> three = out.decode(params(0.3f, 0.3f, 3));
+  ASSERT_EQ(three.size(), 2u);  // A and C: B is suppressed
+  EXPECT_NEAR(three[0].score, 0.9f, 1e-6f);
+  EXPECT_NEAR(three[1].score, 0.6f, 1e-6f);
+  const std::vector<Box> two = out.decode(params(0.3f, 0.3f, 2));
+  ASSERT_EQ(two.size(), 1u);  // A and B make the cut, B is suppressed, C was already cut
+  EXPECT_NEAR(two[0].score, 0.9f, 1e-6f);
+}
+
+// Equal scores keep the order of the anchors: stride 8 before 16 before 32, row-major within a level.
+TEST(YuNetDecode, AnEqualScoreKeepsTheEarlierAnchor) {
+  Outputs out(64, 32);
+  out.set(8, 0, 0, 1.0f, 0.64f, bboxFor(8, 0, 0, 0, 0, 16, 16));
+  out.set(16, 0, 0, 1.0f, 0.64f, bboxFor(16, 0, 0, 0, 0, 16, 12));
+  const std::vector<Box> boxes = out.decode(params(0.3f, 0.3f));
+  ASSERT_EQ(boxes.size(), 1u);
+  expectBox(boxes[0], 0, 0, 16, 16);  // the stride-8 anchor's, not the stride-16 one's (16 x 12)
+}
+
+// The integer rectangle of a box is its values truncated toward zero, not rounded or floored: x = -0.9
+// is 0, so the 10-wide A covers [0, 10) and overlaps B = [8, 18) by 2 of 18 (0.111); floored to -1 it
+// would be 1 of 19 (0.053), rounded to -1 as well.
+TEST(YuNetDecode, TruncatesNegativeCoordinatesTowardZero) {
+  Outputs out(64, 32);
+  out.set(8, 0, 0, 1.0f, 0.81f, bboxFor(8, 0, 0, -0.9, 0, 10, 10));
+  out.set(8, 0, 1, 1.0f, 0.64f, bboxFor(8, 0, 1, 8, 0, 10, 10));
+  EXPECT_EQ(out.decode(params(0.3f, 0.08f)).size(), 1u);
+  EXPECT_EQ(out.decode(params(0.3f, 0.12f)).size(), 2u);
+}
+
 TEST(YuNetDecode, ClipsBoxesToTheFrameNotThePaddedInput) {
   Outputs out(64, 32);
   out.set(32, 0, 1, 1.0f, 1.0f, bboxFor(32, 0, 1, -6, -4, 80, 40));
@@ -171,8 +226,11 @@ TEST(YuNetDecode, ANonFiniteScoreAnywhereThrows) {
 }
 
 TEST(YuNetDecode, AKeptBoxWithNonFiniteCoordinatesThrows) {
-  const std::vector<std::array<float, 4>> broken = {
-      {kNan, 0.5f, 0, 0}, {0.5f, kInf, 0, 0}, {0.5f, 0.5f, kInf, 0}, {0.5f, 0.5f, 0, 1000.0f}};  // exp overflows
+  // -inf in a size makes exp() 0, a finite box; the raw value is non-finite all the same (vc_train.yunet agrees).
+  const std::vector<std::array<float, 4>> broken = {{kNan, 0.5f, 0, 0},        {0.5f, kInf, 0, 0},
+                                                    {0.5f, 0.5f, kInf, 0},     {0.5f, 0.5f, 0, 1000.0f},  // exp overflows
+                                                    {0.5f, 0.5f, -kInf, 0},    {0.5f, 0.5f, 0, -kInf},
+                                                    {-kInf, 0.5f, 0, 0},       {0.5f, -kInf, 0, 0}};
   for (const auto& bbox : broken) {
     Outputs out(64, 32);
     out.set(32, 0, 0, 1.0f, 1.0f, bbox);

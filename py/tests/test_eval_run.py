@@ -1068,13 +1068,24 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert "vc_eval:" in capsys.readouterr().err
 
 
+FACE_MODEL_JSON = {
+    "name": "yunet-2023mar", "classes": ["face"], "output_format": "yunet",
+    "input": {"color": "BGR", "scale": 1.0, "letterbox": "top_left", "pad_value": 0, "pad_multiple": 32},
+}
+
+
+def _face_model(directory, meta=None, onnx=b"onnx"):
+    """A face model directory as vc_train yunet writes it; only vc_redact reads the files, run_all checks them."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.onnx").write_bytes(onnx)
+    (directory / "model.json").write_text(json.dumps(FACE_MODEL_JSON if meta is None else meta))
+    return directory
+
+
 def test_a_face_model_goes_to_every_vc_redact_run_and_is_named_in_the_summary(tmp_path, monkeypatch):
     _setup(tmp_path)
     _python_dets(monkeypatch)
-    face = tmp_path / "yunet"
-    face.mkdir()
-    (face / "model.onnx").write_bytes(b"onnx")  # only vc_redact reads them; run_all checks that they are there
-    (face / "model.json").write_text("{}")
+    face = _face_model(tmp_path / "yunet")
     calls = []
     summary = run_all(_cfg(tmp_path, face_model=face), runner=_fake_runner(calls))
 
@@ -1103,9 +1114,73 @@ def test_without_a_face_model_vc_redact_runs_as_before_and_the_summary_says_so(t
 def test_a_missing_face_model_is_refused_before_any_run(tmp_path):
     _setup(tmp_path)
     calls = []
-    with pytest.raises(ValueError, match="yunet"):
+    with pytest.raises(ValueError, match=r"yunet has no model\.onnx / model\.json; write the face model with python -m vc_train yunet"):
         run_all(_cfg(tmp_path, face_model=tmp_path / "yunet"), runner=_fake_runner(calls))
     assert calls == []
+
+
+@pytest.mark.parametrize("name", ["model.onnx", "model.json"])
+def test_a_face_model_with_a_file_missing_is_refused_before_any_run(tmp_path, name):
+    _setup(tmp_path)
+    face = _face_model(tmp_path / "yunet")
+    (face / name).unlink()
+    calls = []
+    with pytest.raises(ValueError, match=rf"yunet has no {name.replace('.', r'\.')};"):
+        run_all(_cfg(tmp_path, face_model=face), runner=_fake_runner(calls))
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "case, meta, onnx, message",
+    [
+        ("empty onnx", None, b"", r"model\.onnx is empty"),
+        ("json array", [], b"onnx", r"model\.json must hold a JSON object"),
+        ("json scalar", "yunet", b"onnx", r"model\.json must hold a JSON object"),
+        ("student format", {**FACE_MODEL_JSON, "output_format": "yolov8"}, b"onnx", r"output_format must be \"yunet\""),
+        ("no format", {"classes": ["face"]}, b"onnx", r"output_format must be \"yunet\""),
+        ("plate class", {**FACE_MODEL_JSON, "classes": ["plate"]}, b"onnx", r"classes must be \[\"face\"\]"),
+        ("two classes", {**FACE_MODEL_JSON, "classes": ["face", "plate"]}, b"onnx", r"classes must be \[\"face\"\]"),
+        ("no classes", {"output_format": "yunet"}, b"onnx", r"classes must be \[\"face\"\]"),
+    ],
+)
+def test_an_unusable_face_model_is_refused_before_any_run(tmp_path, case, meta, onnx, message):
+    _setup(tmp_path)
+    face = _face_model(tmp_path / "yunet", meta, onnx)
+    calls = []
+    with pytest.raises(ValueError, match=message):
+        run_all(_cfg(tmp_path, face_model=face), runner=_fake_runner(calls))
+    assert calls == []
+
+
+@pytest.mark.parametrize("content", [b"{", b"", b"\xff\xfe"])
+def test_a_face_model_json_that_is_not_json_is_refused_before_any_run(tmp_path, content):
+    _setup(tmp_path)
+    face = _face_model(tmp_path / "yunet")
+    (face / "model.json").write_bytes(content)
+    calls = []
+    with pytest.raises(ValueError, match=r"model\.json is not valid JSON"):
+        run_all(_cfg(tmp_path, face_model=face), runner=_fake_runner(calls))
+    assert calls == []
+
+
+@pytest.mark.parametrize("face", ["missing", "empty onnx", "student format"])
+def test_a_bad_face_model_leaves_the_previous_report_alone_under_overwrite(tmp_path, face):
+    _setup(tmp_path)
+    old = tmp_path / "report"
+    old.mkdir()
+    (old / "summary.json").write_text("previous report")
+    (old / "sub").mkdir()
+    (old / "sub" / "page.html").write_text("previous page")
+    directory = tmp_path / "yunet"  # "missing" leaves it absent
+    if face == "empty onnx":
+        _face_model(directory, onnx=b"")
+    elif face == "student format":
+        _face_model(directory, {**FACE_MODEL_JSON, "output_format": "yolov8"})
+    calls = []
+    with pytest.raises(ValueError, match="yunet"):
+        run_all(_cfg(tmp_path, face_model=directory, overwrite=True), runner=_fake_runner(calls))
+    assert calls == []
+    assert (old / "summary.json").read_text() == "previous report" and (old / "sub" / "page.html").read_text() == "previous page"
 
 
 def test_overwrite_never_clears_the_face_model(tmp_path):

@@ -85,6 +85,9 @@ TEST(ModelInfo, RejectsUnsupportedYuNetValues) {
       replaced(kYuNet, R"(,"pad_multiple":32)", ""),
       replaced(kYuNet, R"(["face"])", "[]"),
       replaced(kYuNet, R"(["face"])", R"(["face","plate"])"),
+      replaced(kYuNet, R"(["face"])", R"(["plate"])"),  // the one class must be "face"
+      replaced(kYuNet, R"(["face"])", R"(["Face"])"),
+      replaced(kYuNet, R"(["face"])", R"(["face","face"])"),
       replaced(kYuNet, R"("yunet")", R"("yunet2")"),
   };
   for (const std::string& text : bad) {
@@ -95,6 +98,35 @@ TEST(ModelInfo, RejectsUnsupportedYuNetValues) {
       EXPECT_EQ(std::string(e.what()).rfind("model.json: ", 0), 0u) << e.what();
     }
   }
+}
+
+// get<int>() would wrap 4294967328 (2^32 + 32) to 32, a value every check accepts.
+TEST(ModelInfo, RejectsAnIntegerBeyondTheIntRange) {
+  const std::vector<std::string> bad = {
+      replaced(kValid, R"("width":1920)", R"("width":4294969216)"),               // 2^32 + 1920
+      replaced(kValid, R"("height":1088)", R"("height":4294968384)"),             // 2^32 + 1088
+      replaced(kValid, R"("width":1920)", R"("width":2147483648)"),               // INT_MAX + 1, a multiple of 32
+      replaced(kValid, R"("width":1920)", R"("width":-4294965376)"),              // -2^32 + 1920
+      replaced(kValid, R"("width":1920)", R"("width":18446744073709551615)"),     // 2^64 - 1
+      replaced(kValid, R"("pad_value":114)", R"("pad_value":4294967410)"),        // 2^32 + 114
+      replaced(kYuNet, R"("pad_multiple":32)", R"("pad_multiple":4294967328)"),   // 2^32 + 32
+      replaced(kYuNet, R"("pad_value":0)", R"("pad_value":4294967296)"),          // 2^32
+      replaced(kYuNet, R"("pad_value":0)", R"("pad_value":18446744073709551615)"),  // 2^64 - 1
+  };
+  for (const std::string& text : bad) {
+    try {
+      parseModelInfo(text, "model.json");
+      ADD_FAILURE() << "accepted " << text;
+    } catch (const VcError& e) {
+      EXPECT_NE(std::string(e.what()).find("int range"), std::string::npos) << e.what();
+    }
+  }
+}
+
+TEST(ModelInfo, AcceptsTheLargestIntInAnIntegerField) {
+  // 2147483616 = INT_MAX - 31, the largest multiple of 32 that fits an int.
+  const ModelInfo m = parseModelInfo(replaced(kValid, R"("width":1920)", R"("width":2147483616)"), "model.json");
+  EXPECT_EQ(m.inputWidth, 2147483616);
 }
 
 TEST(ModelInfo, ReadsAModelJsonFile) {

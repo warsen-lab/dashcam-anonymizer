@@ -67,6 +67,11 @@ void collect(const YuNetLevel& level, int stride, int padWidth, int padHeight, f
       const float score = std::sqrt(std::clamp(cls, 0.0f, 1.0f) * std::clamp(obj, 0.0f, 1.0f));
       if (!(score >= threshold)) continue;
       const float* b = level.bbox + 4 * idx;
+      // The raw values too, not only the box they give: -inf in a size makes exp() 0, a finite box that
+      // says nothing about the face (vc_train.yunet refuses it as well).
+      if (!std::isfinite(b[0]) || !std::isfinite(b[1]) || !std::isfinite(b[2]) || !std::isfinite(b[3])) {
+        throw VcError("model output has non-finite box coordinates");
+      }
       const float cx = (static_cast<float>(c) + b[0]) * s;
       const float cy = (static_cast<float>(r) + b[1]) * s;
       const float w = std::exp(b[2]) * s;

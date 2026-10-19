@@ -22,7 +22,8 @@ Ort::Env& ortEnv();
 // Model-specific session options (free dimension overrides, say), applied to every attempt.
 using SessionConfigurer = std::function<void(Ort::SessionOptions&)>;
 
-struct OrtSession {
+// What createOrtSession returns. (Not named OrtSession: onnxruntime's C API has a type of that name.)
+struct CreatedSession {
   Ort::Session session{nullptr};
   std::string backend = "CPU";  // "CoreML" when the session runs with the CoreML provider registered
 };
@@ -34,9 +35,9 @@ struct OrtSession {
 // it), with one line on stderr; only when that fails too, or when the provider cannot be attached, does
 // the CPU provider take over (also with a line on stderr). Throws Ort::Exception when the CPU session
 // fails.
-OrtSession createOrtSession(const std::filesystem::path& onnx, ExecutionProvider provider,
-                            const std::optional<std::filesystem::path>& coreMlCache,
-                            const SessionConfigurer& configure = {});
+CreatedSession createOrtSession(const std::filesystem::path& onnx, ExecutionProvider provider,
+                                const std::optional<std::filesystem::path>& coreMlCache,
+                                const SessionConfigurer& configure = {});
 
 struct TensorSpec {
   ONNXTensorElementDataType type;

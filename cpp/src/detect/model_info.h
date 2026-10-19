@@ -25,8 +25,9 @@ struct ModelInfo {
 // implement. output_format must be "yolov8" or "yunet".
 // - yolov8: color "RGB", letterbox "top_left", pad_value 114, scale 1/255, and the input size
 //   positive multiples of 32.
-// - yunet: exactly one class, color "BGR", letterbox "top_left", pad_value 0, scale 1 and
-//   pad_multiple 32 (integers must be JSON integers).
+// - yunet: classes exactly ["face"], color "BGR", letterbox "top_left", pad_value 0, scale 1 and
+//   pad_multiple 32.
+// Sizes, pad_value and pad_multiple must be JSON integers within the int range.
 ModelInfo parseModelInfo(const std::string& text, const std::string& origin);
 ModelInfo readModelInfo(const std::filesystem::path& path);
 
