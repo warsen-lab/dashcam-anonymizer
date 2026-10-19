@@ -947,5 +947,39 @@ TEST(BoxTimeline, ALooseMatchLeavesAGhostOfTheOldTrack) {
   }
 }
 
+// The same repro at the end of the video: the last keyframe misses the plate while a look-alike turns up
+// 100 or 200 px away (and a little above or below it), and finish() masks the frames after it. No later
+// detection exists, so the ghost of the plate's track is all that covers them.
+TEST(BoxTimeline, FinishCoversAPlateMissedAtTheLastKeyframeNextToALookAlike) {
+  for (const int64_t lastKey : {3, 4}) {
+    for (const double dx : {100.0, 200.0}) {
+      for (const double dy : {0.0, 20.0, 60.0}) {
+        for (const double v : {2.0, 3.0, 4.0}) {
+          SCOPED_TRACE("last keyframe " + std::to_string(lastKey) + ", look-alike " + std::to_string(dx) + " px right and " +
+                       std::to_string(dy) + " px down, v = " + std::to_string(v) + " px per frame");
+          const Mover plate{kPlate, 400, 500, 48, 16, v, 0};
+          const float otherX = plate.at(lastKey * kStep).x1 + static_cast<float>(dx);
+          const float otherY = 520 + static_cast<float>(dy);
+          const Box other{kPlate, otherX, otherY, otherX + 48, otherY + 16, 0.9f};
+          BoxTimeline timeline(TimelineConfig{}, 1920, 1080);
+          timeline.advance({}, key(0, {plate.at(0)}));
+          std::vector<std::vector<MaskBox>> masks;
+          for (int64_t k = 1; k <= lastKey; ++k) {
+            const std::vector<Box> boxes = k == lastKey ? std::vector<Box>{other} : std::vector<Box>{plate.at(k * kStep)};
+            for (auto& m : timeline.advance(frames((k - 1) * kStep, k * kStep), key(k * kStep, boxes))) {
+              masks.push_back(std::move(m));
+            }
+          }
+          for (auto& m : timeline.finish(frames(lastKey * kStep, (lastKey + 1) * kStep))) masks.push_back(std::move(m));
+          ASSERT_EQ(masks.size(), static_cast<size_t>((lastKey + 1) * kStep));
+          for (size_t f = 0; f < masks.size(); ++f) {
+            EXPECT_GE(coverage(masks[f], plate.at(static_cast<int64_t>(f))), 0.8) << "frame " << f;
+          }
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 }  // namespace vc

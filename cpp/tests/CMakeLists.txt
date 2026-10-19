@@ -36,4 +36,5 @@ target_compile_definitions(vc_tests PRIVATE
 )
 
 include(GoogleTest)
-gtest_discover_tests(vc_tests)
+# A test that hangs (e.g. on a FIFO) is killed by ctest instead of blocking forever.
+gtest_discover_tests(vc_tests PROPERTIES TIMEOUT 120)

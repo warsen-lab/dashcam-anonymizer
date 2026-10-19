@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -481,6 +482,9 @@ TEST(RedactJob, ChecksTheOutputDirectoryAgainBeforeReplacingIt) {
   const fs::path dir = o.outRoot / kStem;
   fs::create_directories(dir);  // empty: --overwrite may replace it
   o.overwrite = true;
+  // Named like the final video, so that the failure handler (which deletes the files a run writes) would
+  // remove it if the second check were moved inside the try that the handler belongs to.
+  const std::string foreign = std::string(kStem) + ".redacted.mp4";
   const fs::path fifo = test::tmpDir() / "redact_recheck.fifo";
   fs::remove(fifo);
   ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
@@ -489,7 +493,7 @@ TEST(RedactJob, ChecksTheOutputDirectoryAgainBeforeReplacingIt) {
   std::thread writer([&] {
     const int fd = open(fifo.c_str(), O_WRONLY);  // returns when the run opens the detections
     if (fd < 0) return;
-    std::ofstream(dir / "notes.txt") << "keep me";
+    std::ofstream(dir / foreign) << "keep me";
     const char blankLine = '\n';
     if (write(fd, &blankLine, 1) < 0) std::perror("write");
     close(fd);
@@ -510,7 +514,7 @@ TEST(RedactJob, ChecksTheOutputDirectoryAgainBeforeReplacingIt) {
   if (reader >= 0) close(reader);
 
   EXPECT_TRUE(refused) << "the run was not refused; failure: " << failure;
-  EXPECT_TRUE(fs::exists(dir / "notes.txt"));
+  EXPECT_TRUE(fs::exists(dir / foreign));
   EXPECT_FALSE(fs::exists(dir / "masks.jsonl"));
 }
 

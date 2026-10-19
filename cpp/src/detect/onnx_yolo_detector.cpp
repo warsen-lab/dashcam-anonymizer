@@ -232,8 +232,10 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
         // compiled model to cache path"), and a compile that died half-way leaves a model that cannot
         // be loaded. Another process may be writing the directory, so it is left alone; compile
         // without it once before giving the CoreML provider up.
-        std::fprintf(stderr, "vc: CoreML session failed with the compile cache %s (%s); retrying without the cache\n",
-                     cache->c_str(), coreMl.error.c_str());
+        std::fprintf(stderr,
+                     "vc: CoreML session failed with the compile cache %s (%s); retrying without the cache "
+                     "(delete %s to rebuild the cache)\n",
+                     cache->c_str(), coreMl.error.c_str(), cache->c_str());
         coreMl = attemptCoreMl(onnx, std::nullopt);
       }
       if (coreMl.ok) {
