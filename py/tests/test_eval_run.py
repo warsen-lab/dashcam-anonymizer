@@ -714,6 +714,27 @@ def test_consistency_runs_before_the_sweeps(tmp_path, monkeypatch):
     assert [c[0].rsplit("/", 1)[-1] for c in calls] == ["vc_detect", "vc_redact", "vc_redact", "vc_redact"]
 
 
+def test_consistency_feeds_both_runtimes_the_same_re_encoded_frames(tmp_path, monkeypatch):
+    import vc_eval.run as run_module
+
+    _setup(tmp_path)
+    seen = {}
+    monkeypatch.setattr(run_module, "python_detections", lambda model, refs: seen.setdefault("py", refs) and {r.frame: [FACE] for r in refs})
+    calls = []
+    fake = _fake_runner(calls)
+
+    def runner(cmd, check, capture_output, text):
+        if cmd[0].endswith("vc_detect"):
+            frames_dir = Path(cmd[cmd.index("--frames") + 1])
+            seen["cpp"] = sorted(p.resolve() for p in frames_dir.glob("*.jpg"))
+        fake(cmd, check, capture_output, text)
+
+    run_all(_cfg(tmp_path), runner=runner)
+    py_images = sorted(r.image.resolve() for r in seen["py"])
+    assert py_images == seen["cpp"] and py_images
+    assert all(p.parent == (tmp_path / "report" / "consistency" / "same_pixels").resolve() for p in py_images)
+
+
 def test_a_failing_consistency_run_stops_before_any_sweep(tmp_path, monkeypatch):
     _setup(tmp_path)
     _python_dets(monkeypatch)

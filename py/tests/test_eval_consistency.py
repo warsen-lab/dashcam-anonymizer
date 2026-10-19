@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from vc_label.contracts import Box, Detection, read_frames_csv, write_jsonl
-from vc_eval.consistency import ConsistencyReport, compare_detections, python_detections, run_vc_detect
+from vc_eval.consistency import ConsistencyReport, compare_detections, python_detections, run_vc_detect, same_pixel_subset
 
 
 def _const_model(dir_path):
@@ -74,6 +74,30 @@ def test_python_reference_sessions_are_single_threaded(tmp_path, monkeypatch):
     monkeypatch.setattr(consistency, "cpu_session", lambda path: used.append(path) or cpu_session(path))
     python_detections(model, read_frames_csv(_frames(tmp_path)))
     assert used == [model / "model.onnx"]
+
+
+def test_same_pixel_subset_re_encodes_the_frames_without_chroma_subsampling(tmp_path):
+    # FFmpeg and OpenCV upsample 4:2:0 chroma differently, which alone moved boxes by more than the 1 px gate;
+    # 4:4:4 at quality 100 decodes alike in both, so the check measures preprocessing and inference instead
+    from PIL import Image, JpegImagePlugin
+
+    src = _frames(tmp_path, n=3)
+    refs = read_frames_csv(src)
+    subset = same_pixel_subset(refs, tmp_path / "same")
+    assert [(r.video, r.frame, r.pts_ms) for r in subset] == [(r.video, r.frame, r.pts_ms) for r in refs]
+    for ref, original in zip(subset, refs):
+        assert ref.image.parent == tmp_path / "same" and not ref.image.is_symlink()
+        with Image.open(ref.image) as im:
+            assert JpegImagePlugin.get_sampling(im) == 0  # 4:4:4
+        a, b = cv2.imread(str(ref.image)).astype(int), cv2.imread(str(original.image)).astype(int)
+        assert a.shape == b.shape and np.abs(a - b).max() <= 2
+
+
+def test_a_missing_frame_is_refused(tmp_path):
+    refs = read_frames_csv(_frames(tmp_path, n=1))
+    refs[0].image.unlink()
+    with pytest.raises(ValueError, match="cannot read"):
+        same_pixel_subset(refs, tmp_path / "same")
 
 
 def test_compare_detections_matches_per_class():
