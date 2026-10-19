@@ -142,6 +142,28 @@ def _tier_lines(summary: dict) -> list[str]:
     return lines
 
 
+def _exclusion_lines(summary: dict) -> list[str]:
+    """Per segment, how many reference boxes excluded_refs.csv left out and why (the same at every rate)."""
+    runs = summary["runs"]
+    fps = runs[0]["fps"] if runs else None
+    lines = [
+        "",
+        "## 排除的参照误检",
+        "",
+        "`data/labels/<段>/excluded_refs.csv` 列出人工核查过的老师误检：与其中一行同帧、同类、IoU ≥ 0.5 的参照框不计入任何覆盖率，"
+        "也不再当作参照，打在它们上面的码计入误打面积。",
+        "",
+    ]
+    for r in (r for r in runs if r["fps"] == fps):
+        e = r["coverage"]["excluded"]
+        reasons = "，".join(f"{reason} {n}" for reason, n in e["reasons"].items()) or "无"
+        line = f"- {r['stem']}：排除 {e['count']} 个（{reasons}）"
+        if e["unmatched_rows"]:
+            line += f"；另有 {e['unmatched_rows']} 行没有配上任何参照框，请检查帧号、类别和坐标"
+        lines.append(line)
+    return lines
+
+
 def _uncertain_lines(summary: dict) -> list[str]:
     runs, pooled = summary["runs"], summary["pooled"]
     lines = [
@@ -354,6 +376,7 @@ def summary_md(summary: dict) -> str:
         *_head_lines(summary),
         *_coverage_lines(summary),
         *_tier_lines(summary),
+        *_exclusion_lines(summary),
         *_uncertain_lines(summary),
         *_detail_lines(summary),
         *_temporal_lines(runs),

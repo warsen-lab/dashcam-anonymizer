@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -187,6 +188,12 @@ def coverage_json(c: CoverageReport) -> dict:
     out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
     # the whole grid (rows top to bottom, columns left to right), not just the weakest cell: the cells under 30 targets are the ones P2 skips
     out["heatmap"] = {cls: [[rate_json(rate) for rate in row] for row in c.classes[cls].heatmap] for cls in LABEL_CLASSES}
+    # reference boxes excluded_refs.csv left out (teacher false positives a person checked), and rows that matched nothing
+    out["excluded"] = {
+        "count": len(c.excluded),
+        "reasons": dict(Counter(e.reason for e in c.excluded)),
+        "unmatched_rows": len(c.unmatched_exclusions),
+    }
     out["passed"] = c.passed()
     return out
 
@@ -210,6 +217,12 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
         "viewing": viewing_json(viewing),
         "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
+        # every confident miss with its reference box: what excluded_refs.csv rows are written from
+        "miss_list": [
+            {"frame": m.frame, "cls": m.box.cls, "x1": m.box.x1, "y1": m.box.y1, "x2": m.box.x2, "y2": m.box.y2,
+             "covered": round(m.covered, 3)}
+            for m in coverage.misses
+        ],
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),
         "setup_s": stats.get("setup_s"),

@@ -322,6 +322,8 @@ def _break_labels(labels, kind):
     elif kind == "labels for other frames":
         with (labels / "processed.txt").open("a") as f:
             f.write("99\n")  # a frame number frames.csv does not have
+    elif kind == "bad excluded refs":
+        (labels / "excluded_refs.csv").write_text("frame,cls,x1,y1,x2,y2,reason\n0,sign,1,1,2,2,x\n", encoding="utf-8")
     else:
         raise AssertionError(kind)
 
@@ -335,6 +337,7 @@ def _break_labels(labels, kind):
         ("missing flags", r"flags\.csv does not exist; run vc_label fuse"),
         ("missing processed", "processed.txt does not exist"),
         ("labels for other frames", "does not match"),
+        ("bad excluded refs", r"excluded_refs\.csv line 2: class 'sign'"),
     ],
 )
 def test_bad_label_inputs_of_any_segment_are_refused_before_any_run(tmp_path, kind, message):
@@ -1240,3 +1243,31 @@ def test_cli_run_passes_the_face_model(tmp_path, monkeypatch):
     assert main(argv) == 0 and seen[-1].face_model is None
     assert main([*argv, "--face-model", str(tmp_path / "yunet")]) == 0
     assert seen[-1].face_model == tmp_path / "yunet"
+
+
+def test_excluded_refs_are_left_out_of_p1_and_listed_per_segment_in_the_summary(tmp_path, monkeypatch):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")  # away from MASK and PLATE_MASK: never masked
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    with (tmp_path / "labels" / STEM / "excluded_refs.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "cls", "x1", "y1", "x2", "y2", "reason"])
+        w.writerows([[fr, "plate", 10, 90, 40, 110, "停着的公交尾灯"] for fr in range(0, N, 6)])
+        w.writerow([3, "plate", 10, 90, 40, 110, "停着的公交尾灯"])  # frame 3 is not labelled: matches nothing
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    coverage = summary["runs"][0]["coverage"]
+    assert (coverage["plate"]["hits"], coverage["plate"]["total"]) == (5, 5)  # with the light it would be 5 / 10
+    assert coverage["excluded"] == {"count": 5, "reasons": {"停着的公交尾灯": 5}, "unmatched_rows": 1}
+    assert summary["chosen_fps"] == 5
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    section = md.split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert "- seg：排除 5 个（停着的公交尾灯 5）；另有 1 行没有配上任何参照框" in section
+
+
+def test_summary_json_lists_every_confident_miss_with_its_box(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=(MASK,)))  # the plate is never masked
+    misses = summary["runs"][0]["miss_list"]
+    assert [m["frame"] for m in misses] == [0, 6, 12, 18, 24]
+    assert misses[0] == {"frame": 0, "cls": "plate", "x1": 100.0, "y1": 80.0, "x2": 150.0, "y2": 100.0, "covered": 0.0}

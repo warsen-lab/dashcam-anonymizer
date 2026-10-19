@@ -5,15 +5,30 @@ from __future__ import annotations
 import csv
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
-from vc_label.contracts import Box, Detection
+from vc_label.contracts import LABEL_CLASSES, Box, Detection
 from vc_label.pipeline import FLAGS, PROCESSED
 
 # flags.csv rules that mark a merged box the teachers were unsure about; the other rules (temporal_fill,
 # person_without_face, vehicle_without_plate) are not doubts about the box itself
 UNCERTAIN_RULES = frozenset({"low_score", "face_single_source"})
 FLAG_COLUMNS = ("frame", "rule", "cls", "x1", "y1", "x2", "y2", "score")
+
+# Teacher false positives a person checked (spec 2026-10-19 §5): reference boxes left out of the coverage.
+EXCLUDED_REFS = "excluded_refs.csv"
+EXCLUDED_COLUMNS = ("frame", "cls", "x1", "y1", "x2", "y2", "reason")
+
+
+@dataclass(frozen=True)
+class ExcludedRef:
+    """A row of labels_dir/excluded_refs.csv: a reference box found to be a teacher false positive, and why."""
+
+    frame: int
+    box: Box
+    reason: str
+    line: int  # the row's line in the file, for the report
 
 
 def read_masks(path: Path) -> tuple[set[str], dict[int, list[Box]]]:
@@ -107,3 +122,36 @@ def read_uncertain(labels_dir: Path) -> dict[int, list[Box]]:
                 seen.add(key)
                 by_frame.setdefault(frame, []).append(box)
     return by_frame
+
+
+def read_excluded(labels_dir: Path) -> list[ExcludedRef]:
+    """The rows of labels_dir/excluded_refs.csv; none when there is no such file.
+
+    Raises ValueError for a header without the columns, a bad number, a class that is not a label class, an empty box
+    or an empty reason; the message names the file and the line.
+    """
+    path = labels_dir / EXCLUDED_REFS
+    if not path.exists():
+        return []
+    rows: list[ExcludedRef] = []
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        missing = [c for c in EXCLUDED_COLUMNS if c not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path} has no {', '.join(missing)} column")
+        for row in reader:
+            where = f"{path} line {reader.line_num}"
+            try:
+                frame = int(row["frame"])
+                box = Box(row["cls"], float(row["x1"]), float(row["y1"]), float(row["x2"]), float(row["y2"]))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{where}: bad row ({e})") from None
+            if box.cls not in LABEL_CLASSES:
+                raise ValueError(f"{where}: class {box.cls!r} is not one of {', '.join(LABEL_CLASSES)}")
+            if box.area <= 0:
+                raise ValueError(f"{where}: the box is empty")
+            reason = (row["reason"] or "").strip()
+            if not reason:
+                raise ValueError(f"{where}: no reason given")
+            rows.append(ExcludedRef(frame, box, reason, reader.line_num))
+    return rows

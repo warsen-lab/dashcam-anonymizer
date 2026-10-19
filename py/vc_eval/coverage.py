@@ -3,6 +3,10 @@
 The reference has two tiers. A merged box that flags.csv marks `low_score` or `face_single_source` is *uncertain*
 (teachers unsure: many are false positives, some are real blurry plates); every other box is *confident*. P1, P2, the
 size bins and the temporal-fill rate are computed on the confident tier only; the uncertain tier is reported on its own.
+
+Reference boxes listed in data/labels/<stem>/excluded_refs.csv (teacher false positives a person checked; same frame,
+same class, IoU >= 0.5 with a row) are left out altogether: they count in no rate and are no reference for the stray
+area (spec 2026-10-19 §5).
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from vc_label.boxes import iou
 from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, read_frames_csv
 from vc_label.pipeline import MERGED, PROCESSED, check_labels_match_frames, read_processed
 from vc_label.review import image_size
@@ -31,9 +36,10 @@ from vc_eval.metrics import (
     size_bin_labels,
     stray_mask_fraction,
 )
-from vc_eval.records import detections_by_frame, fused_file, read_masks, read_uncertain
+from vc_eval.records import ExcludedRef, detections_by_frame, fused_file, read_excluded, read_masks, read_uncertain
 
 UNCERTAIN_TOL_PX = 0.05  # flags.csv and merged.jsonl both round to 0.1 px; a flagged box matches its target to within this
+EXCLUDE_IOU = 0.5  # a reference box is excluded by a row of its frame and class it overlaps this much
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,15 @@ class Miss:
     frame: int
     box: Box
     covered: float
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """A reference box an excluded_refs.csv row left out of the coverage."""
+
+    frame: int
+    box: Box
+    reason: str
 
 
 @dataclass
@@ -79,6 +94,8 @@ class CoverageReport:
     stray_max: float = 0.0
     stray_mean: float = 0.0
     stray_p95: float = 0.0
+    excluded: list[Exclusion] = field(default_factory=list)  # reference boxes excluded_refs.csv left out
+    unmatched_exclusions: list[ExcludedRef] = field(default_factory=list)  # rows that matched no reference box
 
     def class_passed(self, cls: str) -> bool:
         rate = self.classes[cls].rate
@@ -104,8 +121,8 @@ class CoverageReport:
 
 @dataclass(frozen=True)
 class LabelInputs:
-    """The checked reference side of a coverage evaluation: labelled frames, their video and size, the fused targets and
-    the boxes among them that flags.csv marks uncertain."""
+    """The checked reference side of a coverage evaluation: labelled frames, their video and size, the fused targets,
+    the boxes among them that flags.csv marks uncertain, and the rows of excluded_refs.csv."""
 
     used: list[FrameRef]
     video: str
@@ -113,14 +130,15 @@ class LabelInputs:
     height: int
     targets: dict[int, list[Box]]
     uncertain: dict[int, list[Box]]
+    excluded: list[ExcludedRef]
 
 
 def load_label_inputs(frames_dir: Path, labels_dir: Path) -> LabelInputs:
     """Reads and checks everything evaluate_coverage needs from the reference side.
 
     Raises ValueError for labels taught on other frames, a missing processed.txt, no labelled frames, a missing or
-    stale merged.jsonl or flags.csv, or merged labels of another video; OSError if frames.csv or a frame image cannot
-    be read.
+    stale merged.jsonl or flags.csv, merged labels of another video, or a bad excluded_refs.csv; OSError if frames.csv
+    or a frame image cannot be read.
     The sweep calls this for every segment before its first vc_redact run, which takes minutes.
     """
     refs = read_frames_csv(frames_dir)
@@ -137,8 +155,9 @@ def load_label_inputs(frames_dir: Path, labels_dir: Path) -> LabelInputs:
     if merged_videos - {video}:
         raise ValueError(f"{merged} holds labels for {', '.join(sorted(merged_videos - {video}))}, not {video}")
     uncertain = read_uncertain(labels_dir)
+    excluded = read_excluded(labels_dir)
     width, height = image_size(used[0].image)
-    return LabelInputs(used, video, width, height, targets, uncertain)
+    return LabelInputs(used, video, width, height, targets, uncertain, excluded)
 
 
 def _is_uncertain(target: Box, flagged: list[Box]) -> bool:
@@ -149,6 +168,11 @@ def _is_uncertain(target: Box, flagged: list[Box]) -> bool:
     )
 
 
+def _excluding_row(target: Box, rows: list[ExcludedRef]) -> ExcludedRef | None:
+    """The first row of the target's class whose box overlaps it with IoU >= EXCLUDE_IOU."""
+    return next((r for r in rows if r.box.cls == target.cls and iou(r.box, target) >= EXCLUDE_IOU), None)
+
+
 def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
     labels = load_label_inputs(frames_dir, labels_dir)
     video, width, height, targets = labels.video, labels.width, labels.height, labels.targets
@@ -157,10 +181,21 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
         raise ValueError(f"{masks_path} is for {', '.join(sorted(mask_videos))}, not {video}")
     report = CoverageReport(video, len(labels.used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES})
     stray = []
+    excluded_by_frame: dict[int, list[ExcludedRef]] = {}
+    for row in labels.excluded:
+        excluded_by_frame.setdefault(row.frame, []).append(row)
+    matched_rows: set[int] = set()
     for ref in labels.used:
         if ref.frame not in masks:
             raise ValueError(f"{masks_path} has no line for frame {ref.frame}")
-        frame_targets = [b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES]
+        frame_targets = []
+        for t in (b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES):
+            row = _excluding_row(t, excluded_by_frame.get(ref.frame, []))
+            if row is None:
+                frame_targets.append(t)
+            else:
+                matched_rows.add(row.line)
+                report.excluded.append(Exclusion(ref.frame, t, row.reason))
         frame_masks = masks[ref.frame]
         frame_flagged = labels.uncertain.get(ref.frame, [])
         stray.append(stray_mask_fraction(frame_masks, frame_targets, width, height))  # references of both tiers
@@ -185,6 +220,7 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
                 cc.temporal_fill = cc.temporal_fill.add(hit)
             if not hit:
                 report.misses.append(Miss(ref.frame, t, covered))
+    report.unmatched_exclusions = [row for row in labels.excluded if row.line not in matched_rows]
     report.stray_max = float(max(stray))
     report.stray_mean = float(np.mean(stray))
     report.stray_p95 = float(np.percentile(stray, 95))
@@ -198,10 +234,10 @@ def _sum(rates: list[Rate]) -> Rate:
 def pool(reports: list[CoverageReport]) -> CoverageReport:
     """One report over all segments: the rates are summed, so P1 and P2 are judged on the pooled counts.
 
-    The uncertain rates are summed too. Misses, confident and uncertain, are concatenated (their frame numbers belong
-    to their own segment), `stray_max` and `stray_p95` are the worst of the segments, `stray_mean` is weighted by the
-    number of labelled frames, `video` joins the names with commas. Reports of different frame sizes are refused:
-    their size bins and heatmap cells do not line up.
+    The uncertain rates are summed too. Misses (confident and uncertain) and exclusions (matched and unmatched rows) are
+    concatenated (their frame numbers belong to their own segment), `stray_max` and `stray_p95` are the worst of the
+    segments, `stray_mean` is weighted by the number of labelled frames, `video` joins the names with commas. Reports
+    of different frame sizes are refused: their size bins and heatmap cells do not line up.
     """
     if not reports:
         raise ValueError("no coverage reports to pool")
@@ -230,6 +266,8 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
         classes=classes,
         misses=[m for r in reports for m in r.misses],
         uncertain_misses=[m for r in reports for m in r.uncertain_misses],
+        excluded=[e for r in reports for e in r.excluded],
+        unmatched_exclusions=[e for r in reports for e in r.unmatched_exclusions],
         stray_max=max(r.stray_max for r in reports),
         stray_mean=sum(r.stray_mean * r.frames for r in reports) / frames if frames else 0.0,
         stray_p95=max(r.stray_p95 for r in reports),
