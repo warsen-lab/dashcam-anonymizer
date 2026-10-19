@@ -1,0 +1,8 @@
+{
+  "name": "const_yolo",
+  "classes": ["face", "plate"],
+  "input": {"width": 64, "height": 64, "color": "RGB", "scale": 0.00392156862745098, "letterbox": "top_left", "pad_value": 114},
+  "output_format": "yolov8",
+  "train_manifest_sha256": "",
+  "metrics": {"val_map50": 0.0}
+}

@@ -1,7 +1,11 @@
 #include "io/video_reader.h"
 
+#include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
@@ -68,6 +72,9 @@ struct VideoReader::Impl {
   bool sawHardwareFrame = false;
   bool inputDrained = false;
   bool decoderDrained = false;
+  std::vector<int> audioIndices;
+  std::vector<std::string> dropped;
+  std::function<void(const AVPacket&)> audioSink;
 
   void open(const std::string& path, HwAccel hwAccel);
   void attachHardware(HwAccel hwAccel);
@@ -90,6 +97,17 @@ void VideoReader::Impl::open(const std::string& path, HwAccel hwAccel) {
   const AVStream* stream = input->streams[streamIndex];
   timeBase = stream->time_base;
   startPts = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+  for (unsigned i = 0; i < input->nb_streams; ++i) {
+    if (static_cast<int>(i) == streamIndex) continue;
+    const AVCodecParameters* par = input->streams[i]->codecpar;
+    if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
+      audioIndices.push_back(static_cast<int>(i));
+      continue;
+    }
+    const char* type = av_get_media_type_string(par->codec_type);
+    dropped.push_back("#" + std::to_string(i) + " " + (type ? type : "unknown") + " " +
+                      avcodec_get_name(par->codec_id));
+  }
 
   decoder.reset(avcodec_alloc_context3(codec));
   if (!decoder) throw VcError("avcodec_alloc_context3 failed");
@@ -134,6 +152,16 @@ void VideoReader::Impl::feedDecoder() {
     }
     checkAv(ret, "read packet");
     if (packet->stream_index != streamIndex) {
+      const bool audio = std::find(audioIndices.begin(), audioIndices.end(), packet->stream_index) !=
+                         audioIndices.end();
+      if (audio && audioSink) {
+        try {
+          audioSink(*packet);
+        } catch (...) {
+          av_packet_unref(packet.get());
+          throw;
+        }
+      }
       av_packet_unref(packet.get());
       continue;
     }
@@ -198,6 +226,20 @@ const VideoInfo& VideoReader::info() const { return impl_->info; }
 bool VideoReader::usingHardware() const { return impl_->sawHardwareFrame; }
 
 int64_t VideoReader::decodeErrors() const { return impl_->decodeErrors; }
+
+const AVStream* VideoReader::videoStream() const { return impl_->input->streams[impl_->streamIndex]; }
+
+std::vector<const AVStream*> VideoReader::audioStreams() const {
+  std::vector<const AVStream*> streams;
+  for (int index : impl_->audioIndices) streams.push_back(impl_->input->streams[index]);
+  return streams;
+}
+
+std::vector<std::string> VideoReader::droppedStreams() const { return impl_->dropped; }
+
+void VideoReader::setAudioSink(std::function<void(const AVPacket&)> sink) {
+  impl_->audioSink = std::move(sink);
+}
 
 const VideoFrame* VideoReader::next() {
   Impl& s = *impl_;

@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 
+#include "io/frame_file_name.h"
 #include "io/jpeg_writer.h"
 #include "io/video_reader.h"
 #include "sampler/frame_sampler.h"
@@ -62,12 +63,6 @@ void checkOutputDir(const fs::path& input, const fs::path& dir, bool overwrite) 
 void prepareOutputDir(const fs::path& dir) {
   fs::remove_all(dir);  // no-op when absent
   fs::create_directories(dir);
-}
-
-std::string frameFileName(int64_t index) {
-  char name[32];
-  std::snprintf(name, sizeof(name), "%06lld.jpg", static_cast<long long>(index));
-  return name;
 }
 
 std::string csvRow(const std::string& video, const VideoFrame& frame, SampleReason reason,

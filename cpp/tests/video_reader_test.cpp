@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/vc_error.h"
+#include "io/av_ptr.h"
 #include "sampler/luma_thumb.h"
 #include "test_media.h"
 
@@ -93,21 +94,7 @@ TEST(VideoReader, VideoToolboxMatchesSoftwareDecode) {
 }
 
 TEST(VideoReader, SkipsCorruptPacketsAndCountsThem) {
-  // Overwrite the length prefix of the first NAL unit (right after the "mdat" fourcc) so the
-  // decoder rejects the first access unit.
-  std::vector<char> bytes;
-  {
-    std::ifstream in(test::basicVideo(), std::ios::binary);
-    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  }
-  const std::string fourcc = "mdat";
-  const auto mdat = std::search(bytes.begin(), bytes.end(), fourcc.begin(), fourcc.end());
-  ASSERT_NE(mdat, bytes.end());
-  const std::size_t prefix = static_cast<std::size_t>(mdat - bytes.begin()) + fourcc.size();
-  ASSERT_LT(prefix + 4, bytes.size());
-  std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(prefix), 4, static_cast<char>(0xFF));
-  const std::filesystem::path corrupt = test::tmpDir() / "basic_corrupt_first_nal.mp4";
-  std::ofstream(corrupt, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  const std::filesystem::path corrupt = test::corruptFirstNalVideo();
 
   VideoReader reader(corrupt.string(), HwAccel::None);
   int64_t count = 0;
@@ -118,6 +105,91 @@ TEST(VideoReader, SkipsCorruptPacketsAndCountsThem) {
   EXPECT_GE(reader.decodeErrors(), 1);
   EXPECT_GE(count, 1);
   EXPECT_EQ(reader.next(), nullptr);
+}
+
+TEST(VideoReader, ForwardsAudioPacketsToTheSink) {
+  VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
+  const std::vector<const AVStream*> audio = reader.audioStreams();
+  ASSERT_EQ(audio.size(), 1u);
+  EXPECT_EQ(reader.videoStream()->codecpar->codec_type, AVMEDIA_TYPE_VIDEO);
+  int packets = 0;
+  bool otherStream = false;
+  reader.setAudioSink([&](const AVPacket& packet) {
+    ++packets;
+    otherStream = otherStream || packet.stream_index != audio[0]->index;
+  });
+  int frames = 0;
+  while (reader.next() != nullptr) ++frames;
+  EXPECT_EQ(frames, 60);
+  // Every audio packet of the file arrives: ~87 AAC packets of 1024 samples in 2 s at 44.1 kHz,
+  // counted here by demuxing the file separately.
+  const int expected = test::streamTiming(test::videoWithAudio(), AVMEDIA_TYPE_AUDIO).packets;
+  EXPECT_GE(expected, 86);
+  EXPECT_EQ(packets, expected);
+  EXPECT_FALSE(otherStream);
+  EXPECT_TRUE(reader.droppedStreams().empty());
+}
+
+TEST(VideoReader, AnExceptionFromTheAudioSinkPropagatesOutOfNext) {
+  VideoReader reader(test::videoWithAudio().string(), HwAccel::None);
+  int calls = 0;
+  reader.setAudioSink([&](const AVPacket&) {
+    ++calls;
+    throw std::runtime_error("sink failed");
+  });
+  try {
+    while (reader.next() != nullptr) {
+    }
+    ADD_FAILURE() << "next() did not throw";
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "sink failed");
+  }
+  EXPECT_EQ(calls, 1);
+}
+
+// FNV-1a over the pixel rows of a frame (all planes of an 8-bit 4:2:0 / NV12 layout).
+uint64_t checksum(const AVFrame& frame) {
+  uint64_t hash = 1469598103934665603ull;
+  const int planes[2][3] = {{0, frame.width, frame.height}, {1, frame.width, (frame.height + 1) / 2}};
+  for (const auto& plane : planes) {
+    for (int y = 0; y < plane[2]; ++y) {
+      for (int x = 0; x < plane[1]; ++x) {
+        hash = (hash ^ frame.data[plane[0]][static_cast<ptrdiff_t>(y) * frame.linesize[plane[0]] + x]) * 1099511628211ull;
+      }
+    }
+  }
+  return hash;
+}
+
+// vc_redact keeps av_frame_clone()s of the frames next() returned while decoding goes on.
+TEST(VideoReader, NeverReusesTheBuffersOfAFrameItReturned) {
+  VideoReader reader(test::tenBitVideo().string(), HwAccel::None);  // converted to NV12: the riskiest path
+  std::vector<av::FramePtr> clones;
+  std::vector<uint64_t> sums;
+  int64_t total = 0;
+  while (const VideoFrame* frame = reader.next()) {
+    if (clones.size() < 10) {
+      clones.emplace_back(av_frame_clone(frame->av));
+      ASSERT_NE(clones.back(), nullptr);
+      sums.push_back(checksum(*frame->av));
+    }
+    ++total;
+  }
+  ASSERT_EQ(total, 30);
+  ASSERT_EQ(clones.size(), 10u);
+  for (size_t i = 0; i < clones.size(); ++i) {
+    EXPECT_EQ(checksum(*clones[i]), sums[i]) << "clone " << i << " changed while decoding went on";
+    for (size_t j = 0; j < i; ++j) {
+      EXPECT_NE(clones[i]->data[0], clones[j]->data[0]) << i << " shares its buffer with " << j;
+      EXPECT_NE(sums[i], sums[j]) << "frames " << i << " and " << j << " are identical";
+    }
+  }
+}
+
+TEST(VideoReader, ListsStreamsItDrops) {
+  VideoReader reader(test::videoWithSubtitles().string(), HwAccel::None);
+  EXPECT_TRUE(reader.audioStreams().empty());
+  EXPECT_EQ(reader.droppedStreams(), (std::vector<std::string>{"#1 subtitle mov_text"}));
 }
 
 TEST(VideoReader, ParsesHwAccelNames) {

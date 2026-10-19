@@ -8,12 +8,6 @@
 
 namespace vc {
 
-// The output directory already exists and overwrite was not requested.
-class OutputExistsError : public VcError {
- public:
-  using VcError::VcError;
-};
-
 struct ExtractStats {
   std::filesystem::path outputDir;
   int64_t decodedFrames = 0;
