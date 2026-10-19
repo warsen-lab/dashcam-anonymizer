@@ -21,8 +21,9 @@ namespace {
 const std::set<std::string> kAllKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",          "mosaic_min_block_px",
-    "mosaic_blocks_per_long_side", "face_score_threshold", "face_nms_iou"};
+    "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
+    "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
+    "face_score_threshold", "face_nms_iou"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -34,6 +35,8 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, d.timeline.expandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.motionExpandFraction, d.timeline.motionExpandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.minBoxPx, d.timeline.minBoxPx);
+  EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, d.timeline.shrinkPerFrame);
+  EXPECT_DOUBLE_EQ(c.timeline.maxMaskAreaRatio, d.timeline.maxMaskAreaRatio);
   EXPECT_EQ(c.mosaic.minBlockPx, d.mosaic.minBlockPx);
   EXPECT_EQ(c.mosaic.blocksPerLongSide, d.mosaic.blocksPerLongSide);
   EXPECT_FLOAT_EQ(c.face.scoreThreshold, d.face.scoreThreshold);
@@ -55,6 +58,8 @@ RedactConfig nonDefaultConfig() {
   c.timeline.expandFraction = 0.2;
   c.timeline.motionExpandFraction = 0.75;
   c.timeline.minBoxPx = 24.0;
+  c.timeline.shrinkPerFrame = 0.125;
+  c.timeline.maxMaskAreaRatio = 2.5;
   c.mosaic.minBlockPx = 12;
   c.mosaic.blocksPerLongSide = 6;
   c.face.scoreThreshold = 0.4375f;
@@ -121,6 +126,17 @@ TEST(RedactConfig, ReadsTheLooseMatchingDistance) {
   EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"match_max_distance_loose": 3.5})", "t").timeline.matchMaxDistanceLoose, 3.5);
 }
 
+// Mask smoothing (spec 2026-10-19 §3.1): a mask's width and height shrink by at most 2 % per frame, and a mask
+// covers at most 4 times its box. The values are calibrated in the last task of the plan.
+TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.shrinkPerFrame, 0.02);
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.maxMaskAreaRatio, 4.0);
+  const RedactConfig c = parseRedactConfig(R"({"shrink_per_frame": 0.05, "max_mask_area_ratio": 3})", "t");
+  EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, 0.05);
+  EXPECT_DOUBLE_EQ(c.timeline.maxMaskAreaRatio, 3.0);
+  EXPECT_NO_THROW(parseRedactConfig(R"({"shrink_per_frame": 1, "max_mask_area_ratio": 1})", "t"));
+}
+
 TEST(RedactConfig, RejectsBadInput) {
   const std::vector<std::string> bad = {
       R"({"detect_fps": 4})",          R"({"detect_fps": 61})",          R"({"detect_fps": 4.99})",
@@ -149,6 +165,10 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"face_score_threshold": 1.5})",           R"({"face_score_threshold": -0.1})",
       R"({"face_score_threshold": "0.3"})",         R"({"face_nms_iou": 0})",
       R"({"face_nms_iou": 1.5})",                   R"({"face_nms_iou": -0.3})",
+      // Mask smoothing: a shrink fraction in (0, 1] and an area ratio of at least 1.
+      R"({"shrink_per_frame": 0})",                 R"({"shrink_per_frame": 1.5})",
+      R"({"shrink_per_frame": "0.02"})",            R"({"max_mask_area_ratio": 0.5})",
+      R"({"max_mask_area_ratio": 1e400})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -162,6 +182,7 @@ TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
       R"({"expand_fraction": null})",  R"({"motion_expand_fraction": null})",
       R"({"min_box_px": null})",       R"({"mosaic_blocks_per_long_side": null})",
       R"({"face_score_threshold": null})", R"({"face_nms_iou": null})",
+      R"({"shrink_per_frame": null})",     R"({"max_mask_area_ratio": null})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -202,6 +223,8 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"expand_fraction", [](RedactConfig& c, double v) { c.timeline.expandFraction = v; }},
       {"motion_expand_fraction", [](RedactConfig& c, double v) { c.timeline.motionExpandFraction = v; }},
       {"min_box_px", [](RedactConfig& c, double v) { c.timeline.minBoxPx = v; }},
+      {"shrink_per_frame", [](RedactConfig& c, double v) { c.timeline.shrinkPerFrame = v; }},
+      {"max_mask_area_ratio", [](RedactConfig& c, double v) { c.timeline.maxMaskAreaRatio = v; }},
       {"face_score_threshold", [](RedactConfig& c, double v) { c.face.scoreThreshold = static_cast<float>(v); }},
       {"face_nms_iou", [](RedactConfig& c, double v) { c.face.nmsIou = static_cast<float>(v); }},
   };
@@ -254,7 +277,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 12u);
+  EXPECT_EQ(j.size(), 14u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);

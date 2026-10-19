@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "detect/box.h"
@@ -40,6 +41,8 @@ struct TimelineConfig {
   double motionExpandFraction = 0.5;  // extra margin per side, fraction of the displacement per interval
   double minBoxPx = 16.0;             // masks grow to at least this width and height
   double matchMaxDistanceLoose = 6.0; // second pass: max |dx| and |dy| / the largest side of the two boxes
+  double shrinkPerFrame = 0.02;   // per frame a mask's width and height shrink by at most this fraction, (0, 1]
+  double maxMaskAreaRatio = 4.0;  // a mask covers at most this many times the area of its box, >= 1
 };
 
 // What advance() and finish() return.
@@ -67,8 +70,16 @@ struct TimelineOutput {
 // box; an unmatched ghost ends, and the interval after its last hold is not masked. A box that starts a
 // track is masked from its own keyframe on, never before. Every mask is grown by expandFraction of its box
 // plus motionExpandFraction of the interval's displacement along each axis (for a hold, of its capped
-// shift), to at least minBoxPx, and clipped to the frame. A track's velocity runs from its last real
-// detection. Feed keyframes in order; frames are identified by decode index.
+// shift), to at least minBoxPx, and clipped to the frame.
+//
+// The mask's size is smoothed per track (spec §3.1), around the centre of the box it is for: its width and
+// height grow to the box's at once but shrink by at most shrinkPerFrame of themselves per frame, never
+// below the box's (not at all while the track is held), so the mask always contains the box and follows a
+// moving target without trailing behind it. A mask larger than maxMaskAreaRatio times the box has both
+// sides pulled the same fraction of their way towards the box's until it is exactly that large.
+//
+// A track's velocity runs from its last real detection. Feed keyframes in order; frames are identified by
+// decode index.
 class BoxTimeline {
  public:
   // Throws std::invalid_argument for a non-positive frame size or invalid config.
@@ -109,19 +120,32 @@ class BoxTimeline {
     size_t next = 0;
   };
 
+  // A track's smoothed mask size (spec §3.1).
+  struct Size {
+    double w = 0;
+    double h = 0;
+  };
+
+  // The smoothed size after `shown` for a box of size `raw`: each side grows to raw's at once and otherwise
+  // shrinks by at most `shrink` of itself, never below raw's; while `held` it does not shrink at all.
+  static Size smoothed(Size shown, Size raw, double shrink, bool held);
+  // `size` (at least `raw` on each side) with both sides pulled the same fraction of their way towards raw's,
+  // just enough to bring its area down to `ratio` times raw's; unchanged when it is no larger than that.
+  static Size cappedArea(Size size, Size raw, double ratio);
+
   std::vector<Match> match(const Keyframe& next, double steps) const;
   // How far a held track has moved `since` frames after its keyframe: along its velocity, at most half
   // its box's width along x and half its height along y.
   Offset heldShift(const Track& track, double since) const;
-  // Appends the mask of `track` for `region`, grown by expandFraction of its size plus
-  // motionExpandFraction of `motion` per axis, to at least minBoxPx, clipped to the frame; nothing when
-  // it lies outside the frame.
-  void emit(std::vector<MaskBox>& out, const Track& track, const Box& region, Offset motion,
-            MaskOrigin origin) const;
+  // Appends the mask of `track` for `region`: the region grown by expandFraction of its size plus
+  // motionExpandFraction of `motion` per axis and to at least minBoxPx (the raw box), its size smoothed
+  // against the track's previous mask (shown_) around the raw box's centre, clipped to the frame; nothing
+  // when the raw box lies outside the frame.
+  void emit(std::vector<MaskBox>& out, const Track& track, const Box& region, Offset motion, MaskOrigin origin);
   // The masks of `track` held from its keyframe `from` over `frames` (which start there); the motion
   // margin is the shift reached `span` frames after the keyframe.
   void hold(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames, const FrameTime& from,
-            const Track& track, double span) const;
+            const Track& track, double span);
 
   TimelineConfig config_;
   int width_;
@@ -130,6 +154,7 @@ class BoxTimeline {
   std::vector<Track> tracks_;         // its boxes in order, then its ghosts
   size_t keyBoxes_ = 0;               // number of boxes on the last keyframe
   int64_t nextId_ = 1;
+  std::unordered_map<int64_t, Size> shown_;  // each live track's smoothed mask size
 };
 
 }  // namespace vc

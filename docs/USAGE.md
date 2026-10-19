@@ -96,6 +96,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `score_threshold` | 0.05 | 学生模型阈值。调小会多打，减少车牌漏遮 |
 | `face_score_threshold` | 0.3 | YuNet 阈值。调小会多打人脸 |
 | `expand_fraction` | 0.3 | 打码框每边外扩比例。调大可以盖住检测框偏小的情况 |
+| `shrink_per_frame` | 0.02 | 打码框的宽、高每帧最多缩小的比例（变大不受限）。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
+| `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小 |
 
 用法：`--config my.json`。省略的键取默认值，写错的键直接报错。
 

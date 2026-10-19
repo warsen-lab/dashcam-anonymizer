@@ -29,9 +29,10 @@ struct RedactConfig {
 };
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
-// out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; mosaic_min_block_px and
-// mosaic_blocks_per_long_side must be JSON integers in [1, 4096]; every other value must be a finite
-// number. face_score_threshold is in [0, 1], face_nms_iou in (0, 1].
+// out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
+// max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
+// [1, 4096]; every other value must be a finite number. face_score_threshold is in [0, 1], face_nms_iou in
+// (0, 1].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);

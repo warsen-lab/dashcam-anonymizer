@@ -17,17 +17,27 @@ namespace {
 constexpr int kFace = 0;
 constexpr int kPlate = 1;
 
-// Margins and minimum size as given, everything else at its default.
+// Margins and minimum size as given, everything else at its default except the mask smoothing, which is off:
+// with shrinkPerFrame 1 a mask may shrink to its box at once, so each mask is its own box.
 TimelineConfig config(double expand, double motion, double minBox) {
   TimelineConfig c;
   c.expandFraction = expand;
   c.motionExpandFraction = motion;
   c.minBoxPx = minBox;
+  c.shrinkPerFrame = 1.0;
   return c;
 }
 
 // No margins and no minimum size: each mask is exactly its (interpolated or held) box.
 TimelineConfig exact() { return config(0.0, 0.0, 0.0); }
+
+// exact(), with the mask smoothing and the area cap as given.
+TimelineConfig smooth(double shrink, double ratio) {
+  TimelineConfig c = exact();
+  c.shrinkPerFrame = shrink;
+  c.maxMaskAreaRatio = ratio;
+  return c;
+}
 
 Box face(float x1, float y1, float x2, float y2) { return Box{kFace, x1, y1, x2, y2, 0.9f}; }
 
@@ -337,6 +347,38 @@ TEST(BoxTimeline, FinishMarginIsTheCappedShift) {
   expectBox(masks[20][0], 85, 85, 115, 115, MaskOrigin::Held);
 }
 
+// A held shift is capped per axis: half the box's width along x, half its height along y. For a 48 x 16 plate
+// that is 24 px along x and 8 px along y (not half the width, 24, on both axes, and not half the height on both).
+TEST(BoxTimeline, AHeldShiftIsCappedByHalfTheBoxSideAlongEachAxis) {
+  // Vertically at 1 px a frame: held for 12 frames, the shift reaches the cap of 8 at frame 20 and stays there.
+  BoxTimeline vertical(exact(), 1000, 1000);
+  vertical.advance({}, key(0, {Box{kPlate, 500, 200, 548, 216, 0.9f}}));
+  vertical.advance(frames(0, 12), key(12, {Box{kPlate, 500, 212, 548, 228, 0.9f}}));
+  const auto up = vertical.advance(frames(12, 24), key(24, {})).masks;
+  ASSERT_EQ(up.size(), 12u);
+  ASSERT_EQ(up[4].size(), 1u);
+  expectBox(up[4][0], 500, 216, 548, 232, MaskOrigin::Held);  // frame 16: 4 px along, below the cap
+  for (const size_t k : {8u, 10u, 11u}) {
+    SCOPED_TRACE("frame " + std::to_string(12 + k));
+    ASSERT_EQ(up[k].size(), 1u);
+    expectBox(up[k][0], 500, 220, 548, 236, MaskOrigin::Held);  // 212 + 8
+  }
+
+  // Horizontally at 3 px a frame: the shift reaches the cap of 24 at frame 20 and stays there.
+  BoxTimeline horizontal(exact(), 1000, 1000);
+  horizontal.advance({}, key(0, {Box{kPlate, 500, 200, 548, 216, 0.9f}}));
+  horizontal.advance(frames(0, 12), key(12, {Box{kPlate, 536, 200, 584, 216, 0.9f}}));
+  const auto along = horizontal.advance(frames(12, 24), key(24, {})).masks;
+  ASSERT_EQ(along.size(), 12u);
+  ASSERT_EQ(along[4].size(), 1u);
+  expectBox(along[4][0], 548, 200, 596, 216, MaskOrigin::Held);  // frame 16: 12 px along, below the cap
+  for (const size_t k : {8u, 10u, 11u}) {
+    SCOPED_TRACE("frame " + std::to_string(12 + k));
+    ASSERT_EQ(along[k].size(), 1u);
+    expectBox(along[k][0], 560, 200, 608, 216, MaskOrigin::Held);  // 536 + 24
+  }
+}
+
 TEST(BoxTimeline, MatchesGreedilyByCost) {
   // Both previous faces are candidates for the next one (costs 1.25 and 0.25, limit 2.0): the cheaper pair
   // wins and the other face is held.
@@ -454,6 +496,49 @@ TEST(BoxTimeline, TracksKeepTheirIdsAndNewTargetsGetNewOnes) {
   EXPECT_EQ(third[0][0].track, 2);
   EXPECT_EQ(third[0][1].track, 3);
   EXPECT_EQ(third[0][2].track, 1);
+}
+
+// `confirmed` has one flag per box of the keyframe the returned frames START at (the previous one), not of
+// `next`; the first advance() has no frames and no flags. finish() resets the timeline: the next video starts
+// at track 1 again.
+TEST(BoxTimeline, ConfirmedFollowsThePreviousKeyframeAndFinishRestartsTheTrackIds) {
+  BoxTimeline timeline(exact(), 1000, 1000);
+  const TimelineOutput first = timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  EXPECT_TRUE(first.masks.empty());
+  EXPECT_TRUE(first.confirmed.empty());
+
+  // Keyframe 0 had one box, keyframe 12 has two.
+  const TimelineOutput second =
+      timeline.advance(frames(0, 12), key(12, {face(112, 100, 132, 120), face(500, 500, 520, 520)}));
+  EXPECT_EQ(second.confirmed, std::vector<bool>({true}));
+  for (const auto& m : second.masks) {
+    ASSERT_EQ(m.size(), 1u);  // the second box starts at keyframe 12
+    EXPECT_EQ(m[0].track, 1);
+  }
+
+  // Keyframe 12 had two boxes, keyframe 24 has one.
+  const TimelineOutput third = timeline.advance(frames(12, 24), key(24, {face(124, 100, 144, 120)}));
+  EXPECT_EQ(third.confirmed, std::vector<bool>({true, true}));
+  ASSERT_EQ(third.masks[6].size(), 2u);
+  EXPECT_EQ(third.masks[6][0].track, 1);
+  EXPECT_EQ(third.masks[6][1].track, 2);
+
+  // Keyframe 24 had one box (the second target is a ghost there, unmasked).
+  const TimelineOutput tail = timeline.finish(frames(24, 30));
+  EXPECT_EQ(tail.confirmed, std::vector<bool>({true}));
+  for (const auto& m : tail.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 1);
+  }
+
+  // The timeline is fresh again: the first target of the next video is track 1, not 3.
+  timeline.advance({}, key(0, {face(300, 300, 320, 320)}));
+  const TimelineOutput next = timeline.advance(frames(0, 6), key(6, {face(300, 300, 320, 320)}));
+  EXPECT_EQ(next.confirmed, std::vector<bool>({true}));
+  for (const auto& m : next.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 1);
+  }
 }
 
 // Detected at 12 (centre 122), missed at 24, found at 36 (centre (150, 118)): the velocity runs from the last
@@ -756,6 +841,168 @@ TEST(BoxTimeline, EveryTrackHasAtMostOneMaskPerFrame) {
       EXPECT_GE(m.track, 1);
     }
   }
+}
+
+// A mask grows at once (spec 2026-10-19 §3.1): the face doubles in 2 frames and frame 1's mask is its box.
+TEST(BoxTimeline, AMaskGrowsAtOnce) {
+  BoxTimeline timeline(smooth(0.02, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(125, 125, 175, 175)}));
+  const auto masks = timeline.advance(frames(0, 2), key(2, {face(100, 100, 200, 200)})).masks;
+  ASSERT_EQ(masks[1].size(), 1u);
+  expectBox(masks[1][0], 112.5f, 112.5f, 187.5f, 187.5f, MaskOrigin::Interpolated);
+}
+
+// ... and shrinks slowly: its width and height by at most shrinkPerFrame of themselves per frame, never below the
+// box's, around the box's centre. The face halves in 2 frames (100 -> 75 -> 50 px) and then stays; with 10 % per
+// frame the mask's side goes 100, 90, 81, 72.9, 65.61, 59.049, 53.1441, then 50 (0.9 x 53.1441 is less).
+TEST(BoxTimeline, AMaskShrinksByAtMostItsShrinkFractionPerFrame) {
+  BoxTimeline timeline(smooth(0.1, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
+  std::vector<std::vector<MaskBox>> masks = timeline.advance(frames(0, 2), key(2, {face(125, 125, 175, 175)})).masks;
+  for (auto& m : timeline.advance(frames(2, 8), key(8, {face(125, 125, 175, 175)})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 8u);
+  const double sides[] = {100, 90, 81, 72.9, 65.61, 59.049, 53.1441, 50};
+  for (size_t k = 0; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(masks[k].size(), 1u);
+    const auto half = static_cast<float>(sides[k] / 2);
+    expectBox(masks[k][0], 150 - half, 150 - half, 150 + half, 150 + half,
+              k == 0 || k == 2 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+}
+
+// A lost target's mask keeps its smoothed size while it is held, and moves with the held box. The face shrinks to
+// 50 px while moving 2 px a frame (masks of 100, 90 and 81 px), then is missed at keyframe 6: frames 3 to 5 keep
+// 81 px around the held centre.
+TEST(BoxTimeline, AHeldMaskKeepsItsSmoothedSizeAtTheHeldPosition) {
+  BoxTimeline timeline(smooth(0.1, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
+  std::vector<std::vector<MaskBox>> masks = timeline.advance(frames(0, 2), key(2, {face(129, 125, 179, 175)})).masks;
+  for (auto& m : timeline.advance(frames(2, 6), key(6, {})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 6u);
+  ASSERT_EQ(masks[1].size(), 1u);
+  expectBox(masks[1][0], 107, 105, 197, 195, MaskOrigin::Interpolated);  // 90 px around (152, 150)
+  ASSERT_EQ(masks[2].size(), 1u);
+  expectBox(masks[2][0], 113.5f, 109.5f, 194.5f, 190.5f, MaskOrigin::Detected);  // 81 px around (154, 150)
+  for (size_t k = 3; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(masks[k].size(), 1u);
+    const float cx = 154 + 2.0f * static_cast<float>(k - 2);  // held along the velocity
+    expectBox(masks[k][0], cx - 40.5f, 109.5f, cx + 40.5f, 190.5f, MaskOrigin::Held);
+  }
+}
+
+// Some single mask contains the whole box.
+bool covers(const std::vector<MaskBox>& masks, float x1, float y1, float x2, float y2) {
+  return std::any_of(masks.begin(), masks.end(), [=](const MaskBox& m) {
+    return m.x1 <= x1 + 1e-3f && m.y1 <= y1 + 1e-3f && m.x2 >= x2 - 1e-3f && m.y2 >= y2 - 1e-3f;
+  });
+}
+
+// The smoothing is of the size, around the box's own centre (spec §3.1): a fast target's mask follows it instead
+// of trailing behind. Its width and height never exceed the larger of the box's and the previous mask's, and its
+// centre is the box's.
+TEST(BoxTimeline, AFastTargetIsNotSmearedAlongItsMotion) {
+  // A 20 px face at 5 px a frame: every mask is the box itself, nothing is left behind.
+  BoxTimeline steady(smooth(0.02, 4.0), 1000, 1000);
+  steady.advance({}, key(0, {face(100, 100, 120, 120)}));
+  std::vector<std::vector<MaskBox>> masks = steady.advance(frames(0, 12), key(12, {face(160, 100, 180, 120)})).masks;
+  for (auto& m : steady.advance(frames(12, 24), key(24, {face(220, 100, 240, 120)})).masks) masks.push_back(std::move(m));
+  ASSERT_EQ(masks.size(), 24u);
+  for (size_t k = 0; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(masks[k].size(), 1u);
+    const float x = 100 + 5.0f * static_cast<float>(k);
+    expectBox(masks[k][0], x, 100, x + 20, 120, k % 12 == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+
+  // A face shrinking from 100 to 50 px while it moves 175 px in 12 frames: the mask's side shrinks 2 % a frame,
+  // centred on the box wherever the box is.
+  BoxTimeline shrinking(smooth(0.02, 4.0), 1000, 1000);
+  shrinking.advance({}, key(0, {face(100, 100, 200, 200)}));
+  const auto moving = shrinking.advance(frames(0, 12), key(12, {face(300, 125, 350, 175)})).masks;
+  ASSERT_EQ(moving.size(), 12u);
+  double side = 0;
+  for (size_t k = 0; k < moving.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(moving[k].size(), 1u);
+    const MaskBox& m = moving[k][0];
+    const double t = static_cast<double>(k) / 12;
+    const double cx = 150 + 175 * t;  // the interpolated box's centre (its y stays 150)
+    const double box = 100 - 50 * t;  // and its width and height
+    const double previous = side;
+    side = k == 0 ? box : std::max(box, 0.98 * side);
+    EXPECT_NEAR((m.x1 + m.x2) / 2, cx, 1e-3);
+    EXPECT_NEAR((m.y1 + m.y2) / 2, 150, 1e-3);
+    EXPECT_NEAR(m.x2 - m.x1, side, 1e-3);
+    EXPECT_NEAR(m.y2 - m.y1, side, 1e-3);
+    EXPECT_LE(m.x2 - m.x1, std::max(box, previous) + 1e-3);
+    EXPECT_LE(m.y2 - m.y1, std::max(box, previous) + 1e-3);
+    EXPECT_TRUE(covers(moving[k], static_cast<float>(cx - box / 2), static_cast<float>(150 - box / 2),
+                       static_cast<float>(cx + box / 2), static_cast<float>(150 + box / 2)));
+  }
+}
+
+// A mask covers at most max_mask_area_ratio times its box: beyond that its width and height are pulled the same
+// fraction of their way towards the box's. Frame 1's box is 120..180 (60 px, 3600 px^2); the side may only shrink
+// from 100 to 98 (9604 px^2, 2.67 times), so it is pulled towards 60 until the mask is 2 x 3600 = 7200 px^2:
+// sqrt(7200) px square around the box's centre.
+TEST(BoxTimeline, CapsTheMaskAreaAtTheConfiguredMultipleOfItsBox) {
+  BoxTimeline timeline(smooth(0.02, 2.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 200, 200)}));
+  const auto masks = timeline.advance(frames(0, 2), key(2, {face(140, 140, 160, 160)})).masks;
+  ASSERT_EQ(masks[1].size(), 1u);
+  const double half = std::sqrt(7200.0) / 2;
+  const MaskBox& m = masks[1][0];
+  EXPECT_NEAR(m.x1, 150 - half, 1e-3);
+  EXPECT_NEAR(m.x2, 150 + half, 1e-3);
+  EXPECT_NEAR(m.y1, 150 - half, 1e-3);
+  EXPECT_NEAR(m.y2, 150 + half, 1e-3);
+}
+
+// Frame 1's box is 145..255 x 100..120 (110 x 20 = 2200 px^2); the width may only shrink from 200 to 196 (3920 px^2),
+// the height is the box's. The width is pulled towards 110 until the mask is 1.5 x 2200 = 3300 px^2: 165 x 20 around
+// the box's centre.
+TEST(BoxTimeline, TheAreaCapPullsBothSidesTowardsTheBox) {
+  BoxTimeline timeline(smooth(0.02, 1.5), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 300, 120)}));
+  const auto masks = timeline.advance(frames(0, 2), key(2, {face(190, 100, 210, 120)})).masks;
+  ASSERT_EQ(masks[1].size(), 1u);
+  expectBox(masks[1][0], 117.5f, 100, 282.5f, 120, MaskOrigin::Interpolated);
+}
+
+// A track whose box lies wholly outside the frame forgets its mask size: when it comes back, its mask is its box
+// (40 px), not a size shrunk slowly from the 83 px it had when it left. The face shrinks from 100 to 40 px while it
+// moves right out of the 1000 px frame (frames 10 and 11 are outside, then keyframe 12 and the first 6 frames after
+// it) and back in (frame 19: x from 983.3).
+TEST(BoxTimeline, ForgetsTheSizeOfATargetThatLeavesTheFrame) {
+  BoxTimeline timeline(smooth(0.02, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(600, 100, 700, 200)}));
+  std::vector<std::vector<MaskBox>> masks =
+      timeline.advance(frames(0, 12), key(12, {face(1100, 130, 1140, 170)})).masks;
+  for (auto& m : timeline.advance(frames(12, 24), key(24, {face(900, 130, 940, 170)})).masks) {
+    masks.push_back(std::move(m));
+  }
+  ASSERT_EQ(masks.size(), 24u);
+  ASSERT_EQ(masks[9].size(), 1u);  // frame 9: the box still overlaps the frame, 55 px in a mask of 83.4 px
+  EXPECT_NEAR(masks[9][0].y2 - masks[9][0].y1, 100 * std::pow(0.98, 9), 1e-3);
+  for (size_t k = 10; k < 19; ++k) EXPECT_TRUE(masks[k].empty()) << "frame " << k;
+  ASSERT_EQ(masks[19].size(), 1u);
+  expectBox(masks[19][0], 983.3333f, 130, 1000, 170, MaskOrigin::Interpolated);
+}
+
+TEST(BoxTimeline, RejectsAnInvalidShrinkOrAreaRatio) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  for (const double bad : {0.0, -0.1, 1.5, nan, inf}) {
+    EXPECT_THROW(BoxTimeline(smooth(bad, 4.0), 10, 10), std::invalid_argument) << bad;
+  }
+  for (const double bad : {0.99, 0.0, -1.0, nan, inf}) {
+    EXPECT_THROW(BoxTimeline(smooth(0.02, bad), 10, 10), std::invalid_argument) << bad;
+  }
+  EXPECT_NO_THROW(BoxTimeline(smooth(1.0, 1.0), 10, 10));
+  EXPECT_DOUBLE_EQ(TimelineConfig{}.shrinkPerFrame, 0.02);
+  EXPECT_DOUBLE_EQ(TimelineConfig{}.maxMaskAreaRatio, 4.0);
 }
 
 }  // namespace

@@ -111,7 +111,8 @@ bool validConfig(const TimelineConfig& c) {
   return std::isfinite(c.matchMaxDistance) && c.matchMaxDistance > 0 && std::isfinite(c.expandFraction) &&
          c.expandFraction >= 0 && std::isfinite(c.motionExpandFraction) && c.motionExpandFraction >= 0 &&
          std::isfinite(c.minBoxPx) && c.minBoxPx >= 0 && std::isfinite(c.matchMaxDistanceLoose) &&
-         c.matchMaxDistanceLoose > 0;
+         c.matchMaxDistanceLoose > 0 && std::isfinite(c.shrinkPerFrame) && c.shrinkPerFrame > 0 &&
+         c.shrinkPerFrame <= 1 && std::isfinite(c.maxMaskAreaRatio) && c.maxMaskAreaRatio >= 1;
 }
 
 }  // namespace
@@ -199,6 +200,28 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
   return pairs;
 }
 
+BoxTimeline::Size BoxTimeline::smoothed(Size shown, Size raw, double shrink, bool held) {
+  const auto side = [shrink, held](double previous, double wanted) {
+    if (wanted >= previous) return wanted;
+    return held ? previous : std::max(wanted, previous * (1 - shrink));
+  };
+  return Size{side(shown.w, raw.w), side(shown.h, raw.h)};
+}
+
+BoxTimeline::Size BoxTimeline::cappedArea(Size size, Size raw, double ratio) {
+  const double limit = ratio * raw.w * raw.h;
+  if (size.w * size.h <= limit) return size;
+  // Both sides a fraction f of their way out from raw's, (w + f a) x (h + f b) with a = W - w, b = H - h, is an
+  // area that grows with f from w h <= limit (ratio >= 1) to W H > limit. It equals the limit at the positive root
+  // of a b f^2 + p f - q = 0, p = a h + b w > 0, q = limit - w h >= 0, written in a form that also holds for a b = 0.
+  const double a = size.w - raw.w;
+  const double b = size.h - raw.h;
+  const double p = a * raw.h + b * raw.w;
+  const double q = limit - raw.w * raw.h;
+  const double f = std::clamp(2 * q / (p + std::sqrt(p * p + 4 * a * b * q)), 0.0, 1.0);
+  return Size{raw.w + f * a, raw.h + f * b};
+}
+
 BoxTimeline::Offset BoxTimeline::heldShift(const Track& track, double since) const {
   if (!track.velocity) return {};
   const double capX = kMaxHeldShift * widthOf(track.box);
@@ -207,7 +230,7 @@ BoxTimeline::Offset BoxTimeline::heldShift(const Track& track, double since) con
 }
 
 void BoxTimeline::emit(std::vector<MaskBox>& out, const Track& track, const Box& region, Offset motion,
-                       MaskOrigin origin) const {
+                       MaskOrigin origin) {
   const double mx = config_.expandFraction * widthOf(region) + config_.motionExpandFraction * motion.x;
   const double my = config_.expandFraction * heightOf(region) + config_.motionExpandFraction * motion.y;
   double x1 = region.x1 - mx;
@@ -216,17 +239,29 @@ void BoxTimeline::emit(std::vector<MaskBox>& out, const Track& track, const Box&
   double y2 = region.y2 + my;
   growTo(x1, x2, config_.minBoxPx);
   growTo(y1, y2, config_.minBoxPx);
-  x1 = std::clamp(x1, 0.0, static_cast<double>(width_));
-  x2 = std::clamp(x2, 0.0, static_cast<double>(width_));
-  y1 = std::clamp(y1, 0.0, static_cast<double>(height_));
-  y2 = std::clamp(y2, 0.0, static_cast<double>(height_));
-  if (!(x2 > x1) || !(y2 > y1)) return;
-  out.push_back(MaskBox{region.cls, static_cast<float>(x1), static_cast<float>(y1), static_cast<float>(x2),
-                        static_cast<float>(y2), origin, track.id});
+  const auto frameW = static_cast<double>(width_);
+  const auto frameH = static_cast<double>(height_);
+  if (!(std::min(x2, frameW) > std::max(x1, 0.0)) || !(std::min(y2, frameH) > std::max(y1, 0.0))) {
+    shown_.erase(track.id);  // off the frame: a mask that comes back starts afresh
+    return;
+  }
+  const Size raw{x2 - x1, y2 - y1};
+  const auto it = shown_.find(track.id);
+  const Size size = it == shown_.end() ? raw
+                                       : cappedArea(smoothed(it->second, raw, config_.shrinkPerFrame,
+                                                             origin == MaskOrigin::Held),
+                                                    raw, config_.maxMaskAreaRatio);
+  shown_[track.id] = size;
+  const double cx = (x1 + x2) / 2.0;
+  const double cy = (y1 + y2) / 2.0;
+  out.push_back(MaskBox{region.cls, static_cast<float>(std::clamp(cx - size.w / 2.0, 0.0, frameW)),
+                        static_cast<float>(std::clamp(cy - size.h / 2.0, 0.0, frameH)),
+                        static_cast<float>(std::clamp(cx + size.w / 2.0, 0.0, frameW)),
+                        static_cast<float>(std::clamp(cy + size.h / 2.0, 0.0, frameH)), origin, track.id});
 }
 
 void BoxTimeline::hold(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames,
-                       const FrameTime& from, const Track& track, double span) const {
+                       const FrameTime& from, const Track& track, double span) {
   const Offset reach = heldShift(track, span);
   const Offset motion{std::abs(reach.x), std::abs(reach.y)};
   for (size_t k = 0; k < frames.size(); ++k) {
@@ -312,6 +347,10 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
     tracks.push_back(Track{track.id, shifted(track.box, s.x, s.y), track.velocity, true, track.anchor,
                            track.anchorSteps + steps, -1});
   }
+  // Tracks that ended forget their masks.
+  std::erase_if(shown_, [&tracks](const auto& entry) {
+    return std::none_of(tracks.begin(), tracks.end(), [&entry](const Track& t) { return t.id == entry.first; });
+  });
   keyTime_ = next.time;
   tracks_ = std::move(tracks);
   keyBoxes_ = next.boxes.size();
@@ -338,6 +377,7 @@ TimelineOutput BoxTimeline::finish(const std::vector<FrameTime>& frames) {
   out.confirmed.assign(keyBoxes_, true);
   keyTime_.reset();
   tracks_.clear();
+  shown_.clear();
   keyBoxes_ = 0;
   nextId_ = 1;
   return out;

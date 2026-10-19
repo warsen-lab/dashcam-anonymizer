@@ -13,11 +13,12 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 12> kKeys = {
+constexpr std::array<std::string_view, 14> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",          "mosaic_min_block_px",
-    "mosaic_blocks_per_long_side", "face_score_threshold", "face_nms_iou"};
+    "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
+    "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
+    "face_score_threshold", "face_nms_iou"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -67,6 +68,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.timeline.expandFraction), "expand_fraction must be finite");
   require(std::isfinite(c.timeline.motionExpandFraction), "motion_expand_fraction must be finite");
   require(std::isfinite(c.timeline.minBoxPx), "min_box_px must be finite");
+  require(std::isfinite(c.timeline.shrinkPerFrame), "shrink_per_frame must be finite");
+  require(std::isfinite(c.timeline.maxMaskAreaRatio), "max_mask_area_ratio must be finite");
   require(std::isfinite(c.face.scoreThreshold), "face_score_threshold must be finite");
   require(std::isfinite(c.face.nmsIou), "face_nms_iou must be finite");
   require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
@@ -78,6 +81,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.timeline.expandFraction >= 0, "expand_fraction must be >= 0");
   require(c.timeline.motionExpandFraction >= 0, "motion_expand_fraction must be >= 0");
   require(c.timeline.minBoxPx >= 0, "min_box_px must be >= 0");
+  require(c.timeline.shrinkPerFrame > 0 && c.timeline.shrinkPerFrame <= 1, "shrink_per_frame must be in (0, 1]");
+  require(c.timeline.maxMaskAreaRatio >= 1, "max_mask_area_ratio must be >= 1");
   require(c.mosaic.minBlockPx >= 1 && c.mosaic.minBlockPx <= kMaxMosaicSetting,
           "mosaic_min_block_px must be in [1, 4096]");
   require(c.mosaic.blocksPerLongSide >= 1 && c.mosaic.blocksPerLongSide <= kMaxMosaicSetting,
@@ -115,6 +120,8 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
     c.timeline.expandFraction = j.value("expand_fraction", c.timeline.expandFraction);
     c.timeline.motionExpandFraction = j.value("motion_expand_fraction", c.timeline.motionExpandFraction);
     c.timeline.minBoxPx = j.value("min_box_px", c.timeline.minBoxPx);
+    c.timeline.shrinkPerFrame = j.value("shrink_per_frame", c.timeline.shrinkPerFrame);
+    c.timeline.maxMaskAreaRatio = j.value("max_mask_area_ratio", c.timeline.maxMaskAreaRatio);
     c.face.scoreThreshold = j.value("face_score_threshold", c.face.scoreThreshold);
     c.face.nmsIou = j.value("face_nms_iou", c.face.nmsIou);
   } catch (const nlohmann::json::exception& e) {
@@ -144,6 +151,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["expand_fraction"] = c.timeline.expandFraction;
   j["motion_expand_fraction"] = c.timeline.motionExpandFraction;
   j["min_box_px"] = c.timeline.minBoxPx;
+  j["shrink_per_frame"] = c.timeline.shrinkPerFrame;
+  j["max_mask_area_ratio"] = c.timeline.maxMaskAreaRatio;
   j["mosaic_min_block_px"] = c.mosaic.minBlockPx;
   j["mosaic_blocks_per_long_side"] = c.mosaic.blocksPerLongSide;
   j["face_score_threshold"] = jsonFloat(c.face.scoreThreshold);
