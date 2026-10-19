@@ -23,7 +23,8 @@ const std::set<std::string> kAllKeys = {
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
-    "face_score_threshold", "face_nms_iou"};
+    "face_score_threshold", "face_nms_iou",       "face_confirm_score",
+    "plate_confirm_score"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -42,6 +43,8 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.face.scoreThreshold, d.face.scoreThreshold);
   EXPECT_FLOAT_EQ(c.face.nmsIou, d.face.nmsIou);
   EXPECT_EQ(c.face.topK, d.face.topK);
+  EXPECT_FLOAT_EQ(c.faceConfirmScore, d.faceConfirmScore);
+  EXPECT_FLOAT_EQ(c.plateConfirmScore, d.plateConfirmScore);
 }
 
 void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{}); }
@@ -64,6 +67,8 @@ RedactConfig nonDefaultConfig() {
   c.mosaic.blocksPerLongSide = 6;
   c.face.scoreThreshold = 0.4375f;
   c.face.nmsIou = 0.25f;
+  c.faceConfirmScore = 0.375f;
+  c.plateConfirmScore = 0.0625f;
   return c;
 }
 
@@ -137,6 +142,27 @@ TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
   EXPECT_NO_THROW(parseRedactConfig(R"({"shrink_per_frame": 1, "max_mask_area_ratio": 1})", "t"));
 }
 
+// Low-score confirmation (spec 2026-10-19 §3.4): faces below 0.5 and plates below 0.15 are masked only once seen on
+// two consecutive keyframes. The values are calibrated in the last task of the plan.
+TEST(RedactConfig, ReadsTheConfirmScores) {
+  EXPECT_FLOAT_EQ(RedactConfig{}.faceConfirmScore, 0.5f);
+  EXPECT_FLOAT_EQ(RedactConfig{}.plateConfirmScore, 0.15f);
+  const RedactConfig c = parseRedactConfig(R"({"face_confirm_score": 0.4, "plate_confirm_score": 0})", "t");
+  EXPECT_FLOAT_EQ(c.faceConfirmScore, 0.4f);
+  EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.0f);
+}
+
+// The thresholds go to the timeline by the detector's class names, in its class order; other classes need none.
+TEST(RedactConfig, ConfirmScoresFollowTheDetectorsClassNames) {
+  RedactConfig c;
+  c.faceConfirmScore = 0.4f;
+  c.plateConfirmScore = 0.2f;
+  c.timeline.expandFraction = 0.25;
+  EXPECT_EQ(timelineFor(c, {"plate", "face"}).confirmScore, (std::vector<float>{0.2f, 0.4f}));
+  EXPECT_EQ(timelineFor(c, {"face", "plate", "sign"}).confirmScore, (std::vector<float>{0.4f, 0.2f, 0.0f}));
+  EXPECT_DOUBLE_EQ(timelineFor(c, {"face"}).expandFraction, 0.25);
+}
+
 TEST(RedactConfig, RejectsBadInput) {
   const std::vector<std::string> bad = {
       R"({"detect_fps": 4})",          R"({"detect_fps": 61})",          R"({"detect_fps": 4.99})",
@@ -169,6 +195,9 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"shrink_per_frame": 0})",                 R"({"shrink_per_frame": 1.5})",
       R"({"shrink_per_frame": "0.02"})",            R"({"max_mask_area_ratio": 0.5})",
       R"({"max_mask_area_ratio": 1e400})",
+      // The confirmation thresholds are scores in [0, 1].
+      R"({"face_confirm_score": 1.5})",             R"({"plate_confirm_score": -0.1})",
+      R"({"face_confirm_score": "0.5"})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -183,6 +212,7 @@ TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
       R"({"min_box_px": null})",       R"({"mosaic_blocks_per_long_side": null})",
       R"({"face_score_threshold": null})", R"({"face_nms_iou": null})",
       R"({"shrink_per_frame": null})",     R"({"max_mask_area_ratio": null})",
+      R"({"face_confirm_score": null})",   R"({"plate_confirm_score": null})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -227,6 +257,8 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"max_mask_area_ratio", [](RedactConfig& c, double v) { c.timeline.maxMaskAreaRatio = v; }},
       {"face_score_threshold", [](RedactConfig& c, double v) { c.face.scoreThreshold = static_cast<float>(v); }},
       {"face_nms_iou", [](RedactConfig& c, double v) { c.face.nmsIou = static_cast<float>(v); }},
+      {"face_confirm_score", [](RedactConfig& c, double v) { c.faceConfirmScore = static_cast<float>(v); }},
+      {"plate_confirm_score", [](RedactConfig& c, double v) { c.plateConfirmScore = static_cast<float>(v); }},
   };
   const std::vector<double> nonFinite = {std::numeric_limits<double>::quiet_NaN(),
                                          std::numeric_limits<double>::infinity(),
@@ -277,7 +309,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 14u);
+  EXPECT_EQ(j.size(), 16u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -289,6 +321,8 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   EXPECT_EQ(j.at("nms_iou").dump(), "0.5");
   EXPECT_EQ(j.at("face_score_threshold").dump(), "0.3");
   EXPECT_EQ(j.at("face_nms_iou").dump(), "0.3");
+  EXPECT_EQ(j.at("face_confirm_score").dump(), "0.5");
+  EXPECT_EQ(j.at("plate_confirm_score").dump(), "0.15");
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {

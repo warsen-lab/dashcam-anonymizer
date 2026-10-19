@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <thread>
@@ -195,7 +196,7 @@ class Processor {
         masks_(masks),
         out_(out),
         stats_(stats),
-        timeline_(options.config.timeline, info.width, info.height) {}
+        timeline_(timelineFor(options.config, detector.classes()), info.width, info.height) {}
 
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
@@ -219,14 +220,14 @@ class Processor {
     stats_.detections += static_cast<int64_t>(found.size());
     std::vector<Box> boxes;
     boxes.reserve(found.size());
-    for (const SourcedBox& b : found) {
-      detections_ << detectionRecord(video_, item.index, item.ptsMs, b.box, detector_.classes(), b.src);
-      boxes.push_back(b.box);
-    }
+    for (const SourcedBox& b : found) boxes.push_back(b.box);
 
     const Clock::time_point trackStarted = Clock::now();
     const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
     stats_.track.busySec += secondsSince(trackStarted);
+    // The previous keyframe's boxes are written now that the timeline has said which of them it masked.
+    writeDetections(step.confirmed);
+    pending_ = KeyframeDetections{item.index, item.ptsMs, found};
     emit(step.masks);
     buffer_.push_back(std::move(item));
   }
@@ -235,11 +236,33 @@ class Processor {
     const Clock::time_point started = Clock::now();
     const TimelineOutput step = timeline_.finish(times());
     stats_.track.busySec += secondsSince(started);
+    writeDetections(step.confirmed);
     emit(step.masks);
     if (!out_.push(Item{EndItem{}})) throw PipelineAborted{};
   }
 
  private:
+  // A keyframe's detections, written once the next keyframe (or the end) says which were masked.
+  struct KeyframeDetections {
+    int64_t frame = 0;
+    double ptsMs = 0;
+    std::vector<SourcedBox> boxes{};
+  };
+
+  // Writes the pending keyframe's detections.jsonl lines with their confirmation flags.
+  void writeDetections(const std::vector<bool>& confirmed) {
+    if (!pending_) return;
+    if (confirmed.size() != pending_->boxes.size()) {
+      throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+    }
+    for (size_t i = 0; i < confirmed.size(); ++i) {
+      const SourcedBox& b = pending_->boxes[i];
+      detections_ << detectionRecord(video_, pending_->frame, pending_->ptsMs, b.box, detector_.classes(), b.src,
+                                     static_cast<bool>(confirmed[i]));
+    }
+    pending_.reset();
+  }
+
   static VideoFrame viewOf(const VideoItem& item) {
     VideoFrame v;
     v.index = item.index;
@@ -291,6 +314,7 @@ class Processor {
   BoxTimeline timeline_;
   bool sawKeyframe_ = false;
   std::vector<VideoItem> buffer_;
+  std::optional<KeyframeDetections> pending_;
 };
 
 void decodeStage(VideoReader& reader, BoundedQueue<Item>& out, StageStat& decode) {

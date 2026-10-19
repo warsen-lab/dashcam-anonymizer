@@ -22,6 +22,16 @@ TEST(Records, DetectionLineFollowsTheContract) {
             "\n");
 }
 
+TEST(Records, DetectionLineCarriesTheConfirmationWhenGiven) {
+  const Box b{0, 812.06f, 433.5f, 846.2f, 475.0f, 0.27f};
+  EXPECT_EQ(detectionRecord("trip.mp4", 1234, 20566.74, b, kClasses, "student", false),
+            R"({"video":"trip.mp4","frame":1234,"pts_ms":20566.7,"cls":"face","x1":812.1,"y1":433.5,)"
+            R"("x2":846.2,"y2":475.0,"score":0.27,"src":"student","confirmed":false})"
+            "\n");
+  EXPECT_NE(detectionRecord("trip.mp4", 1, 0.0, b, kClasses, "yunet", true).find(R"("confirmed":true})"),
+            std::string::npos);
+}
+
 TEST(Records, MaskLineListsBoxesWithTheirTrackAndOrigin) {
   const std::vector<MaskBox> boxes{MaskBox{1, 1.0f, 2.0f, 3.5f, 4.0f, MaskOrigin::Interpolated, 7}};
   EXPECT_EQ(maskRecord("a.mp4", 3, boxes, kClasses),

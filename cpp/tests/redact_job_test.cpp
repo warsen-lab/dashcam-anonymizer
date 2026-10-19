@@ -235,6 +235,43 @@ TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
   }
 }
 
+// Low-score boxes (below face_confirm_score, 0.5 by default) are masked only once their track is matched at two
+// consecutive keyframes, and then from the first of them on; one seen once is not masked and is written to
+// detections.jsonl with "confirmed": false (spec 2026-10-19 §3.4). Keyframes every 6 frames (5 fps on 30 fps).
+TEST(RedactJob, MasksALowScoreFaceOnlyOnceItIsConfirmed) {
+  RedactOptions o = baseOptions("redact_confirm");
+  o.config.faceConfirmScore = 0.5f;  // the threshold this test is written for, whatever the calibrated default
+  const fs::path fake = test::tmpDir() / "redact_confirm.jsonl";
+  {
+    std::ofstream out(fake);
+    const auto face = [&](int frame, int x1) {
+      out << R"({"video":"noisy_audio.mp4","frame":)" << frame << R"(,"pts_ms":0,"cls":"face","x1":)" << x1
+          << R"(,"y1":100,"x2":)" << x1 + 80 << R"(,"y2":180,"score":0.3,"src":"fake"})" << '\n';
+    };
+    face(12, 100);  // seen once
+    face(24, 300);  // seen on two consecutive keyframes
+    face(30, 300);
+  }
+  o.fakeDetections = fake;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 10);
+  std::map<int, bool> confirmed;
+  std::ifstream detections(s.outputDir / "detections.jsonl");
+  for (std::string line; std::getline(detections, line);) {
+    const nlohmann::json d = nlohmann::json::parse(line);
+    confirmed[d.at("frame").get<int>()] = d.at("confirmed").get<bool>();
+  }
+  EXPECT_EQ(confirmed, (std::map<int, bool>{{12, false}, {24, true}, {30, true}}));
+  std::ifstream masks(s.outputDir / "masks.jsonl");
+  for (std::string line; std::getline(masks, line);) {
+    const nlohmann::json record = nlohmann::json::parse(line);
+    const int frame = record.at("frame").get<int>();
+    // from the first of the two keyframes (24) to the end of the hold after the second (35)
+    EXPECT_EQ(record.at("boxes").size(), frame >= 24 && frame < 36 ? 1u : 0u) << "frame " << frame;
+  }
+  EXPECT_EQ(s.maskedFrames, 12);
+}
+
 TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
   RedactOptions o = baseOptions("redact_every");
   o.detectEveryFrame = true;

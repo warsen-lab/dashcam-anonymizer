@@ -41,8 +41,12 @@ def read_masks(path: Path) -> tuple[set[str], dict[int, list[Box]]]:
     return videos, by_frame
 
 
-def detections_by_frame(path: Path) -> tuple[set[str], dict[int, list[Box]]]:
-    """(video names, frame -> boxes) of a detections JSONL; an empty file gives no detections."""
+def detections_by_frame(path: Path, confirmed_only: bool = False) -> tuple[set[str], dict[int, list[Box]]]:
+    """(video names, frame -> boxes) of a detections JSONL; an empty file gives no detections.
+
+    With `confirmed_only`, boxes vc_redact wrote with "confirmed": false (low-score boxes seen on one keyframe only,
+    which it never masked) are left out.
+    """
     if not path.exists():
         raise ValueError(f"{path} does not exist")
     videos: set[str] = set()
@@ -52,9 +56,12 @@ def detections_by_frame(path: Path) -> tuple[set[str], dict[int, list[Box]]]:
             if not line.strip():
                 continue
             try:
-                d = Detection.from_record(json.loads(line))
+                record = json.loads(line)
+                d = Detection.from_record(record)
             except (KeyError, TypeError, ValueError) as e:
                 raise ValueError(f"{path} line {n}: bad detection record ({e})") from None
+            if confirmed_only and record.get("confirmed") is False:
+                continue
             videos.add(d.video)
             by_frame[d.frame].append(d.box)
     return videos, dict(by_frame)

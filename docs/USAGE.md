@@ -98,6 +98,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `expand_fraction` | 0.3 | 打码框每边外扩比例。调大可以盖住检测框偏小的情况 |
 | `shrink_per_frame` | 0.02 | 打码框的宽、高每帧最多缩小的比例（变大不受限）。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
 | `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小 |
+| `face_confirm_score` | 0.5 | 人脸分数低于它的框要在相邻两个关键帧都出现才打码。调低多打、调高少打（误检少，但只露一次的小脸会漏） |
+| `plate_confirm_score` | 0.15 | 车牌的同一门槛 |
 
 用法：`--config my.json`。省略的键取默认值，写错的键直接报错。
 

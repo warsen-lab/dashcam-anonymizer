@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -26,16 +27,24 @@ struct RedactConfig {
   TimelineConfig timeline{.expandFraction = 0.3};
   MosaicConfig mosaic;
   YuNetParams face{.scoreThreshold = 0.3f, .nmsIou = 0.3f};
+  // Boxes scoring below these are masked only once their track is matched at two consecutive keyframes
+  // (spec 2026-10-19 §3.4), by class whatever the detector; a merged box goes by its (higher) merged score.
+  float faceConfirmScore = 0.5f;
+  float plateConfirmScore = 0.15f;
 };
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096]; every other value must be a finite number. face_score_threshold is in [0, 1], face_nms_iou in
-// (0, 1].
+// [1, 4096]; every other value must be a finite number. face_score_threshold, face_confirm_score and
+// plate_confirm_score are in [0, 1], face_nms_iou in (0, 1].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);
 nlohmann::ordered_json redactConfigToJson(const RedactConfig& config);
+
+// config.timeline with confirmScore set for a detector with these classes: "face" -> faceConfirmScore,
+// "plate" -> plateConfirmScore, any other class 0 (needs no confirmation).
+TimelineConfig timelineFor(const RedactConfig& config, const std::vector<std::string>& classes);
 
 }  // namespace vc

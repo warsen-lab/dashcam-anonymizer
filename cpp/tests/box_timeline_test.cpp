@@ -39,7 +39,16 @@ TimelineConfig smooth(double shrink, double ratio) {
   return c;
 }
 
+// exact() with the spec's thresholds (§3.4): faces scoring below 0.5 and plates below 0.15 need confirming.
+TimelineConfig confirming() {
+  TimelineConfig c = exact();
+  c.confirmScore = {0.5f, 0.15f};
+  return c;
+}
+
 Box face(float x1, float y1, float x2, float y2) { return Box{kFace, x1, y1, x2, y2, 0.9f}; }
+
+Box weakFace(float x1, float y1, float x2, float y2) { return Box{kFace, x1, y1, x2, y2, 0.3f}; }
 
 // Frames first..last-1 at 60 fps pts, or all at `frozenPts` when it is >= 0.
 std::vector<FrameTime> frames(int64_t first, int64_t last, double frozenPts = -1) {
@@ -986,9 +995,30 @@ TEST(BoxTimeline, ForgetsTheSizeOfATargetThatLeavesTheFrame) {
   ASSERT_EQ(masks.size(), 24u);
   ASSERT_EQ(masks[9].size(), 1u);  // frame 9: the box still overlaps the frame, 55 px in a mask of 83.4 px
   EXPECT_NEAR(masks[9][0].y2 - masks[9][0].y1, 100 * std::pow(0.98, 9), 1e-3);
+  // Smoothing happens on the unclipped box and the clip comes last: the raw box 975..1030 (centre 1002.5) has a mask
+  // 83.4 wide around that centre, 960.8..1044.2, which the frame then cuts at 1000 (smoothing the clipped box
+  // would give about 958).
+  EXPECT_NEAR(masks[9][0].x1, 1002.5 - 100 * std::pow(0.98, 9) / 2, 1e-3);
+  EXPECT_NEAR(masks[9][0].x1, 960.8, 0.05);
+  EXPECT_FLOAT_EQ(masks[9][0].x2, 1000.0f);
   for (size_t k = 10; k < 19; ++k) EXPECT_TRUE(masks[k].empty()) << "frame " << k;
   ASSERT_EQ(masks[19].size(), 1u);
   expectBox(masks[19][0], 983.3333f, 130, 1000, 170, MaskOrigin::Interpolated);
+}
+
+// finish() resets the timeline, remembered mask sizes included: track ids start again at 1, and a small box
+// must not inherit the size of the large one that had the same id in the video before.
+TEST(BoxTimeline, FinishForgetsTheRememberedSizes) {
+  BoxTimeline timeline(smooth(0.02, 100.0), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 300, 300)}));
+  timeline.advance(frames(0, 12), key(12, {face(100, 100, 300, 300)}));
+  timeline.finish(frames(12, 18));
+
+  timeline.advance({}, key(100, {face(500, 500, 540, 540)}));
+  const TimelineOutput second = timeline.finish(frames(100, 106));
+  ASSERT_EQ(second.masks[0].size(), 1u);
+  EXPECT_EQ(second.masks[0][0].track, 1);
+  expectBox(second.masks[0][0], 500, 500, 540, 540, MaskOrigin::Detected);
 }
 
 TEST(BoxTimeline, RejectsAnInvalidShrinkOrAreaRatio) {
@@ -1003,6 +1033,79 @@ TEST(BoxTimeline, RejectsAnInvalidShrinkOrAreaRatio) {
   EXPECT_NO_THROW(BoxTimeline(smooth(1.0, 1.0), 10, 10));
   EXPECT_DOUBLE_EQ(TimelineConfig{}.shrinkPerFrame, 0.02);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.maxMaskAreaRatio, 4.0);
+}
+
+// A box below its class's threshold seen on one keyframe only is not masked, and reported unconfirmed.
+TEST(BoxTimeline, ALowScoreBoxSeenOnceIsNotMasked) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput out = timeline.advance(frames(0, 12), key(12, {}));
+  for (const auto& m : out.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(out.confirmed, std::vector<bool>{false});
+
+  // Nor at the end of the video.
+  BoxTimeline ending(confirming(), 1000, 1000);
+  ending.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput tail = ending.finish(frames(0, 6));
+  for (const auto& m : tail.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(tail.confirmed, std::vector<bool>{false});
+}
+
+// Matched into the same track at the next keyframe, it is confirmed there and masked from its first keyframe on
+// (the interval waits for that keyframe anyway, so this adds no delay). Once confirmed, the track needs no
+// further confirmation, also when it is lost.
+TEST(BoxTimeline, ALowScoreBoxConfirmedAtTheNextKeyframeIsMaskedFromItsFirstKeyframe) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput out = timeline.advance(frames(0, 12), key(12, {weakFace(112, 100, 132, 120)}));
+  EXPECT_EQ(out.confirmed, std::vector<bool>{true});
+  for (const auto& m : out.masks) ASSERT_EQ(m.size(), 1u);
+  expectBox(out.masks[0][0], 100, 100, 120, 120, MaskOrigin::Detected);
+  expectBox(out.masks[6][0], 106, 100, 126, 120, MaskOrigin::Interpolated);
+  const TimelineOutput lost = timeline.advance(frames(12, 24), key(24, {}));
+  EXPECT_EQ(lost.confirmed, std::vector<bool>{true});
+  ASSERT_EQ(lost.masks[6].size(), 1u);
+  EXPECT_EQ(lost.masks[6][0].origin, MaskOrigin::Held);
+}
+
+// At or above its class's threshold a box is masked at once; thresholds go by class, whatever the source.
+TEST(BoxTimeline, AHighScoreBoxIsMaskedAtOnceAndThresholdsGoByClass) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {Box{kFace, 100, 100, 120, 120, 0.5f}, Box{kPlate, 300, 300, 348, 316, 0.15f}}));
+  const TimelineOutput atThreshold = timeline.advance(frames(0, 12), key(12, {}));
+  EXPECT_EQ(atThreshold.confirmed, (std::vector<bool>{true, true}));
+  EXPECT_EQ(atThreshold.masks[6].size(), 2u);
+
+  // 0.3 is low for a face (0.5) and high for a plate (0.15).
+  BoxTimeline mixed(confirming(), 1000, 1000);
+  mixed.advance({}, key(0, {Box{kFace, 100, 100, 120, 120, 0.3f}, Box{kPlate, 300, 300, 348, 316, 0.3f}}));
+  const TimelineOutput out = mixed.advance(frames(0, 12), key(12, {}));
+  EXPECT_EQ(out.confirmed, (std::vector<bool>{false, true}));
+  ASSERT_EQ(out.masks[6].size(), 1u);
+  EXPECT_EQ(out.masks[6][0].cls, kPlate);
+}
+
+// "Two consecutive keyframes": seen at 0, missed at 12, seen again at 24 is not a confirmation. The unconfirmed
+// track leaves no ghost, so the box at 24 starts a new, again unconfirmed track.
+TEST(BoxTimeline, AnUnconfirmedTrackLeavesNoGhost) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  timeline.advance(frames(0, 12), key(12, {}));
+  const TimelineOutput again = timeline.advance(frames(12, 24), key(24, {weakFace(100, 100, 120, 120)}));
+  for (const auto& m : again.masks) EXPECT_TRUE(m.empty());
+  EXPECT_TRUE(again.confirmed.empty());  // keyframe 12 had no boxes
+  const TimelineOutput tail = timeline.finish(frames(24, 30));
+  for (const auto& m : tail.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(tail.confirmed, std::vector<bool>{false});
+}
+
+TEST(BoxTimeline, RejectsAnInvalidConfirmScore) {
+  for (const float bad : {-0.1f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
+    TimelineConfig c = confirming();
+    c.confirmScore[1] = bad;
+    EXPECT_THROW(BoxTimeline(c, 10, 10), std::invalid_argument) << bad;
+  }
+  EXPECT_TRUE(TimelineConfig{}.confirmScore.empty());  // by default nothing needs confirming
 }
 
 }  // namespace

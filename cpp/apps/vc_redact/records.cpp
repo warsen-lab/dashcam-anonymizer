@@ -39,7 +39,8 @@ const std::string& className(const std::vector<std::string>& classes, int cls) {
 }  // namespace
 
 std::string detectionRecord(const std::string& video, int64_t frame, double ptsMs, const Box& box,
-                            const std::vector<std::string>& classes, const std::string& src) {
+                            const std::vector<std::string>& classes, const std::string& src,
+                            std::optional<bool> confirmed) {
   nlohmann::ordered_json j;
   j["video"] = video;
   j["frame"] = frame;
@@ -51,6 +52,7 @@ std::string detectionRecord(const std::string& video, int64_t frame, double ptsM
   j["y2"] = round1(box.y2, "y2");
   j["score"] = round4(box.score, "score");
   j["src"] = src;
+  if (confirmed) j["confirmed"] = *confirmed;
   return jsonLine(j);
 }
 

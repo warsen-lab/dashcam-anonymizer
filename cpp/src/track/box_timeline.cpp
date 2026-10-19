@@ -108,11 +108,15 @@ void requireFinite(const Keyframe& key) {
 }
 
 bool validConfig(const TimelineConfig& c) {
-  return std::isfinite(c.matchMaxDistance) && c.matchMaxDistance > 0 && std::isfinite(c.expandFraction) &&
-         c.expandFraction >= 0 && std::isfinite(c.motionExpandFraction) && c.motionExpandFraction >= 0 &&
-         std::isfinite(c.minBoxPx) && c.minBoxPx >= 0 && std::isfinite(c.matchMaxDistanceLoose) &&
-         c.matchMaxDistanceLoose > 0 && std::isfinite(c.shrinkPerFrame) && c.shrinkPerFrame > 0 &&
-         c.shrinkPerFrame <= 1 && std::isfinite(c.maxMaskAreaRatio) && c.maxMaskAreaRatio >= 1;
+  const bool numbers =
+      std::isfinite(c.matchMaxDistance) && c.matchMaxDistance > 0 && std::isfinite(c.expandFraction) &&
+      c.expandFraction >= 0 && std::isfinite(c.motionExpandFraction) && c.motionExpandFraction >= 0 &&
+      std::isfinite(c.minBoxPx) && c.minBoxPx >= 0 && std::isfinite(c.matchMaxDistanceLoose) &&
+      c.matchMaxDistanceLoose > 0 && std::isfinite(c.shrinkPerFrame) && c.shrinkPerFrame > 0 &&
+      c.shrinkPerFrame <= 1 && std::isfinite(c.maxMaskAreaRatio) && c.maxMaskAreaRatio >= 1;
+  // NaN fails both comparisons.
+  return numbers && std::all_of(c.confirmScore.begin(), c.confirmScore.end(),
+                                [](float s) { return s >= 0.0f && s <= 1.0f; });
 }
 
 }  // namespace
@@ -222,6 +226,11 @@ BoxTimeline::Size BoxTimeline::cappedArea(Size size, Size raw, double ratio) {
   return Size{raw.w + f * a, raw.h + f * b};
 }
 
+bool BoxTimeline::needsConfirmation(const Box& box) const {
+  if (box.cls < 0 || static_cast<size_t>(box.cls) >= config_.confirmScore.size()) return false;
+  return box.score < config_.confirmScore[static_cast<size_t>(box.cls)];
+}
+
 BoxTimeline::Offset BoxTimeline::heldShift(const Track& track, double since) const {
   if (!track.velocity) return {};
   const double capX = kMaxHeldShift * widthOf(track.box);
@@ -277,7 +286,9 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
     if (!frames.empty()) throw std::invalid_argument("BoxTimeline: frames before the first keyframe");
     tracks_.clear();
     for (size_t j = 0; j < next.boxes.size(); ++j) {
-      tracks_.push_back(Track{nextId_++, next.boxes[j], std::nullopt, false, next.boxes[j], 0.0, static_cast<int>(j)});
+      const Box& box = next.boxes[j];
+      tracks_.push_back(
+          Track{nextId_++, box, std::nullopt, false, box, 0.0, static_cast<int>(j), !needsConfirmation(box)});
     }
     keyTime_ = next.time;
     keyBoxes_ = next.boxes.size();
@@ -301,9 +312,13 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
 
   TimelineOutput out;
   out.masks.resize(frames.size());
+  out.confirmed.assign(keyBoxes_, false);
   const std::vector<double> t = fractions(frames, prevTime, next.time);
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Track& track = tracks_[i];
+    // A match confirms a track: two consecutive keyframes, or a ghost (always confirmed) found again.
+    const bool masked = track.confirmed || matchedTo[i].has_value();
+    if (track.keyBox >= 0) out.confirmed[static_cast<size_t>(track.keyBox)] = masked;
     if (matchedTo[i]) {
       const Box& to = next.boxes[*matchedTo[i]];
       const Point a = centerOf(track.box);
@@ -314,20 +329,19 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
             k > 0 ? MaskOrigin::Interpolated : track.ghost ? MaskOrigin::Held : MaskOrigin::Detected;
         emit(out.masks[k], track, lerp(track.box, to, t[k]), motion, origin);
       }
-    } else if (!track.ghost) {
+    } else if (!track.ghost && masked) {
       hold(out.masks, frames, prevTime, track, steps);
     }
-    // An unmatched ghost ends here: the interval after its hold is not masked.
+    // An unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
   }
-  out.confirmed.assign(keyBoxes_, true);
 
-  // The boxes of `next` in order (a matched one continues its track), then the ghosts of the real
-  // detections that were missed, at the end of their hold.
+  // The boxes of `next` in order (a matched one continues its track, confirmed), then the ghosts of the
+  // confirmed real detections that were missed, at the end of their hold.
   std::vector<Track> tracks;
   tracks.reserve(next.boxes.size() + tracks_.size());
   for (size_t j = 0; j < next.boxes.size(); ++j) {
     const Box& box = next.boxes[j];
-    Track fresh{0, box, std::nullopt, false, box, 0.0, static_cast<int>(j)};
+    Track fresh{0, box, std::nullopt, false, box, 0.0, static_cast<int>(j), true};
     if (const auto from = matchedFrom[j]) {
       const Track& old = tracks_[*from];
       const Point a = centerOf(old.anchor);
@@ -337,15 +351,16 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
       fresh.velocity = Offset{(b.x - a.x) / span, (b.y - a.y) / span};
     } else {
       fresh.id = nextId_++;
+      fresh.confirmed = !needsConfirmation(box);
     }
     tracks.push_back(fresh);
   }
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Track& track = tracks_[i];
-    if (matchedTo[i] || track.ghost) continue;
+    if (matchedTo[i] || track.ghost || !track.confirmed) continue;
     const Offset s = heldShift(track, steps);
     tracks.push_back(Track{track.id, shifted(track.box, s.x, s.y), track.velocity, true, track.anchor,
-                           track.anchorSteps + steps, -1});
+                           track.anchorSteps + steps, -1, true});
   }
   // Tracks that ended forget their masks.
   std::erase_if(shown_, [&tracks](const auto& entry) {
@@ -369,12 +384,13 @@ TimelineOutput BoxTimeline::finish(const std::vector<FrameTime>& frames) {
   requireIncreasing(frames);
   TimelineOutput out;
   out.masks.resize(frames.size());
+  out.confirmed.assign(keyBoxes_, false);
   // The motion margin of the tail: the shift one frame past its end, as for an interval's next keyframe.
   const double span = frames.empty() ? 0.0 : static_cast<double>(frames.back().index - prevTime.index + 1);
   for (const Track& track : tracks_) {
-    if (!track.ghost) hold(out.masks, frames, prevTime, track, span);
+    if (track.keyBox >= 0) out.confirmed[static_cast<size_t>(track.keyBox)] = track.confirmed;
+    if (!track.ghost && track.confirmed) hold(out.masks, frames, prevTime, track, span);
   }
-  out.confirmed.assign(keyBoxes_, true);
   keyTime_.reset();
   tracks_.clear();
   shown_.clear();

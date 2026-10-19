@@ -43,6 +43,9 @@ struct TimelineConfig {
   double matchMaxDistanceLoose = 6.0; // second pass: max |dx| and |dy| / the largest side of the two boxes
   double shrinkPerFrame = 0.02;   // per frame a mask's width and height shrink by at most this fraction, (0, 1]
   double maxMaskAreaRatio = 4.0;  // a mask covers at most this many times the area of its box, >= 1
+  // Per class index: a box scoring below its class's entry is masked only once its track is matched at
+  // two consecutive keyframes (spec 2026-10-19 §3.4); a class without an entry needs no confirmation.
+  std::vector<float> confirmScore{};
 };
 
 // What advance() and finish() return.
@@ -50,7 +53,7 @@ struct TimelineOutput {
   // The masks of each frame passed in, in the same order.
   std::vector<std::vector<MaskBox>> masks{};
   // One flag per box of the keyframe those frames start at, in Keyframe::boxes order: whether that box is
-  // masked. Empty for the first advance() call.
+  // masked (false: a low-score box seen on that keyframe only). Empty for the first advance() call.
   std::vector<bool> confirmed{};
 };
 
@@ -77,6 +80,11 @@ struct TimelineOutput {
 // below the box's (not at all while the track is held), so the mask always contains the box and follows a
 // moving target without trailing behind it. A mask larger than maxMaskAreaRatio times the box has both
 // sides pulled the same fraction of their way towards the box's until it is exactly that large.
+//
+// A box scoring below confirmScore[cls] is masked only once its track is matched at the next keyframe,
+// and then from its own keyframe on; a track that is not confirmed that way ends unmasked and leaves no
+// ghost. Higher-scoring boxes are masked at once, and a confirmed track needs no further confirmation.
+// TimelineOutput::confirmed says which boxes of the starting keyframe were masked.
 //
 // A track's velocity runs from its last real detection. Feed keyframes in order; frames are identified by
 // decode index.
@@ -113,6 +121,7 @@ class BoxTimeline {
     Box anchor{};                      // the target's last real detection (the box itself unless a ghost)
     double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 unless a ghost)
     int keyBox = -1;                   // index of `box` in the last keyframe's boxes; -1 for a ghost
+    bool confirmed = true;             // masked: a high score, or matched at two consecutive keyframes
   };
 
   struct Match {
@@ -134,6 +143,7 @@ class BoxTimeline {
   static Size cappedArea(Size size, Size raw, double ratio);
 
   std::vector<Match> match(const Keyframe& next, double steps) const;
+  bool needsConfirmation(const Box& box) const;  // scores below its class's confirmScore
   // How far a held track has moved `since` frames after its keyframe: along its velocity, at most half
   // its box's width along x and half its height along y.
   Offset heldShift(const Track& track, double since) const;

@@ -376,6 +376,25 @@ def test_temporal_accepts_masks_covering_exactly_the_frames_of_the_dense_run(tmp
     assert r.frames == 4 and (r.classes["face"].hits, r.classes["face"].total) == (1, 1)
 
 
+def test_temporal_leaves_out_dense_boxes_vc_redact_never_masked(tmp_path):
+    """A box the dense run marked "confirmed": false (a low-score box seen once) is no reference; the others are."""
+    dense = tmp_path / "dense" / "detections.jsonl"
+    dense.parent.mkdir()
+    box = Box("face", 100, 100, 140, 150, score=0.3, src="student")
+    records = [
+        {**Detection("a.mp4", 0, 0.0, box).to_record(), "confirmed": False},
+        {**Detection("a.mp4", 1, 16.7, box).to_record(), "confirmed": True},
+    ]
+    dense.write_text("".join(json.dumps(r) + "\n" for r in records))
+    _dense_stats(dense, 2)
+    sparse = _masks(tmp_path / "s.jsonl", "a.mp4", {}, [0, 1])
+    report = evaluate_temporal(dense, sparse, H)
+    assert (report.classes["face"].hits, report.classes["face"].total) == (0, 1)
+    assert [m.frame for m in report.misses] == [1]
+    assert set(detections_by_frame(dense)[1]) == {0, 1}  # without confirmed_only every box is read
+    assert set(detections_by_frame(dense, confirmed_only=True)[1]) == {1}
+
+
 def test_coverage_refuses_a_missing_processed_file(tmp_path):
     frames = _frames(tmp_path, "a", [0])
     labels = _labels(tmp_path, "a", {0: [Box("face", 100, 100, 130, 140)]})

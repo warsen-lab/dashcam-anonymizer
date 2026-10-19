@@ -12,5 +12,7 @@
   "mosaic_min_block_px": 16,
   "mosaic_blocks_per_long_side": 8,
   "face_score_threshold": 0.3,
-  "face_nms_iou": 0.3
+  "face_nms_iou": 0.3,
+  "face_confirm_score": 0.5,
+  "plate_confirm_score": 0.15
 }

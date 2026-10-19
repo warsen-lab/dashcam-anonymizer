@@ -13,12 +13,13 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 14> kKeys = {
+constexpr std::array<std::string_view, 16> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
-    "face_score_threshold", "face_nms_iou"};
+    "face_score_threshold", "face_nms_iou",       "face_confirm_score",
+    "plate_confirm_score"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -72,6 +73,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.timeline.maxMaskAreaRatio), "max_mask_area_ratio must be finite");
   require(std::isfinite(c.face.scoreThreshold), "face_score_threshold must be finite");
   require(std::isfinite(c.face.nmsIou), "face_nms_iou must be finite");
+  require(std::isfinite(c.faceConfirmScore), "face_confirm_score must be finite");
+  require(std::isfinite(c.plateConfirmScore), "plate_confirm_score must be finite");
   require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
           "detect_fps must be in [" + plainNumber(kMinDetectFps) + ", " + plainNumber(kMaxDetectFps) + "]");
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
@@ -89,6 +92,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
           "mosaic_blocks_per_long_side must be in [1, 4096]");
   require(c.face.scoreThreshold >= 0 && c.face.scoreThreshold <= 1, "face_score_threshold must be in [0, 1]");
   require(c.face.nmsIou > 0 && c.face.nmsIou <= 1, "face_nms_iou must be in (0, 1]");
+  require(c.faceConfirmScore >= 0 && c.faceConfirmScore <= 1, "face_confirm_score must be in [0, 1]");
+  require(c.plateConfirmScore >= 0 && c.plateConfirmScore <= 1, "plate_confirm_score must be in [0, 1]");
   require(c.face.topK >= 1, "the face model's top_k must be >= 1");
 }
 
@@ -124,6 +129,8 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
     c.timeline.maxMaskAreaRatio = j.value("max_mask_area_ratio", c.timeline.maxMaskAreaRatio);
     c.face.scoreThreshold = j.value("face_score_threshold", c.face.scoreThreshold);
     c.face.nmsIou = j.value("face_nms_iou", c.face.nmsIou);
+    c.faceConfirmScore = j.value("face_confirm_score", c.faceConfirmScore);
+    c.plateConfirmScore = j.value("plate_confirm_score", c.plateConfirmScore);
   } catch (const nlohmann::json::exception& e) {
     throw VcError(origin + ": " + e.what());
   }
@@ -157,7 +164,20 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["mosaic_blocks_per_long_side"] = c.mosaic.blocksPerLongSide;
   j["face_score_threshold"] = jsonFloat(c.face.scoreThreshold);
   j["face_nms_iou"] = jsonFloat(c.face.nmsIou);
+  j["face_confirm_score"] = jsonFloat(c.faceConfirmScore);
+  j["plate_confirm_score"] = jsonFloat(c.plateConfirmScore);
   return j;
+}
+
+TimelineConfig timelineFor(const RedactConfig& config, const std::vector<std::string>& classes) {
+  TimelineConfig t = config.timeline;
+  t.confirmScore.clear();
+  for (const std::string& name : classes) {
+    t.confirmScore.push_back(name == "face"    ? config.faceConfirmScore
+                             : name == "plate" ? config.plateConfirmScore
+                                               : 0.0f);
+  }
+  return t;
 }
 
 }  // namespace vc
