@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.yolo, pytest.mark.filterwarnings(*EXPORT_WARNING_IGNOR
 OFFLINE_ENV_VARS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
     "NO_PROXY", "no_proxy", "YOLO_OFFLINE", "YOLO_AUTOINSTALL", "YOLO_CONFIG_DIR", "ULTRALYTICS_API_KEY",
-    "HF_HUB_OFFLINE", "HF_HOME", "TORCH_HOME",  # also written by offline_model_env()
+    "HF_HUB_OFFLINE", "HF_HOME", "TORCH_HOME", "ORT_DISABLE_TELEMETRY",  # also written by offline_model_env()
 )
 
 
@@ -88,6 +88,7 @@ def test_offline_env_blackholes_the_network(monkeypatch):
     assert os.environ["YOLO_OFFLINE"] == "1" and os.environ["YOLO_AUTOINSTALL"] == "false"
     assert os.environ["YOLO_CONFIG_DIR"] == str(CACHE / "ultralytics-config")
     assert "ULTRALYTICS_API_KEY" not in os.environ
+    assert os.environ["ORT_DISABLE_TELEMETRY"] == "1"  # onnxruntime's own uploader ignores the proxies
 
 
 def test_load_yolo_refuses_missing_weights(tmp_path):
