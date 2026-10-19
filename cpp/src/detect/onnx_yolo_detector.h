@@ -7,20 +7,10 @@
 #include <vector>
 
 #include "detect/detector.h"
+#include "detect/execution_provider.h"
 #include "detect/yolo_decode.h"
 
 namespace vc {
-
-enum class ExecutionProvider { CoreML, Cpu };
-
-// "coreml" | "cpu"; throws std::invalid_argument.
-ExecutionProvider parseExecutionProvider(const std::string& text);
-
-// Where CoreML keeps the model it compiles from `onnx`: $VC_CACHE/coreml-cache/<sha256 of the file>,
-// VC_CACHE defaulting to ~/.cache/video-compliance (shared by all checkouts). Keyed by the content,
-// so a changed model is compiled afresh. nullopt when neither VC_CACHE nor HOME is set. Throws
-// VcError when the file cannot be read.
-std::optional<std::filesystem::path> coreMlCacheDirectory(const std::filesystem::path& onnx);
 
 // YOLOv8 student model (model.onnx + model.json from `vc_train export`) on onnxruntime.
 // backend() "CoreML" means the CoreML execution provider was registered for the session; onnxruntime
@@ -35,9 +25,9 @@ class OnnxYoloDetector : public Detector {
   // without the cache, leaving the shared directory as it is (another process may be writing it),
   // with one line on stderr; only when that fails too, or when the provider cannot be attached, does
   // the detector fall back to the CPU provider (also with a message on stderr). Throws VcError when
-  // the files are missing or invalid, when the ONNX input/output is not a float32 tensor, when
-  // model.json disagrees with the ONNX input shape or class count, or when onnxruntime fails (also
-  // on the CPU retry).
+  // the files are missing or invalid (model.json of another output_format, a YuNet face model say,
+  // included), when the ONNX input/output is not a float32 tensor, when model.json disagrees with the
+  // ONNX input shape or class count, or when onnxruntime fails (also on the CPU retry).
   OnnxYoloDetector(const std::filesystem::path& modelDir, ExecutionProvider provider,
                    const DecodeParams& params, int frameWidth, int frameHeight);
   ~OnnxYoloDetector() override;

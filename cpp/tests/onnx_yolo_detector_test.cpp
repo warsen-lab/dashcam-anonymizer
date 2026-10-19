@@ -275,6 +275,11 @@ TEST(OnnxYoloDetector, RejectsModelJsonThatDisagreesWithTheOnnx) {
       variant("const_yolo_classes", R"(["face", "plate"])", R"(["face", "plate", "car"])"), "output shape");
 }
 
+TEST(OnnxYoloDetector, RejectsAFaceModel) {
+  // The YuNet model directory belongs to --face-model, not --model.
+  expectConstructionFails(fs::path(VC_TEST_DATA_DIR) / "const_yunet", "yolov8");
+}
+
 TEST(OnnxYoloDetector, RejectsANonFloatModel) {
   // Same graph, but output0 is FLOAT16: GetTensorData<float> would read it as garbage boxes.
   expectConstructionFails(fs::path(VC_TEST_DATA_DIR) / "const_yolo_fp16", "float32");

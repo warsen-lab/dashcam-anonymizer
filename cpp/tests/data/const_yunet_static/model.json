@@ -1,0 +1,15 @@
+{
+  "name": "const-yunet",
+  "classes": [
+    "face"
+  ],
+  "input": {
+    "color": "BGR",
+    "scale": 1.0,
+    "letterbox": "top_left",
+    "pad_value": 0,
+    "pad_multiple": 32
+  },
+  "output_format": "yunet",
+  "source_sha256": ""
+}

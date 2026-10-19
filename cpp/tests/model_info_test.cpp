@@ -57,6 +57,46 @@ TEST(ModelInfo, RejectsUnsupportedValues) {
   }
 }
 
+const std::string kYuNet =
+    R"({"name":"yunet-2023mar","classes":["face"],"input":{"color":"BGR","scale":1.0,"letterbox":"top_left",)"
+    R"("pad_value":0,"pad_multiple":32},"output_format":"yunet","source_sha256":"8f23"})";
+
+TEST(ModelInfo, ParsesTheVcTrainYuNetContract) {
+  const ModelInfo m = parseModelInfo(kYuNet, "model.json");
+  EXPECT_EQ(m.name, "yunet-2023mar");
+  EXPECT_EQ(m.outputFormat, OutputFormat::YuNet);
+  EXPECT_EQ(m.classes, (std::vector<std::string>{"face"}));
+  EXPECT_EQ(m.padMultiple, 32);
+  EXPECT_EQ(m.inputWidth, 0);  // the input follows the frame
+  EXPECT_EQ(m.inputHeight, 0);
+  EXPECT_EQ(parseModelInfo(kValid, "model.json").outputFormat, OutputFormat::Yolov8);
+  EXPECT_EQ(parseModelInfo(replaced(kYuNet, R"("scale":1.0)", R"("scale":1)"), "model.json").padMultiple, 32);
+}
+
+TEST(ModelInfo, RejectsUnsupportedYuNetValues) {
+  const std::vector<std::string> bad = {
+      replaced(kYuNet, R"("BGR")", R"("RGB")"),
+      replaced(kYuNet, R"("scale":1.0)", R"("scale":0.00392156862745098)"),
+      replaced(kYuNet, R"("top_left")", R"("center")"),
+      replaced(kYuNet, R"("pad_value":0)", R"("pad_value":114)"),
+      replaced(kYuNet, R"("pad_value":0)", R"("pad_value":0.0)"),
+      replaced(kYuNet, R"("pad_multiple":32)", R"("pad_multiple":16)"),
+      replaced(kYuNet, R"("pad_multiple":32)", R"("pad_multiple":32.0)"),
+      replaced(kYuNet, R"(,"pad_multiple":32)", ""),
+      replaced(kYuNet, R"(["face"])", "[]"),
+      replaced(kYuNet, R"(["face"])", R"(["face","plate"])"),
+      replaced(kYuNet, R"("yunet")", R"("yunet2")"),
+  };
+  for (const std::string& text : bad) {
+    try {
+      parseModelInfo(text, "model.json");
+      ADD_FAILURE() << "accepted " << text;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()).rfind("model.json: ", 0), 0u) << e.what();
+    }
+  }
+}
+
 TEST(ModelInfo, ReadsAModelJsonFile) {
   const std::filesystem::path path = test::tmpDir() / "model_info_valid.json";
   std::ofstream(path) << kValid;

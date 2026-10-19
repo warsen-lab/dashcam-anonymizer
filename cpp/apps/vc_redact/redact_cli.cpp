@@ -44,6 +44,8 @@ RedactOptions parseRedactArgs(const std::vector<std::string>& args) {
       o.outRoot = value();
     } else if (arg == "--model") {
       o.modelDir = fs::path(value());
+    } else if (arg == "--face-model") {
+      o.faceModelDir = fs::path(value());
     } else if (arg == "--fake-detections") {
       o.fakeDetections = fs::path(value());
     } else if (arg == "--config") {
@@ -106,6 +108,8 @@ Masks faces and licence plates with a mosaic. Writes <dir>/<video stem>/:
 Options:
   --model <dir>             model.onnx + model.json from vc_train export
   --fake-detections <file>  replay a detections.jsonl instead of running a model
+  --face-model <dir>        also run the YuNet face model (model.onnx + model.json from vc_train yunet)
+                            on every keyframe and mask what either detector finds
   --config <json>           parameters (see configs/redact.json; built-in defaults otherwise)
   --detect-fps <n>          base keyframe detection rate, >= 5 (overrides the config; raises
                             max_detect_fps when it is lower)
