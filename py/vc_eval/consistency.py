@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import os
 import subprocess
@@ -84,6 +85,27 @@ def compare_detections(cpp: dict[int, list[Box]], py: dict[int, list[Box]]) -> C
         for box in remaining:
             confident, low = (confident + 1, low) if box.score >= CONFIDENT else (confident, low + 1)
     return ConsistencyReport(len(frames), boxes, matched, worst, confident, low, worst_all, matched_confident)
+
+
+def same_pixel_subset(refs: list[FrameRef], out_dir: Path) -> list[FrameRef]:
+    """Copies of `refs` re-encoded as 4:4:4 JPEG at quality 100, for both runtimes to read.
+
+    FFmpeg (vc_detect) and OpenCV upsample 4:2:0 chroma differently; on the source frames that alone moved boxes by more
+    than the 1 px gate. Without chroma subsampling the two decoders agree to within IDCT rounding, so the check measures
+    preprocessing and inference rather than the JPEG decoders.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    subset = []
+    for ref in refs:
+        bgr = cv2.imread(str(ref.image))
+        if bgr is None:
+            raise ValueError(f"cannot read {ref.image}")
+        image = out_dir / f"{ref.frame:06d}.jpg"
+        params = [cv2.IMWRITE_JPEG_QUALITY, 100, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+        if not cv2.imwrite(str(image), bgr, params):
+            raise ValueError(f"cannot write {image}")
+        subset.append(dataclasses.replace(ref, image=image))
+    return subset
 
 
 def run_vc_detect(

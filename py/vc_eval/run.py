@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from vc_label.contracts import LABEL_CLASSES, read_frames_csv
 from vc_label.review import ensure_outside
-from vc_eval.consistency import compare_detections, python_detections, run_vc_detect
+from vc_eval.consistency import compare_detections, python_detections, run_vc_detect, same_pixel_subset
 from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
 from vc_eval.integrity import check_integrity, probe, probe_cache
 from vc_eval.metrics import Rate
@@ -192,8 +192,9 @@ def _spread(items: list, limit: int) -> list:
 
 
 def _consistency(cfg: RunConfig, runner) -> dict:
-    refs = _spread(read_frames_csv(cfg.frames_root / cfg.stems[0]), cfg.consistency_count)
-    cpp = run_vc_detect(cfg.vc_detect, cfg.model, refs, cfg.out / "consistency", runner=runner)
+    work = cfg.out / "consistency"
+    refs = same_pixel_subset(_spread(read_frames_csv(cfg.frames_root / cfg.stems[0]), cfg.consistency_count), work / "same_pixels")
+    cpp = run_vc_detect(cfg.vc_detect, cfg.model, refs, work, runner=runner)
     report = compare_detections(cpp, python_detections(cfg.model, refs))
     return {**asdict(report), "passed": report.passed()}
 
