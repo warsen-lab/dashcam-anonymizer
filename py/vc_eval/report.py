@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vc_label.contracts import LABEL_CLASSES
 from vc_eval.metrics import CLASS_PASS, HEATMAP_MIN_TARGETS
+from vc_eval.viewing import FLICKER_FRACTION, RASTER_PX
 
 DASH = "—"
 CLS_NAME = {"face": "人脸", "plate": "车牌"}
@@ -229,6 +230,32 @@ def _integrity_lines(runs: list[dict]) -> list[str]:
     return lines + [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
 
 
+def _viewing_cells(v: dict) -> str:
+    a, fl, b = v["area"], v["flicker"], v["boxes"]
+    flicker = DASH if fl["share"] is None else f"{fl['share']:.1%}（{fl['over']}/{fl['pairs']}）"
+    multi = DASH if v["multi_box_frames"] is None else str(v["multi_box_frames"])
+    return f"{a['mean']:.2%} | {a['p95']:.2%} | {a['p99']:.2%} | {a['max']:.2%} | {flicker} | {b['median']:g} | {b['p95']:g} | {multi}"
+
+
+def _viewing_lines(summary: dict) -> list[str]:
+    runs = summary["runs"]
+    lines = [
+        "",
+        "## 观感（全部帧，只报告）",
+        "",
+        f"按 1/{RASTER_PX} 分辨率栅格逐帧计算：打码面积是这一帧所有打码框的并集占画面的比例；"
+        f"帧间跳变是相邻两帧打码区域的异或超过画面 {FLICKER_FRACTION:.0%} 的帧对占比；"
+        "同轨多框帧是同一条轨迹在同一帧有不止一个框的帧数，应为 0（没有轨迹编号的旧输出记为 —）。合计行把各段的帧放在一起算。",
+        "",
+        "| 段 | fps | 面积均值 | 面积 95 分位 | 面积 99 分位 | 面积最大 | 帧间跳变 | 每帧框数中位数 | 每帧框数 95 分位 | 同轨多框帧 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for fps in sorted({r["fps"] for r in runs}):
+        lines += [f"| {r['stem']} | {fps:g} | {_viewing_cells(r['viewing'])} |" for r in runs if r["fps"] == fps]
+        lines.append(f"| 合计 | {fps:g} | {_viewing_cells(_pooled_at(summary, fps)['viewing'])} |")
+    return lines
+
+
 def _busy(stages: dict, stage: str) -> float | None:
     """Busy seconds of a stage; stats.json without a main entry (older vc_redact) adds up the main thread's stages."""
     if stage == "main" and "main" not in stages:
@@ -312,6 +339,7 @@ def summary_md(summary: dict) -> str:
         *_detail_lines(summary),
         *_temporal_lines(runs),
         *_integrity_lines(runs),
+        *_viewing_lines(summary),
         *_speed_lines(summary),
         *_consistency_lines(summary["consistency"]),
     ]

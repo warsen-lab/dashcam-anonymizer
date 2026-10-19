@@ -73,6 +73,10 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
    ```bash
    PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source <原视频> --redacted <输出>.redacted.mp4
    ```
+4. **观感**（需要 Python 环境）：每帧打码面积、帧间跳变、每帧框数、同一轨迹在同一帧有没有多个框。
+   ```bash
+   PYTHONPATH=py .venv/bin/python -m vc_eval viewing --masks <输出>/masks.jsonl --width 1920 --height 1080
+   ```
 
 ## 3. 测 4K 时要注意
 

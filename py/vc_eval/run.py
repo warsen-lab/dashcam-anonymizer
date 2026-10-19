@@ -21,6 +21,7 @@ from vc_eval.metrics import Rate
 from vc_eval.report import summary_md
 from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
 from vc_eval.temporal import TemporalReport, evaluate_temporal
+from vc_eval.viewing import ViewingReport, evaluate_viewing, pool_viewing, viewing_json
 
 MAX_MISS_TILES = 60
 MAX_UNCERTAIN_TILES = 60
@@ -190,11 +191,12 @@ def coverage_json(c: CoverageReport) -> dict:
     return out
 
 
-def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport]:
+def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport, ViewingReport]:
     run_dir = _fps_dir(cfg, fps) / stem
     coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl")
     temporal = evaluate_temporal(cfg.redacted_root / "dense" / stem / "detections.jsonl", run_dir / "masks.jsonl", coverage.height)
     integrity = check_integrity(cfg.videos / f"{stem}.mp4", run_dir / f"{stem}.redacted.mp4")
+    viewing = evaluate_viewing(run_dir / "masks.jsonl", coverage.width, coverage.height)
     stats = json.loads((run_dir / "stats.json").read_text(encoding="utf-8"))
     entry = {
         "stem": stem,
@@ -206,6 +208,7 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
             "redacted_frames": integrity.redacted_frames,
         },
         "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
+        "viewing": viewing_json(viewing),
         "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),
@@ -214,7 +217,7 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "detector": stats.get("detector", ""),
         "encoder": stats.get("encoder", ""),
     }
-    return entry, coverage, temporal
+    return entry, coverage, temporal, viewing
 
 
 def _spread(items: list, limit: int) -> list:
@@ -232,7 +235,13 @@ def _consistency(cfg: RunConfig, runner) -> dict:
     return {**asdict(report), "passed": report.passed()}
 
 
-def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]]) -> dict:
+def _pooled_entry(
+    stems: list[str],
+    fps: float,
+    runs: list[dict],
+    reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]],
+    viewings: dict[tuple[str, float], ViewingReport],
+) -> dict:
     """P1 / P2 on the coverage of all segments together (one final recall per class); P3 must hold for every segment."""
     pooled = pool([reports[(stem, fps)][0] for stem in stems])
     coverage = coverage_json(pooled)
@@ -242,6 +251,7 @@ def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[
         "stems": list(stems),
         "coverage": coverage,
         "stray": {"max": pooled.stray_max, "mean": pooled.stray_mean, "p95": pooled.stray_p95},
+        "viewing": viewing_json(pool_viewing([viewings[(stem, fps)] for stem in stems])),
         "misses": {kind: sum(r["misses"][kind] for r in runs if r["fps"] == fps) for kind in ("confident", "uncertain", "temporal")},
         "integrity_passed": integrity_passed,
         "passed": coverage["passed"] and integrity_passed,
@@ -375,18 +385,20 @@ def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
     runs: list[dict] = []
     segments: list[dict] = []
     reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]] = {}
+    viewings: dict[tuple[str, float], ViewingReport] = {}
     for stem in cfg.stems:
         _redact(cfg, stem, cfg.redacted_root / "dense", ["--detect-every-frame"], runner)
         for fps in cfg.fps_values:
             _redact(cfg, stem, _fps_dir(cfg, fps), ["--detect-fps", f"{fps:g}"], runner)
         for fps in cfg.fps_values:
-            entry, coverage, temporal = _evaluate(cfg, stem, fps)
+            entry, coverage, temporal, viewing = _evaluate(cfg, stem, fps)
             runs.append(entry)
             reports[(stem, fps)] = (coverage, temporal)
+            viewings[(stem, fps)] = viewing
         coverage = reports[(stem, cfg.fps_values[0])][0]
         codec = probe(cfg.videos / f"{stem}.mp4").video.codec
         segments.append({"stem": stem, "width": coverage.width, "height": coverage.height, "codec": codec})
-    pooled = [_pooled_entry(cfg.stems, fps, runs, reports) for fps in sorted(cfg.fps_values)]
+    pooled = [_pooled_entry(cfg.stems, fps, runs, reports, viewings) for fps in sorted(cfg.fps_values)]
     chosen = _choose(pooled)
     spot_fps = chosen if chosen is not None else min(cfg.fps_values)
     spot_reports = {stem: reports[(stem, spot_fps)] for stem in cfg.stems}

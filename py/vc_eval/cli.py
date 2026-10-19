@@ -1,4 +1,4 @@
-"""python -m vc_eval coverage | temporal | integrity | run (proxy-validation spec §6)."""
+"""python -m vc_eval coverage | temporal | integrity | viewing | run (proxy-validation spec §6, spec 2026-10-19 §5)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,11 @@ def _parser() -> argparse.ArgumentParser:
     i.add_argument("--source", type=Path, required=True)
     i.add_argument("--redacted", type=Path, required=True)
     i.add_argument("--json", type=Path)
+    v = sub.add_parser("viewing", help="masked area, flicker and boxes per frame of a masks.jsonl (every frame)")
+    v.add_argument("--masks", type=Path, required=True)
+    v.add_argument("--width", type=int, required=True, help="frame width of the video in px")
+    v.add_argument("--height", type=int, required=True, help="frame height of the video in px")
+    v.add_argument("--json", type=Path)
     r = sub.add_parser("run", help="detection-rate sweep, summary and spot-check page")
     r.add_argument("--stems", required=True, help="comma-separated held-out stems")
     r.add_argument("--model", type=Path, required=True)
@@ -103,6 +108,15 @@ def _integrity(args) -> int:
     return 0 if r.passed else 1
 
 
+def _viewing(args) -> int:
+    from vc_eval.viewing import evaluate_viewing, summary_line, viewing_json
+
+    r = evaluate_viewing(args.masks, args.width, args.height)
+    print(summary_line(r))
+    _write_json(args.json, viewing_json(r))
+    return 0
+
+
 def _run(args) -> int:
     from vc_eval.run import RunConfig, run_all
 
@@ -125,7 +139,8 @@ def _run(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"coverage": _coverage, "temporal": _temporal, "integrity": _integrity, "run": _run}[args.command](args)
+        handlers = {"coverage": _coverage, "temporal": _temporal, "integrity": _integrity, "viewing": _viewing, "run": _run}
+        return handlers[args.command](args)
     except (ValueError, OSError, subprocess.CalledProcessError) as e:
         print(f"vc_eval: {e}", file=sys.stderr)
         return 2

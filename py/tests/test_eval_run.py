@@ -620,6 +620,26 @@ def test_summary_md_details_the_smallest_rate_when_none_passes(tmp_path, monkeyp
     assert md.split("## 细分")[1].splitlines()[0].startswith("（最小的 5 fps，没有频率通过 P1–P3")
 
 
+def test_the_viewing_metrics_of_every_run_go_into_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    viewing = summary["runs"][0]["viewing"]
+    # MASK and PLATE_MASK on every frame of the 160 x 120 picture: 99 + 144 of the 1200 raster cells
+    assert viewing["area"] == {
+        "mean": pytest.approx(0.2025), "p95": pytest.approx(0.2025), "p99": pytest.approx(0.2025), "max": pytest.approx(0.2025),
+    }
+    assert viewing["flicker"] == {"pairs": N - 1, "over": 0, "share": 0.0}
+    assert viewing["boxes"] == {"median": 2.0, "p95": 2.0}
+    assert viewing["multi_box_frames"] is None  # the fake masks carry no track ids
+    assert summary["pooled"][0]["viewing"]["frames"] == N
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    section = md.split("## 观感")[1].split("\n## ")[0]
+    assert "| seg | 5 | 20.25% | 20.25% | 20.25% | 20.25% | 0.0%（0/29） | 2 | 2 | — |" in section
+    assert "| 合计 | 10 | 20.25% |" in section
+    assert "1/4" in section and "1%" in section
+
+
 SPEED_HEADER = "| 段 | fps | 准备 | 解码 | 主线程 | 编码 | 检测（关键帧） | 补框 | 打码 | 总耗时 | 吞吐 |"
 
 
