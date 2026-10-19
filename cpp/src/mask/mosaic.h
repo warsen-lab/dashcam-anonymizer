@@ -72,9 +72,11 @@ struct MosaicRect {
 // frame's right or bottom edge cuts averages the pixels that are there. Chroma uses (b >> log2_chroma_w)
 // x (b >> log2_chroma_h) cells on the same grid (b / 2 for 4:2:0). Rects are applied largest block first
 // (equal blocks in list order), so where masks overlap the finer mosaic drawn last shows. Supports 8-bit
-// planar YUV and NV12. Throws std::invalid_argument for a block that is not an even number >= 2
-// (checked first, before any pixel is touched) and VcError for other pixel formats or when the frame's
-// buffers are shared (call av_frame_make_writable first).
+// planar YUV and NV12. Throws std::invalid_argument, before any pixel is touched, for a block that is not
+// an even number >= 2 or not a multiple of the frame's chroma subsampling factor (so a whole number of
+// chroma samples: 4 for 4:1:1 and 4:1:0, where an even block such as 2 or 6 would leave the chroma grid
+// empty or off the luma grid), and VcError for other pixel formats or when the frame's buffers are shared
+// (call av_frame_make_writable first).
 void applyMosaic(AVFrame& frame, const std::vector<MosaicRect>& rects);
 
 }  // namespace vc

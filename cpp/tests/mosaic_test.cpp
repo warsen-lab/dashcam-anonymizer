@@ -82,6 +82,21 @@ bool samePixels420(const AVFrame& a, const AVFrame& b) {
   return true;
 }
 
+// Every pixel of every plane of two planar frames of the same format and size is the same.
+bool samePlanarPixels(const AVFrame& a, const AVFrame& b) {
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(a.format));
+  for (int plane = 0; plane < 3; ++plane) {
+    const int w = plane == 0 ? a.width : (a.width + (1 << desc->log2_chroma_w) - 1) >> desc->log2_chroma_w;
+    const int h = plane == 0 ? a.height : (a.height + (1 << desc->log2_chroma_h) - 1) >> desc->log2_chroma_h;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        if (a.data[plane][y * a.linesize[plane] + x] != b.data[plane][y * b.linesize[plane] + x]) return false;
+      }
+    }
+  }
+  return true;
+}
+
 TEST(Mosaic, BlockSizeFollowsTheLongSide) {
   EXPECT_EQ(mosaicBlockSize({0, 0, 40, 30}, MosaicConfig{}), 16);
   EXPECT_EQ(mosaicBlockSize({0, 0, 200, 100}, MosaicConfig{}), 25);
@@ -235,6 +250,31 @@ TEST(Mosaic, RejectsAnInvalidBlockBeforeTouchingAnyPixel) {
         << bad;
   }
   EXPECT_TRUE(samePixels420(*frame, *before));
+}
+
+// 4:1:1 and 4:1:0 chroma is a quarter as wide as luma: a block of 2 would make a chroma cell 0 px wide (the grid
+// would never advance) and one of 6 a chroma cell of 1.5 px, off the luma grid. A block must be a multiple of 4
+// there, and the frame is untouched when it is not.
+TEST(Mosaic, RejectsABlockThatIsNotWholeChromaCellsBeforeTouchingAnyPixel) {
+  for (const AVPixelFormat format : {AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P}) {
+    auto frame = test::makeNoiseFrame(96, 64, format, 16);
+    const auto before = test::deepCopy(*frame);
+    for (const int bad : {2, 6, 18}) {
+      EXPECT_THROW(applyMosaic(*frame, {MosaicRect{{10, 10, 50, 40}, 16}, MosaicRect{{60, 10, 90, 40}, bad}}),
+                   std::invalid_argument)
+          << av_get_pix_fmt_name(format) << " block " << bad;
+    }
+    EXPECT_TRUE(samePlanarPixels(*frame, *before)) << av_get_pix_fmt_name(format);
+  }
+}
+
+// ... and a multiple of 4 works: 4:1:1 chroma cells are block/4 wide and block high, 4:1:0 block/4 by block/4.
+TEST(Mosaic, PixelatesYuv411pAndYuv410pOnTheGrid) {
+  // {10, 10, 50, 40} with 16 px blocks: luma [0, 64) x [0, 48); chroma [0, 16) x [0, 48) (4:1:1), [0, 16) x [0, 12) (4:1:0).
+  expectPlanarGridMosaic(AV_PIX_FMT_YUV411P, 96, 64, {10, 10, 50, 40}, 16, {0, 0, 64, 48}, {0, 0, 16, 48}, 4, 16, 17);
+  expectPlanarGridMosaic(AV_PIX_FMT_YUV410P, 96, 64, {10, 10, 50, 40}, 16, {0, 0, 64, 48}, {0, 0, 16, 12}, 4, 4, 18);
+  // The smallest block: 4 px, [8, 52) x [8, 40); 4:1:1 chroma cells 1 x 4 over [2, 13) x [8, 40).
+  expectPlanarGridMosaic(AV_PIX_FMT_YUV411P, 96, 64, {10, 10, 50, 40}, 4, {8, 8, 52, 40}, {2, 8, 13, 40}, 1, 4, 19);
 }
 
 TEST(Mosaic, RefusesSharedBuffersAndOtherFormats) {

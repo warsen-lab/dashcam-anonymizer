@@ -66,10 +66,23 @@ void requireValidConfig(const MosaicConfig& config) {
   }
 }
 
-// Even, so that the chroma grid of 4:2:0 and 4:2:2 (half the block) lines up with the luma grid.
+// Even and >= 2 for every format (the chroma grid of 4:2:0 and 4:2:2, half the block, lines up with the luma grid).
+// A format whose chroma is subsampled by more than 2 needs more: requireBlocksFitChroma.
 void requireValidBlock(int block) {
   if (block < 2 || block % 2 != 0) {
     throw std::invalid_argument("mosaic block sizes must be even and >= 2, got " + std::to_string(block));
+  }
+}
+
+// A block must be a whole number of chroma samples along both axes, so that the chroma grid lines up with the luma
+// grid and no chroma cell is empty: a multiple of 2 for 4:2:0, 4:2:2 and NV12, of 4 for 4:1:1 and 4:1:0.
+void requireBlocksFitChroma(const std::vector<MosaicRect>& rects, const AVPixFmtDescriptor& desc) {
+  const int multiple = 1 << std::max(desc.log2_chroma_w, desc.log2_chroma_h);
+  for (const MosaicRect& r : rects) {
+    if (r.block % multiple != 0) {
+      throw std::invalid_argument("mosaic block " + std::to_string(r.block) + " is not a multiple of " +
+                                  std::to_string(multiple) + ", the chroma subsampling of " + desc.name);
+    }
   }
 }
 
@@ -134,6 +147,7 @@ void applyMosaic(AVFrame& frame, const std::vector<MosaicRect>& rects) {
   if (!nv12 && !planar) {
     throw VcError(std::string("mosaic: unsupported pixel format ") + (desc ? desc->name : "unknown"));
   }
+  requireBlocksFitChroma(rects, *desc);  // still before any pixel is touched
   if (!av_frame_is_writable(&frame)) {
     throw VcError("mosaic: frame buffers are shared; make the frame writable first");
   }
