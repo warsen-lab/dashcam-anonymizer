@@ -40,6 +40,7 @@ from vc_eval.records import ExcludedRef, detections_by_frame, fused_file, read_e
 
 UNCERTAIN_TOL_PX = 0.05  # flags.csv and merged.jsonl both round to 0.1 px; a flagged box matches its target to within this
 EXCLUDE_IOU = 0.5  # a reference box is excluded by a row of its frame and class it overlaps this much
+EXCLUSION_TIERS = ("confident", "uncertain", "best_effort")  # the tiers a reference box can have counted in
 
 
 @dataclass(frozen=True)
@@ -51,11 +52,17 @@ class Miss:
 
 @dataclass(frozen=True)
 class Exclusion:
-    """A reference box an excluded_refs.csv row left out of the coverage."""
+    """A reference box an excluded_refs.csv row left out of the coverage.
+
+    `tier` is the tier the box would have counted in ("confident", "uncertain" or "best_effort") and `covered` whether
+    the masks covered it (as a hit would have been judged), both for auditing the exclusion.
+    """
 
     frame: int
     box: Box
     reason: str
+    tier: str
+    covered: bool
 
 
 @dataclass
@@ -95,6 +102,7 @@ class CoverageReport:
     stray_mean: float = 0.0
     stray_p95: float = 0.0
     excluded: list[Exclusion] = field(default_factory=list)  # reference boxes excluded_refs.csv left out
+    exclusion_rows: int = 0  # rows in excluded_refs.csv
     unmatched_exclusions: list[ExcludedRef] = field(default_factory=list)  # rows that matched no reference box
 
     def class_passed(self, cls: str) -> bool:
@@ -168,9 +176,38 @@ def _is_uncertain(target: Box, flagged: list[Box]) -> bool:
     )
 
 
-def _excluding_row(target: Box, rows: list[ExcludedRef]) -> ExcludedRef | None:
-    """The first row of the target's class whose box overlaps it with IoU >= EXCLUDE_IOU."""
-    return next((r for r in rows if r.box.cls == target.cls and iou(r.box, target) >= EXCLUDE_IOU), None)
+def _tier(target: Box, flagged: list[Box], frame_height: int) -> str:
+    """The tier of the reference a target counts in: too small to demand, flagged by fuse, or neither."""
+    if not must_mask(target, frame_height):
+        return "best_effort"
+    return "uncertain" if _is_uncertain(target, flagged) else "confident"
+
+
+def _drop_excluded(
+    report: CoverageReport,
+    frame: int,
+    targets: list[Box],
+    rows: list[ExcludedRef],
+    masks: list[Box],
+    flagged: list[Box],
+    matched_rows: set[int],
+) -> list[Box]:
+    """`targets` without the boxes a row excludes (same class, IoU >= EXCLUDE_IOU).
+
+    Each dropped box goes into report.excluded with the reason of its closest row; every row that overlaps it counts as
+    matched (by its line, in `matched_rows`).
+    """
+    kept = []
+    for t in targets:
+        overlaps = [(v, r) for r in rows if r.box.cls == t.cls and (v := iou(r.box, t)) >= EXCLUDE_IOU]
+        if not overlaps:
+            kept.append(t)
+            continue
+        matched_rows.update(r.line for _, r in overlaps)
+        _, closest = max(overlaps, key=lambda o: o[0])  # the first of equally close rows
+        covered = covered_fraction(t, masks) >= COVERED_FRACTION
+        report.excluded.append(Exclusion(frame, t, closest.reason, _tier(t, flagged, report.height), covered))
+    return kept
 
 
 def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
@@ -188,25 +225,22 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
     for ref in labels.used:
         if ref.frame not in masks:
             raise ValueError(f"{masks_path} has no line for frame {ref.frame}")
-        frame_targets = []
-        for t in (b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES):
-            row = _excluding_row(t, excluded_by_frame.get(ref.frame, []))
-            if row is None:
-                frame_targets.append(t)
-            else:
-                matched_rows.add(row.line)
-                report.excluded.append(Exclusion(ref.frame, t, row.reason))
         frame_masks = masks[ref.frame]
         frame_flagged = labels.uncertain.get(ref.frame, [])
+        frame_targets = _drop_excluded(
+            report, ref.frame, [b for b in targets.get(ref.frame, []) if b.cls in LABEL_CLASSES],
+            excluded_by_frame.get(ref.frame, []), frame_masks, frame_flagged, matched_rows,
+        )
         stray.append(stray_mask_fraction(frame_masks, frame_targets, width, height))  # references of both tiers
         for t in frame_targets:
             cc = report.classes[t.cls]
             covered = covered_fraction(t, frame_masks)
             hit = covered >= COVERED_FRACTION
-            if not must_mask(t, height):
+            tier = _tier(t, frame_flagged, height)
+            if tier == "best_effort":
                 cc.best_effort = cc.best_effort.add(hit)
                 continue
-            if _is_uncertain(t, frame_flagged):
+            if tier == "uncertain":
                 cc.uncertain = cc.uncertain.add(hit)
                 if not hit:
                     report.uncertain_misses.append(Miss(ref.frame, t, covered))
@@ -220,6 +254,7 @@ def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> C
                 cc.temporal_fill = cc.temporal_fill.add(hit)
             if not hit:
                 report.misses.append(Miss(ref.frame, t, covered))
+    report.exclusion_rows = len(labels.excluded)
     report.unmatched_exclusions = [row for row in labels.excluded if row.line not in matched_rows]
     report.stray_max = float(max(stray))
     report.stray_mean = float(np.mean(stray))
@@ -268,6 +303,7 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
         uncertain_misses=[m for r in reports for m in r.uncertain_misses],
         excluded=[e for r in reports for e in r.excluded],
         unmatched_exclusions=[e for r in reports for e in r.unmatched_exclusions],
+        exclusion_rows=sum(r.exclusion_rows for r in reports),
         stray_max=max(r.stray_max for r in reports),
         stray_mean=sum(r.stray_mean * r.frames for r in reports) / frames if frames else 0.0,
         stray_p95=max(r.stray_p95 for r in reports),

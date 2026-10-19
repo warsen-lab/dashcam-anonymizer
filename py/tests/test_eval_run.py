@@ -1029,6 +1029,21 @@ def test_cli_coverage_passes_with_covering_masks(tmp_path, capsys):
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "face 5/5" in out and "plate 5/5" in out and "PASS" in out
+    assert "excluded refs" not in out  # no excluded_refs.csv, nothing to say
+
+
+def test_cli_coverage_says_how_many_references_the_excluded_refs_file_left_out(tmp_path, capsys):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    _write_excluded(tmp_path, _light_rows())
+    masks = tmp_path / "masks.jsonl"
+    with masks.open("w") as f:
+        for fr in range(N):
+            f.write(json.dumps({"video": f"{STEM}.mp4", "frame": fr, "boxes": [MASK, PLATE_MASK]}) + "\n")
+    args = ["coverage", "--frames", str(tmp_path / "frames" / STEM), "--labels", str(tmp_path / "labels" / STEM), "--masks", str(masks)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "plate 5/5" in out and "excluded refs: 5 excluded (0 had been covered), 1 unmatched rows" in out
 
 
 def test_cli_coverage_reports_the_low_confidence_tier_without_judging_it(tmp_path, capsys):
@@ -1245,23 +1260,74 @@ def test_cli_run_passes_the_face_model(tmp_path, monkeypatch):
     assert seen[-1].face_model == tmp_path / "yunet"
 
 
+LIGHT_ROW = [0, "plate", 10, 90, 40, 110, "停着的公交尾灯"]  # the `light` box of the tests below, at frame 0 (a row per labelled frame: _light_rows)
+NO_EXCLUSIONS = {"confident": 0, "uncertain": 0, "best_effort": 0}
+
+
+def _write_excluded(root, rows, stem=STEM):
+    with (root / "labels" / stem / "excluded_refs.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "cls", "x1", "y1", "x2", "y2", "reason"])
+        w.writerows(rows)
+
+
+def _light_rows():
+    """A row for the teachers' light in each of the 5 labelled frames, and one for frame 3, which is not labelled."""
+    return [[fr, *LIGHT_ROW[1:]] for fr in range(0, N, 6)] + [[3, *LIGHT_ROW[1:]]]
+
+
 def test_excluded_refs_are_left_out_of_p1_and_listed_per_segment_in_the_summary(tmp_path, monkeypatch):
     light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")  # away from MASK and PLATE_MASK: never masked
     _setup(tmp_path, teachers=(*TEACHERS, light))
-    with (tmp_path / "labels" / STEM / "excluded_refs.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["frame", "cls", "x1", "y1", "x2", "y2", "reason"])
-        w.writerows([[fr, "plate", 10, 90, 40, 110, "停着的公交尾灯"] for fr in range(0, N, 6)])
-        w.writerow([3, "plate", 10, 90, 40, 110, "停着的公交尾灯"])  # frame 3 is not labelled: matches nothing
+    _write_excluded(tmp_path, _light_rows())
     _python_dets(monkeypatch)
     summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
     coverage = summary["runs"][0]["coverage"]
     assert (coverage["plate"]["hits"], coverage["plate"]["total"]) == (5, 5)  # with the light it would be 5 / 10
-    assert coverage["excluded"] == {"count": 5, "reasons": {"停着的公交尾灯": 5}, "unmatched_rows": 1}
+    assert coverage["excluded"] == {
+        "rows": 6, "count": 5, "covered": 0, "reasons": {"停着的公交尾灯": 5}, "unmatched_rows": 1,
+        "by_class": {"face": NO_EXCLUSIONS, "plate": {**NO_EXCLUSIONS, "confident": 5}},
+    }
+    assert summary["pooled"][0]["coverage"]["excluded"] == coverage["excluded"]
     assert summary["chosen_fps"] == 5
+    listed = summary["runs"][0]["excluded_list"]
+    assert len(listed) == 5 and listed[0] == {
+        "frame": 0, "cls": "plate", "x1": 10.0, "y1": 90.0, "x2": 40.0, "y2": 110.0,
+        "tier": "confident", "covered": False, "reason": "停着的公交尾灯",
+    }
     md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
     section = md.split("## 排除的参照误检")[1].split("\n## ")[0]
-    assert "- seg：排除 5 个（停着的公交尾灯 5）；另有 1 行没有配上任何参照框" in section
+    assert (
+        "- seg：文件 6 行，排除 5 个参照框，其中 0 个原本已被遮住；高置信（P1 分母少了）：人脸 0、车牌 5；低置信：人脸 0、车牌 0；"
+        "尽力：人脸 0、车牌 0；原因 停着的公交尾灯 5；另有 1 行没有配上任何参照框，请检查帧号、类别和坐标"
+    ) in section
+    assert "- 合计：文件 6 行，排除 5 个参照框，其中 0 个原本已被遮住；高置信（P1 分母少了）：人脸 0、车牌 5" in section
+
+
+def test_excluded_refs_the_masks_covered_are_counted_as_covered_in_json_and_summary(tmp_path, monkeypatch):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")
+    light_mask = {"cls": "plate", "x1": 8, "y1": 88, "x2": 42, "y2": 112, "origin": "detected"}
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    _write_excluded(tmp_path, _light_rows()[:-1])  # every row matches
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=(MASK, PLATE_MASK, light_mask)))
+    excluded = summary["runs"][0]["coverage"]["excluded"]
+    assert (excluded["rows"], excluded["count"], excluded["covered"], excluded["unmatched_rows"]) == (5, 5, 5, 0)
+    assert all(e["covered"] for e in summary["runs"][0]["excluded_list"])
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert "- seg：文件 5 行，排除 5 个参照框，其中 5 个原本已被遮住；" in section and "没有配上" not in section
+
+
+def test_a_segment_without_excluded_refs_says_so(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["runs"][0]["coverage"]["excluded"] == {
+        "rows": 0, "count": 0, "covered": 0, "reasons": {}, "unmatched_rows": 0,
+        "by_class": {"face": NO_EXCLUSIONS, "plate": NO_EXCLUSIONS},
+    }
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert "- seg：文件 0 行，排除 0 个参照框" in section and "原因 无" in section
 
 
 def test_summary_json_lists_every_confident_miss_with_its_box(tmp_path, monkeypatch):

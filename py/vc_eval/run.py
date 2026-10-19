@@ -16,7 +16,7 @@ from urllib.parse import quote
 from vc_label.contracts import LABEL_CLASSES, read_frames_csv
 from vc_label.review import ensure_outside
 from vc_eval.consistency import compare_detections, python_detections, run_vc_detect, same_pixel_subset
-from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
+from vc_eval.coverage import EXCLUSION_TIERS, CoverageReport, evaluate_coverage, load_label_inputs, pool
 from vc_eval.integrity import check_integrity, probe, probe_cache
 from vc_eval.metrics import Rate
 from vc_eval.report import summary_md
@@ -175,6 +175,10 @@ def rate_json(rate: Rate) -> dict:
     return {"hits": rate.hits, "total": rate.total, "value": None if rate.total == 0 else rate.value, "ci": [lo, hi]}
 
 
+def _box_json(box) -> dict:
+    return {"cls": box.cls, "x1": box.x1, "y1": box.y1, "x2": box.x2, "y2": box.y2}
+
+
 def coverage_json(c: CoverageReport) -> dict:
     out = {cls: rate_json(c.classes[cls].rate) for cls in LABEL_CLASSES}
     weakest = c.weakest_cell()
@@ -188,11 +192,17 @@ def coverage_json(c: CoverageReport) -> dict:
     out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
     # the whole grid (rows top to bottom, columns left to right), not just the weakest cell: the cells under 30 targets are the ones P2 skips
     out["heatmap"] = {cls: [[rate_json(rate) for rate in row] for row in c.classes[cls].heatmap] for cls in LABEL_CLASSES}
-    # reference boxes excluded_refs.csv left out (teacher false positives a person checked), and rows that matched nothing
+    # reference boxes excluded_refs.csv left out (teacher false positives a person checked): `rows` rows of the file
+    # excluded `count` boxes, `covered` of which the masks had covered; `by_class` says in which tier they would have counted
+    # (the confident ones are what P1's denominators lose), `unmatched_rows` rows overlapped no reference box
+    by_tier = Counter((e.box.cls, e.tier) for e in c.excluded)
     out["excluded"] = {
+        "rows": c.exclusion_rows,
         "count": len(c.excluded),
+        "covered": sum(e.covered for e in c.excluded),
         "reasons": dict(Counter(e.reason for e in c.excluded)),
         "unmatched_rows": len(c.unmatched_exclusions),
+        "by_class": {cls: {tier: by_tier[(cls, tier)] for tier in EXCLUSION_TIERS} for cls in LABEL_CLASSES},
     }
     out["passed"] = c.passed()
     return out
@@ -218,10 +228,11 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "viewing": viewing_json(viewing),
         "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
         # every confident miss with its reference box: what excluded_refs.csv rows are written from
-        "miss_list": [
-            {"frame": m.frame, "cls": m.box.cls, "x1": m.box.x1, "y1": m.box.y1, "x2": m.box.x2, "y2": m.box.y2,
-             "covered": round(m.covered, 3)}
-            for m in coverage.misses
+        "miss_list": [{"frame": m.frame, **_box_json(m.box), "covered": round(m.covered, 3)} for m in coverage.misses],
+        # every reference box excluded_refs.csv left out, to audit the file
+        "excluded_list": [
+            {"frame": e.frame, **_box_json(e.box), "tier": e.tier, "covered": e.covered, "reason": e.reason}
+            for e in coverage.excluded
         ],
         "stages": stats.get("stages", {}),
         "elapsed_s": stats.get("elapsed_s"),

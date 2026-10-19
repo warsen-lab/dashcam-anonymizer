@@ -72,6 +72,7 @@ def _fps_values(text: str) -> list[float]:
 def _coverage(args) -> int:
     from vc_eval.coverage import evaluate_coverage
     from vc_eval.metrics import HEATMAP_MIN_TARGETS
+    from vc_eval.records import EXCLUDED_REFS
     from vc_eval.run import coverage_json
 
     r = evaluate_coverage(args.frames, args.labels, args.masks)
@@ -85,6 +86,9 @@ def _coverage(args) -> int:
           + f"; {len(r.misses)} misses; {cell}"
           + "; low-confidence (report only): " + ", ".join(f"{c} {_rate_text(r.classes[c].uncertain)}" for c in LABEL_CLASSES)
           + f"; {'PASS' if r.passed() else 'FAIL'}")
+    if (args.labels / EXCLUDED_REFS).exists():
+        covered = sum(e.covered for e in r.excluded)
+        print(f"excluded refs: {len(r.excluded)} excluded ({covered} had been covered), {len(r.unmatched_exclusions)} unmatched rows")
     _write_json(args.json, coverage_json(r))
     return 0 if r.passed() else 1
 

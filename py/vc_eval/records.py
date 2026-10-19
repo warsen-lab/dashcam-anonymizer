@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,31 +128,41 @@ def read_uncertain(labels_dir: Path) -> dict[int, list[Box]]:
 def read_excluded(labels_dir: Path) -> list[ExcludedRef]:
     """The rows of labels_dir/excluded_refs.csv; none when there is no such file.
 
-    Raises ValueError for a header without the columns, a bad number, a class that is not a label class, an empty box
-    or an empty reason; the message names the file and the line.
+    The file is UTF-8, with or without the BOM Excel writes. Raises ValueError for text that is not UTF-8, a header
+    without the columns, a bad number, a coordinate that is not finite, a class that is not a label class, an empty box
+    or an empty reason; the message names the file and, for a row, its line.
     """
     path = labels_dir / EXCLUDED_REFS
     if not path.exists():
         return []
     rows: list[ExcludedRef] = []
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        missing = [c for c in EXCLUDED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise ValueError(f"{path} has no {', '.join(missing)} column")
-        for row in reader:
-            where = f"{path} line {reader.line_num}"
-            try:
-                frame = int(row["frame"])
-                box = Box(row["cls"], float(row["x1"]), float(row["y1"]), float(row["x2"]), float(row["y2"]))
-            except (TypeError, ValueError) as e:
-                raise ValueError(f"{where}: bad row ({e})") from None
-            if box.cls not in LABEL_CLASSES:
-                raise ValueError(f"{where}: class {box.cls!r} is not one of {', '.join(LABEL_CLASSES)}")
-            if box.area <= 0:
-                raise ValueError(f"{where}: the box is empty")
-            reason = (row["reason"] or "").strip()
-            if not reason:
-                raise ValueError(f"{where}: no reason given")
-            rows.append(ExcludedRef(frame, box, reason, reader.line_num))
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            missing = [c for c in EXCLUDED_COLUMNS if c not in (reader.fieldnames or [])]
+            if missing:
+                raise ValueError(f"{path} has no {', '.join(missing)} column")
+            for row in reader:
+                rows.append(_excluded_row(path, reader.line_num, row))
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{path} is not UTF-8 text ({e.reason} at byte {e.start})") from None
     return rows
+
+
+def _excluded_row(path: Path, line: int, row: dict) -> ExcludedRef:
+    where = f"{path} line {line}"
+    try:
+        frame = int(row["frame"])
+        box = Box(row["cls"], float(row["x1"]), float(row["y1"]), float(row["x2"]), float(row["y2"]))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{where}: bad row ({e})") from None
+    if not all(math.isfinite(v) for v in (box.x1, box.y1, box.x2, box.y2)):
+        raise ValueError(f"{where}: coordinates must be finite numbers")
+    if box.cls not in LABEL_CLASSES:
+        raise ValueError(f"{where}: class {box.cls!r} is not one of {', '.join(LABEL_CLASSES)}")
+    if box.area <= 0:
+        raise ValueError(f"{where}: the box is empty")
+    reason = (row["reason"] or "").strip()
+    if not reason:
+        raise ValueError(f"{where}: no reason given")
+    return ExcludedRef(frame, box, reason, line)

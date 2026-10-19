@@ -142,8 +142,26 @@ def _tier_lines(summary: dict) -> list[str]:
     return lines
 
 
+EXCLUSION_TIER_NAME = {"confident": "高置信（P1 分母少了）", "uncertain": "低置信", "best_effort": "尽力"}
+
+
+def _exclusion_line(label: str, e: dict) -> str:
+    tiers = "；".join(
+        f"{name}：" + "、".join(f"{CLS_NAME[cls]} {e['by_class'][cls][tier]}" for cls in LABEL_CLASSES)
+        for tier, name in EXCLUSION_TIER_NAME.items()
+    )
+    reasons = "，".join(f"{reason} {n}" for reason, n in e["reasons"].items()) or "无"
+    line = f"- {label}：文件 {e['rows']} 行，排除 {e['count']} 个参照框，其中 {e['covered']} 个原本已被遮住；{tiers}；原因 {reasons}"
+    if e["unmatched_rows"]:
+        line += f"；另有 {e['unmatched_rows']} 行没有配上任何参照框，请检查帧号、类别和坐标"
+    return line
+
+
 def _exclusion_lines(summary: dict) -> list[str]:
-    """Per segment, how many reference boxes excluded_refs.csv left out and why (the same at every rate)."""
+    """Per segment and in all: the reference boxes excluded_refs.csv left out, by tier and reason, and how many were covered.
+
+    Exclusions do not depend on the detection rate, so the first rate's runs stand for all.
+    """
     runs = summary["runs"]
     fps = runs[0]["fps"] if runs else None
     lines = [
@@ -151,16 +169,14 @@ def _exclusion_lines(summary: dict) -> list[str]:
         "## 排除的参照误检",
         "",
         "`data/labels/<段>/excluded_refs.csv` 列出人工核查过的老师误检：与其中一行同帧、同类、IoU ≥ 0.5 的参照框不计入任何覆盖率，"
-        "也不再当作参照，打在它们上面的码计入误打面积。",
+        "也不再当作参照，打在它们上面的码计入误打面积。一行可以排除不止一个参照框，同一个参照框被几行重叠时按 IoU 最大的一行记原因。",
+        "",
+        "“原本已被遮住”的是排除前已经被码盖住的参照框：它们拿掉后命中数和目标数一起少，P1 的分子和分母都变。",
         "",
     ]
-    for r in (r for r in runs if r["fps"] == fps):
-        e = r["coverage"]["excluded"]
-        reasons = "，".join(f"{reason} {n}" for reason, n in e["reasons"].items()) or "无"
-        line = f"- {r['stem']}：排除 {e['count']} 个（{reasons}）"
-        if e["unmatched_rows"]:
-            line += f"；另有 {e['unmatched_rows']} 行没有配上任何参照框，请检查帧号、类别和坐标"
-        lines.append(line)
+    lines += [_exclusion_line(r["stem"], r["coverage"]["excluded"]) for r in runs if r["fps"] == fps]
+    if runs:
+        lines.append(_exclusion_line("合计", _pooled_at(summary, fps)["coverage"]["excluded"]))
     return lines
 
 
