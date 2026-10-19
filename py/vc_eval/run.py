@@ -90,6 +90,32 @@ def _clear(directory: Path) -> None:
             shutil.rmtree(child)
 
 
+def _validate_face_model(directory: Path) -> None:
+    """A vc_train yunet directory: both files there, a model.onnx with content and a model.json that vc_redact accepts.
+
+    vc_redact checks the same things (model_info.cpp) but only when it starts, and a run that fails there has cost minutes
+    of earlier runs, and with --overwrite the previous report.
+    """
+    onnx, meta_file = directory / "model.onnx", directory / "model.json"
+    missing = [f.name for f in (onnx, meta_file) if not f.is_file()]
+    if missing:
+        raise ValueError(f"{directory} has no {' / '.join(missing)}; write the face model with python -m vc_train yunet")
+    if onnx.stat().st_size == 0:
+        raise ValueError(f"{onnx} is empty; write the face model again with python -m vc_train yunet")
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except ValueError as e:  # json.JSONDecodeError and UnicodeDecodeError
+        raise ValueError(f"{meta_file} is not valid JSON ({e}); write the face model again with python -m vc_train yunet") from e
+    if not isinstance(meta, dict):
+        raise ValueError(f"{meta_file} must hold a JSON object; write the face model with python -m vc_train yunet")
+    if meta.get("output_format") != "yunet":
+        raise ValueError(
+            f'{meta_file}: output_format must be "yunet" (a student model goes to --model); write the face model with python -m vc_train yunet'
+        )
+    if meta.get("classes") != ["face"]:
+        raise ValueError(f'{meta_file}: classes must be ["face"], got {meta.get("classes")!r}')
+
+
 def _validate(cfg: RunConfig) -> None:
     """Refuses a bad configuration before the first vc_redact run, which takes minutes."""
     if not cfg.stems:
@@ -106,9 +132,7 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
     _validate_out(cfg)
     if cfg.face_model is not None:
-        missing = [name for name in ("model.onnx", "model.json") if not (cfg.face_model / name).is_file()]
-        if missing:
-            raise ValueError(f"{cfg.face_model} has no {' / '.join(missing)}; write the face model with python -m vc_train yunet")
+        _validate_face_model(cfg.face_model)
     for stem in cfg.stems:
         for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv"):
             if not needed.is_file():
