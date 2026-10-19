@@ -11,13 +11,16 @@
 
 namespace vc {
 
-// configs/redact.json (proxy-validation spec §5.2); the defaults equal the repository file.
+// configs/redact.json (proxy-validation spec §5.2); the defaults equal the repository file. The
+// detection rate, score threshold and margin are the ones the 2026-10-18 proxy validation chose
+// (docs/reports/proxy-validation-2026-10-18.md): recall first, at about twice the stray mask area.
+// DecodeParams and TimelineConfig keep their own defaults, which vc_detect and the unit tests use.
 struct RedactConfig {
-  double detectFps = 5.0;       // base keyframe rate, >= 5
+  double detectFps = 10.0;      // base keyframe rate, >= 5
   double maxDetectFps = 15.0;   // keyframe rate while the motion score is high
   double motionThreshold = 0.05;
-  DecodeParams decode;
-  TimelineConfig timeline;
+  DecodeParams decode{.scoreThreshold = 0.05f};
+  TimelineConfig timeline{.expandFraction = 0.3};
   MosaicConfig mosaic;
 };
 

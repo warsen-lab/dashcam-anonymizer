@@ -45,6 +45,11 @@ RedactOptions baseOptions(const std::string& outName) {
   fs::remove_all(o.outRoot);
   o.fakeDetections = fakeFile(outName + ".jsonl", 60);
   o.preferHardwareEncoder = false;
+  // The pixel windows and keyframe counts in these tests were worked out for 5 fps and the
+  // lower-level margin and score defaults, not for vc_redact's validated defaults.
+  o.config.detectFps = 5.0;
+  o.config.decode = DecodeParams{};
+  o.config.timeline = TimelineConfig{};
   return o;
 }
 
