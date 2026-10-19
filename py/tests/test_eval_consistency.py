@@ -105,6 +105,8 @@ def test_run_vc_detect_builds_a_subset_frames_dir_and_reads_its_output(tmp_path)
     dets = run_vc_detect(tmp_path / "vc_detect", tmp_path / "m", refs, tmp_path / "work", runner=fake_runner)
     assert list(dets) == [5] and dets[5][0].x2 == 3
     assert calls[0][calls[0].index("--ep") + 1] == "cpu"
+    # vc_extract writes frames.csv with LF line endings and vc_detect reads it the same way
+    assert b"\r" not in (tmp_path / "work" / "frames" / "frames.csv").read_bytes()
 
 
 def test_zero_boxes_on_both_sides_is_not_a_pass():

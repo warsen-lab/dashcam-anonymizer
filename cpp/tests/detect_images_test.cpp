@@ -96,6 +96,17 @@ TEST(DetectImages, RejectsAnEmptyFramesList) {
   EXPECT_FALSE(fs::exists(fs::path(o.out).concat(".partial")));
 }
 
+// A frames.csv saved with Windows line endings (Python's csv module writes them by default) is the
+// same list of frames.
+TEST(DetectImages, AcceptsAFramesCsvWithWindowsLineEndings) {
+  const fs::path frames = framesDirWith("detect_crlf", {"000000.jpg"});
+  std::ofstream(frames / "frames.csv") << "video,frame,pts_ms,reason,motion_score\r\n"
+                                          "t.mp4,0,0.0,base,0.0\r\n";
+  DetectImagesOptions o = optionsFor(frames, "detect_crlf.jsonl");
+  EXPECT_EQ(runDetectImages(o), 1);
+  EXPECT_EQ(lines(o.out).size(), 2u);  // the constant model's face and plate
+}
+
 TEST(DetectImages, TheScoreThresholdChangesTheOutput) {
   const fs::path frames = framesDirWith("detect_score", {"000000.jpg"});
   std::ofstream(frames / "frames.csv") << "video,frame,pts_ms,reason,motion_score\n"
