@@ -48,6 +48,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 - 同名视频（不同目录下的 `A.mp4`）会写到同一个输出目录。第二个会被拒绝（退出码 3），请分开输出目录。
 - 环境变量：
   - `VC_MODEL`、`VC_FACE_MODEL`：换模型；`VC_FACE_MODEL=` 设为空表示只用学生模型；
+  - `VC_DETECT_FPS=15`：检测频率（5–60，默认用 `configs/redact.json` 的 10）；
   - `VC_SANDBOX=0`：不套沙箱。
 
 ### 输出
@@ -91,11 +92,10 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 | 键 | 默认 | 调小 / 调大的效果 |
 |---|---|---|
-| `detect_fps` | 10 | 每秒做几次检测（其余帧靠补框）。调大更稳，但更慢 |
+| `detect_fps` | 10 | 每秒检测几次，5–60。关键帧按帧序号每隔 ⌊视频帧率 / detect_fps + 0.5⌋ 帧一个；推荐档位是 5、10、15、30、60 中不超过视频帧率的（60 fps 视频 10 档 = 每 6 帧）。调大更稳，但更慢 |
 | `score_threshold` | 0.05 | 学生模型阈值。调小会多打，减少车牌漏遮 |
 | `face_score_threshold` | 0.3 | YuNet 阈值。调小会多打人脸 |
 | `expand_fraction` | 0.3 | 打码框每边外扩比例。调大可以盖住检测框偏小的情况 |
-| `max_detect_fps` / `motion_threshold` | 15 / 0.05 | 画面运动大时，自动提高检测频率 |
 
 用法：`--config my.json`。省略的键取默认值，写错的键直接报错。
 

@@ -54,6 +54,11 @@ RedactOptions baseOptions(const std::string& outName) {
   return o;
 }
 
+// 2 s, 320x240 @ 25 fps (50 frames): a frame rate the 60 fps detection rates do not divide.
+fs::path video25fps() {
+  return test::makeMedia("basic_25fps.mp4", "-f lavfi -i testsrc2=s=320x240:r=25:d=2 -c:v libx264 -pix_fmt yuv420p -g 25");
+}
+
 size_t lineCount(const fs::path& path) {
   std::ifstream in(path);
   size_t n = 0;
@@ -176,7 +181,6 @@ TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
 
   RedactOptions o = baseOptions("redact_fast_movers");
   o.input = test::checkerboardVideo();
-  o.config.maxDetectFps = o.config.detectFps;  // keyframes exactly every 200 ms, motion or not
   const fs::path fake = test::tmpDir() / "redact_fast_movers.jsonl";
   {
     std::ofstream out(fake);
@@ -232,6 +236,74 @@ TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.keyframes, 60);
   EXPECT_EQ(s.detections, 60);
+  EXPECT_EQ(s.keyframeStride, 1);
+  EXPECT_NEAR(s.detectFpsActual, 30.0, 1e-6);
+}
+
+// Keyframes come every round(video fps / detect_fps) frames by frame index: 10 on a 30 fps video is every third
+// frame, and stats.json says how often that really is (spec 2026-10-19 §2).
+TEST(RedactJob, KeyframesComeEveryStrideFramesOfTheVideoFrameRate) {
+  RedactOptions o = baseOptions("redact_stride");
+  o.config.detectFps = 10.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 20);
+  EXPECT_EQ(s.keyframeStride, 3);
+  EXPECT_NEAR(s.videoFps, 30.0, 1e-6);
+  EXPECT_NEAR(s.detectFpsActual, 10.0, 1e-6);
+  std::ifstream detections(s.outputDir / "detections.jsonl");
+  for (std::string line; std::getline(detections, line);) {
+    EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int>() % 3, 0) << line;
+  }
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("keyframe_stride").get<int>(), 3);
+  EXPECT_NEAR(stats.at("detect_fps_actual").get<double>(), 10.0, 1e-6);
+  EXPECT_NEAR(stats.at("video_fps").get<double>(), 30.0, 1e-6);
+}
+
+// The spec's example: 10 on a 25 fps video is every third frame, 8.3 detections a second.
+TEST(RedactJob, TenOnATwentyFiveFpsVideoDetectsEveryThirdFrame) {
+  RedactOptions o = baseOptions("redact_25fps");
+  o.input = video25fps();
+  o.config.detectFps = 10.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.frames, 50);
+  EXPECT_EQ(s.keyframes, 17);  // 0, 3, ..., 48
+  EXPECT_EQ(s.keyframeStride, 3);
+  EXPECT_NEAR(s.detectFpsActual, 25.0 / 3.0, 1e-6);
+  EXPECT_TRUE(redactWarnings(s).empty());
+}
+
+TEST(RedactJob, ARequestAboveTheVideoRateDetectsEveryFrameAndSaysSo) {
+  RedactOptions o = baseOptions("redact_above_rate");
+  o.input = video25fps();
+  o.config.detectFps = 30.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 50);
+  EXPECT_EQ(s.keyframeStride, 1);
+  const std::vector<std::string> warnings = redactWarnings(s);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0], "note: detect_fps 30 is above the video's 25.00 fps, so every frame is a keyframe");
+}
+
+// A frame rate above 1e6 fps in the header is a broken stream, not a video: the run is refused with a message that
+// names the file and the rate (detectSchedule's std::invalid_argument does not), before anything is created.
+TEST(RedactJob, AnImplausibleFrameRateIsRefusedNamingTheVideo) {
+  RedactOptions o = baseOptions("redact_huge_fps");
+  // 100 frames half a microsecond apart: avg_frame_rate 400000000/201, about 1.99 million fps.
+  o.input = test::makeMedia("huge_fps.mp4",
+                            "-f lavfi -i \"testsrc2=s=64x64:r=1000000:d=0.0001,setpts=PTS/2\" -fps_mode passthrough "
+                            "-c:v libx264 -pix_fmt yuv420p -video_track_timescale 4000000");
+  try {
+    runRedact(o);
+    ADD_FAILURE() << "accepted a 1.99 million fps video";
+  } catch (const VcError& e) {
+    const std::string what = e.what();
+    EXPECT_NE(what.find("huge_fps.mp4"), std::string::npos) << what;
+    EXPECT_NE(what.find("(0, 1e6]"), std::string::npos) << what;
+    EXPECT_NE(what.find("1.99005e+06"), std::string::npos) << what;
+  }
+  EXPECT_FALSE(fs::exists(o.outRoot));
 }
 
 TEST(RedactJob, FailureLeavesNoOutputFilesBehind) {
@@ -447,8 +519,8 @@ TEST(RedactJob, ReportsAndDropsNonMediaStreams) {
   EXPECT_EQ(stats.at("dropped_streams").size(), 1u);
 }
 
-// 500 frames in 0.5 s: the sampler's 200 ms interval would leave 200 frames buffered, so
-// the 120-frame limit has to force keyframes.
+// 500 frames at 1000 fps: 5 fps is a 200-frame stride, which would leave 200 frames buffered, so the
+// 120-frame limit has to force keyframes (at 120 and 320).
 TEST(RedactJob, ForcesAKeyframeWhenTheBufferGrowsTooLong) {
   RedactOptions o = baseOptions("redact_buffer");
   o.input = test::makeMedia("fast_1000fps.mp4",
@@ -465,7 +537,7 @@ TEST(RedactJob, ForcesAKeyframeWhenTheBufferGrowsTooLong) {
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.frames, 500);
   EXPECT_EQ(s.maskedFrames, 500);
-  EXPECT_GE(s.keyframes, 5);  // frames 0, 120, 200, 320, 400; the sampler alone would pick 0, 200, 400
+  EXPECT_GE(s.keyframes, 5);  // frames 0, 120, 200, 320, 400; the stride alone would pick 0, 200, 400
   EXPECT_EQ(lineCount(s.outputDir / "masks.jsonl"), 500u);
 }
 
@@ -682,12 +754,16 @@ TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
   s.track = StageStat{0.25, 600};
   s.mosaic = StageStat{0.25, 600};
   s.encode = StageStat{2.4, 600};
+  s.videoFps = 60000.0 / 1001.0;
+  s.keyframeStride = 6;
+  s.detectFpsActual = s.videoFps / 6;
   const std::string summary = redactSummary(s);
   EXPECT_NE(summary.find("setup:         0.75 s"), std::string::npos) << summary;
   EXPECT_NE(summary.find("stages (fps):  decode 1200.0, main 300.0 (detect 33.3, track 2400.0, mosaic 2400.0), "
                          "encode 250.0"),
             std::string::npos)
       << summary;
+  EXPECT_NE(summary.find("detect rate:   9.99 /s (every 6 frames of a 59.94 fps video)\n"), std::string::npos) << summary;
   EXPECT_NE(summary.find("elapsed:       3.00 s (200.0 fps)"), std::string::npos) << summary;
 }
 

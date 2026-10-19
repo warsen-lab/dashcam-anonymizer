@@ -1,7 +1,5 @@
 {
   "detect_fps": 10.0,
-  "max_detect_fps": 15.0,
-  "motion_threshold": 0.05,
   "score_threshold": 0.05,
   "nms_iou": 0.5,
   "match_max_distance": 1.0,

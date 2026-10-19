@@ -9,6 +9,7 @@
 #   VC_REDACT       vc_redact binary              (default build/cpp-release/vc_redact)
 #   VC_MODEL        student model directory       (default data/models/r3)
 #   VC_FACE_MODEL   YuNet face model directory    (default data/models/yunet; empty = student only)
+#   VC_DETECT_FPS   detections per second, 5 to 60 (default: detect_fps of configs/redact.json, 10)
 #   VC_REDACT_ARGS  extra vc_redact options, e.g. "--hwaccel videotoolbox" or "--overwrite"
 #   VC_SANDBOX      1 (default on macOS): run inside sandbox-exec with outbound network denied
 set -euo pipefail
@@ -17,6 +18,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${VC_REDACT:-$ROOT/build/cpp-release/vc_redact}"
 MODEL="${VC_MODEL:-$ROOT/data/models/r3}"
 FACE="${VC_FACE_MODEL-$ROOT/data/models/yunet}"
+DETECT_FPS="${VC_DETECT_FPS:-}"
 read -r -a EXTRA <<< "${VC_REDACT_ARGS:-}"
 SANDBOX_PROFILE='(version 1)(allow default)(deny network-outbound (remote ip "*:*"))'
 
@@ -54,6 +56,7 @@ for video in "${videos[@]}"; do
   echo "=== $(date +%T) $video"
   args=(--input "$video" --out "$out" --model "$MODEL")
   [ -n "$FACE" ] && args+=(--face-model "$FACE")
+  [ -n "$DETECT_FPS" ] && args+=(--detect-fps "$DETECT_FPS")
   if ${runner[@]+"${runner[@]}"} "$BIN" "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"}; then
     :
   else

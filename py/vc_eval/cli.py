@@ -36,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
         help="YuNet face model dir (python -m vc_train yunet) passed to every vc_redact run as --face-model",
     )
     r.add_argument("--out", type=Path, required=True)
-    r.add_argument("--fps", default="5,10,15,30", help="comma-separated detection rates")
+    r.add_argument("--fps", default="5,10,15,30", help="comma-separated detection rates, each from 5 to 60")
     r.add_argument("--vc-redact", type=Path, default=Path("build/cpp-release/vc_redact"))
     r.add_argument("--vc-detect", type=Path, default=Path("build/cpp-release/vc_detect"))
     r.add_argument("--config", type=Path, default=Path("configs/redact.json"))

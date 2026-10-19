@@ -27,6 +27,7 @@ MAX_UNCERTAIN_TILES = 60
 MAX_TEMPORAL_TILES = 30
 STDERR_TAIL_LINES = 20
 MIN_DETECT_FPS = 5.0
+MAX_DETECT_FPS = 60.0
 
 
 @dataclass
@@ -124,8 +125,8 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError("a stem is listed twice")
     if not cfg.fps_values:
         raise ValueError("no detection rates to sweep")
-    if not all(math.isfinite(fps) and fps >= MIN_DETECT_FPS for fps in cfg.fps_values):
-        raise ValueError(f"detection rates must be finite numbers of at least {MIN_DETECT_FPS:g} fps")
+    if not all(math.isfinite(fps) and MIN_DETECT_FPS <= fps <= MAX_DETECT_FPS for fps in cfg.fps_values):
+        raise ValueError(f"detection rates must be finite numbers from {MIN_DETECT_FPS:g} to {MAX_DETECT_FPS:g} fps")
     if len({float(fps) for fps in cfg.fps_values}) != len(cfg.fps_values):
         raise ValueError("a detection rate is listed twice")
     if cfg.consistency_count < 1 or cfg.spot_frames < 0:

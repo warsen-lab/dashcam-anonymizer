@@ -19,16 +19,14 @@ namespace {
 
 // The keys of configs/redact.json (and of redactConfigToJson).
 const std::set<std::string> kAllKeys = {
-    "detect_fps",         "max_detect_fps",       "motion_threshold",    "score_threshold",
-    "nms_iou",            "match_max_distance",   "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",       "mosaic_min_block_px", "mosaic_blocks_per_long_side",
-    "face_score_threshold",   "face_nms_iou"};
+    "detect_fps",          "score_threshold",        "nms_iou",
+    "match_max_distance",  "match_max_distance_loose", "expand_fraction",
+    "motion_expand_fraction", "min_box_px",          "mosaic_min_block_px",
+    "mosaic_blocks_per_long_side", "face_score_threshold", "face_nms_iou"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.detectFps, d.detectFps);
-  EXPECT_DOUBLE_EQ(c.maxDetectFps, d.maxDetectFps);
-  EXPECT_DOUBLE_EQ(c.motionThreshold, d.motionThreshold);
   EXPECT_FLOAT_EQ(c.decode.scoreThreshold, d.decode.scoreThreshold);
   EXPECT_FLOAT_EQ(c.decode.nmsIou, d.decode.nmsIou);
   EXPECT_DOUBLE_EQ(c.timeline.matchMaxDistance, d.timeline.matchMaxDistance);
@@ -50,8 +48,6 @@ void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{})
 RedactConfig nonDefaultConfig() {
   RedactConfig c;
   c.detectFps = 12.0;
-  c.maxDetectFps = 30.0;
-  c.motionThreshold = 0.125;
   c.decode.scoreThreshold = 0.25f;
   c.decode.nmsIou = 0.375f;
   c.timeline.matchMaxDistance = 1.5;
@@ -115,9 +111,8 @@ TEST(RedactConfig, RepositoryFileMatchesTheDefaults) {
 
 TEST(RedactConfig, EmptyObjectGivesDefaultsAndKeysOverride) {
   expectDefaults(parseRedactConfig("{}", "t"));
-  const RedactConfig c = parseRedactConfig(R"({"detect_fps": 10, "max_detect_fps": 30, "expand_fraction": 0.2})", "t");
-  EXPECT_DOUBLE_EQ(c.detectFps, 10);
-  EXPECT_DOUBLE_EQ(c.maxDetectFps, 30);
+  const RedactConfig c = parseRedactConfig(R"({"detect_fps": 15, "expand_fraction": 0.2})", "t");
+  EXPECT_DOUBLE_EQ(c.detectFps, 15);
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.2);
 }
 
@@ -128,7 +123,7 @@ TEST(RedactConfig, ReadsTheLooseMatchingDistance) {
 
 TEST(RedactConfig, RejectsBadInput) {
   const std::vector<std::string> bad = {
-      R"({"detect_fps": 4})",          R"({"detect_fps": 20, "max_detect_fps": 10})",
+      R"({"detect_fps": 4})",          R"({"detect_fps": 61})",          R"({"detect_fps": 4.99})",
       R"({"score_threshold": 1.5})",   R"({"nms_iou": 0})",
       R"({"match_max_distance": 0})",  R"({"expand_fraction": -0.1})",
       R"({"match_max_distance_loose": 0})", R"({"match_max_distance_loose": -1})",
@@ -160,10 +155,8 @@ TEST(RedactConfig, RejectsBadInput) {
 
 TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
   const std::vector<std::string> bad = {
-      R"({"motion_threshold": 1.5})",  R"({"motion_threshold": -0.1})",
       R"({"nms_iou": 1.5})",           R"({"min_box_px": -1})",
-      R"({"detect_fps": null})",       R"({"max_detect_fps": null})",
-      R"({"motion_threshold": null})", R"({"score_threshold": null})",
+      R"({"detect_fps": null})",       R"({"score_threshold": null})",
       R"({"nms_iou": null})",          R"({"match_max_distance": null})",
       R"({"match_max_distance_loose": null})",
       R"({"expand_fraction": null})",  R"({"motion_expand_fraction": null})",
@@ -202,8 +195,6 @@ struct NumericField {
 TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
   const std::vector<NumericField> fields = {
       {"detect_fps", [](RedactConfig& c, double v) { c.detectFps = v; }},
-      {"max_detect_fps", [](RedactConfig& c, double v) { c.maxDetectFps = v; }},
-      {"motion_threshold", [](RedactConfig& c, double v) { c.motionThreshold = v; }},
       {"score_threshold", [](RedactConfig& c, double v) { c.decode.scoreThreshold = static_cast<float>(v); }},
       {"nms_iou", [](RedactConfig& c, double v) { c.decode.nmsIou = static_cast<float>(v); }},
       {"match_max_distance", [](RedactConfig& c, double v) { c.timeline.matchMaxDistance = v; }},
@@ -232,18 +223,38 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
   }
 }
 
-TEST(RedactConfig, DetectFpsMessageFormatsTheMinimum) {
-  try {
-    parseRedactConfig(R"({"detect_fps": 4})", "cfg");
-    ADD_FAILURE() << "accepted detect_fps 4";
-  } catch (const VcError& e) {
-    EXPECT_EQ(std::string(e.what()), "cfg: detect_fps must be >= 5");
+TEST(RedactConfig, DetectFpsMessageGivesTheRange) {
+  for (const char* text : {R"({"detect_fps": 4})", R"({"detect_fps": 61})"}) {
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted " << text;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()), "cfg: detect_fps must be in [5, 60]");
+    }
+  }
+}
+
+TEST(RedactConfig, AcceptsTheDetectFpsBounds) {
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"detect_fps": 5})", "t").detectFps, 5);
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"detect_fps": 60})", "t").detectFps, 60);
+}
+
+// The motion-triggered rate is gone (spec 2026-10-19 §2): an old config that still sets it is refused with a message
+// that says the key was removed, not that it is an unknown typo.
+TEST(RedactConfig, RejectsTheRemovedKeysByName) {
+  for (const std::string key : {"max_detect_fps", "motion_threshold"}) {
+    try {
+      parseRedactConfig("{\"" + key + "\": 15}", "cfg");
+      ADD_FAILURE() << "accepted " << key;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()).rfind("cfg: " + key + " was removed", 0), 0u) << e.what();
+    }
   }
 }
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 14u);
+  EXPECT_EQ(j.size(), 12u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);

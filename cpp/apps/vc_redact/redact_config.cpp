@@ -8,16 +8,19 @@
 #include <string_view>
 
 #include "common/vc_error.h"
-#include "sampler/frame_sampler.h"
+#include "vc_redact/detect_rate.h"
 
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 14> kKeys = {
-    "detect_fps",         "max_detect_fps",  "motion_threshold",       "score_threshold",
-    "nms_iou",            "match_max_distance", "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",   "mosaic_min_block_px", "mosaic_blocks_per_long_side",
-    "face_score_threshold",   "face_nms_iou"};
+constexpr std::array<std::string_view, 12> kKeys = {
+    "detect_fps",          "score_threshold",        "nms_iou",
+    "match_max_distance",  "match_max_distance_loose", "expand_fraction",
+    "motion_expand_fraction", "min_box_px",          "mosaic_min_block_px",
+    "mosaic_blocks_per_long_side", "face_score_threshold", "face_nms_iou"};
+
+// Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
+constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
 
 // Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
 constexpr double kMaxMosaicSetting = 4096;
@@ -57,8 +60,6 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   };
   // NaN fails the range tests below, but +inf passes some of them: every double is checked here.
   require(std::isfinite(c.detectFps), "detect_fps must be finite");
-  require(std::isfinite(c.maxDetectFps), "max_detect_fps must be finite");
-  require(std::isfinite(c.motionThreshold), "motion_threshold must be finite");
   require(std::isfinite(c.decode.scoreThreshold), "score_threshold must be finite");
   require(std::isfinite(c.decode.nmsIou), "nms_iou must be finite");
   require(std::isfinite(c.timeline.matchMaxDistance), "match_max_distance must be finite");
@@ -68,9 +69,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.timeline.minBoxPx), "min_box_px must be finite");
   require(std::isfinite(c.face.scoreThreshold), "face_score_threshold must be finite");
   require(std::isfinite(c.face.nmsIou), "face_nms_iou must be finite");
-  require(c.detectFps >= kMinBaseFps, "detect_fps must be >= " + plainNumber(kMinBaseFps));
-  require(c.maxDetectFps >= c.detectFps, "max_detect_fps must be >= detect_fps");
-  require(c.motionThreshold >= 0 && c.motionThreshold <= 1, "motion_threshold must be in [0, 1]");
+  require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
+          "detect_fps must be in [" + plainNumber(kMinDetectFps) + ", " + plainNumber(kMaxDetectFps) + "]");
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
   require(c.decode.nmsIou > 0 && c.decode.nmsIou <= 1, "nms_iou must be in (0, 1]");
   require(c.timeline.matchMaxDistance > 0, "match_max_distance must be > 0");
@@ -96,6 +96,11 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   }
   if (!j.is_object()) throw VcError(origin + ": the root must be a JSON object");
   for (const auto& item : j.items()) {
+    if (std::find(kRemovedKeys.begin(), kRemovedKeys.end(), item.key()) != kRemovedKeys.end()) {
+      throw VcError(origin + ": " + item.key() +
+                    " was removed: keyframes now come every round(video fps / detect_fps) frames, whatever the motion "
+                    "(delete the key)");
+    }
     if (std::find(kKeys.begin(), kKeys.end(), item.key()) == kKeys.end()) {
       throw VcError(origin + ": unknown key '" + item.key() + "'");
     }
@@ -103,8 +108,6 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   RedactConfig c;
   try {
     c.detectFps = j.value("detect_fps", c.detectFps);
-    c.maxDetectFps = j.value("max_detect_fps", c.maxDetectFps);
-    c.motionThreshold = j.value("motion_threshold", c.motionThreshold);
     c.decode.scoreThreshold = j.value("score_threshold", c.decode.scoreThreshold);
     c.decode.nmsIou = j.value("nms_iou", c.decode.nmsIou);
     c.timeline.matchMaxDistance = j.value("match_max_distance", c.timeline.matchMaxDistance);
@@ -134,8 +137,6 @@ RedactConfig readRedactConfig(const std::filesystem::path& path) {
 nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   nlohmann::ordered_json j;
   j["detect_fps"] = c.detectFps;
-  j["max_detect_fps"] = c.maxDetectFps;
-  j["motion_threshold"] = c.motionThreshold;
   j["score_threshold"] = jsonFloat(c.decode.scoreThreshold);
   j["nms_iou"] = jsonFloat(c.decode.nmsIou);
   j["match_max_distance"] = c.timeline.matchMaxDistance;

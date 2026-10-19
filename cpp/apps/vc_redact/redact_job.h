@@ -47,6 +47,14 @@ struct RedactStats {
   int64_t maskBoxes = 0;
   int64_t decodeErrors = 0;
   int64_t audioPackets = 0;
+  // Keyframe spacing (spec 2026-10-19 §2): a keyframe every keyframeStride frames of a videoFps video, i.e.
+  // detectFpsActual detections per second of video. detectFpsRequested is the configured detect_fps (0 with
+  // --detect-every-frame); detectFpsAboveVideoRate when it exceeded the video frame rate.
+  double videoFps = 0;
+  int64_t keyframeStride = 0;
+  double detectFpsActual = 0;
+  double detectFpsRequested = 0;
+  bool detectFpsAboveVideoRate = false;
   std::string encoder;   // e.g. "h264_videotoolbox", "libx264"
   // "student/CoreML", "student/CPU" or "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
   std::string detector;
@@ -57,7 +65,7 @@ struct RedactStats {
   StageStat decode;
   StageStat main;    // items = frames
   StageStat detect;  // items = keyframes; with a face model both detectors and the merge
-  StageStat track;   // keyframe selection + BoxTimeline; items = frames
+  StageStat track;   // keyframe choice + BoxTimeline; items = frames
   StageStat mosaic;
   StageStat encode;
   // From the start of runRedact until the first frame reaches the processing thread: opening the
@@ -72,12 +80,14 @@ struct RedactStats {
 // queue never holds much more than 256 MiB of frames.
 size_t pipelineQueueCapacity(int width, int height);
 
-// Lines for stderr after a successful run (empty when there is nothing to warn about): currently
-// decoder errors, i.e. corrupt packets that were skipped.
+// Lines for stderr after a successful run (empty when there is nothing to warn about): a note when detect_fps
+// is above the video's frame rate (so every frame is a keyframe), and a warning for decoder errors, i.e.
+// corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
 
 // The summary printed after a successful run: one "name: value" line each for the output, the frame
-// and mask counts, detector, encoder, audio, setup time, stage rates, decode errors and elapsed time.
+// and mask counts, the detect rate (every how many frames of what frame rate), detector, encoder, audio,
+// setup time, stage rates, decode errors and elapsed time.
 std::string redactSummary(const RedactStats& stats);
 
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
@@ -92,8 +102,8 @@ std::string redactSummary(const RedactStats& stats);
 // OutputExistsError when the output directory exists without overwrite, or with overwrite is
 // neither empty nor holds masks.jsonl; VcError for an invalid config, media, detector and I/O
 // failures (a frame without a timestamp, an encoder that cannot be opened, fewer frames encoded
-// than decoded, ...). Errors from the sampler and BoxTimeline (std::invalid_argument) propagate as
-// they are.
+// than decoded, a video stream without a usable frame rate, ...). Errors from BoxTimeline
+// (std::invalid_argument) propagate as they are.
 RedactStats runRedact(const RedactOptions& options);
 
 }  // namespace vc

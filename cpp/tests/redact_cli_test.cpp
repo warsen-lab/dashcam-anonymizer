@@ -36,7 +36,6 @@ TEST(RedactCli, AppliesDefaults) {
   EXPECT_EQ(o.hwAccel, HwAccel::None);
   EXPECT_TRUE(o.preferHardwareEncoder);
   EXPECT_DOUBLE_EQ(o.config.detectFps, RedactConfig{}.detectFps);
-  EXPECT_DOUBLE_EQ(o.config.maxDetectFps, RedactConfig{}.maxDetectFps);
   EXPECT_FALSE(o.faceModelDir.has_value());  // without --face-model only the student detects
 }
 
@@ -62,18 +61,10 @@ TEST(RedactCli, ParsesHardwareAndFakeDetectionOptions) {
   EXPECT_EQ(o.provider, ExecutionProvider::CoreML);
 }
 
-TEST(RedactCli, DetectFpsOverridesAndRaisesTheMaximum) {
+TEST(RedactCli, DetectFpsOverridesTheDefault) {
   const RedactOptions o =
       parseRedactArgs({"--detect-fps", "30", "--input", "a.mp4", "--out", "o", "--fake-detections", "f.jsonl"});
   EXPECT_DOUBLE_EQ(o.config.detectFps, 30);
-  EXPECT_DOUBLE_EQ(o.config.maxDetectFps, 30);
-}
-
-TEST(RedactCli, DetectFpsKeepsAHigherMaximum) {
-  const RedactOptions o =
-      parseRedactArgs({"--detect-fps", "6", "--input", "a.mp4", "--out", "o", "--fake-detections", "f.jsonl"});
-  EXPECT_DOUBLE_EQ(o.config.detectFps, 6);
-  EXPECT_DOUBLE_EQ(o.config.maxDetectFps, RedactConfig{}.maxDetectFps);
 }
 
 TEST(RedactCli, ReadsTheConfigFile) {
@@ -90,16 +81,17 @@ TEST(RedactCli, ReadsTheConfigFile) {
 
 TEST(RedactCli, DetectFpsOverridesTheConfigFile) {
   const std::filesystem::path cfg = test::tmpDir() / "redact_cli_fps.json";
-  std::ofstream(cfg) << R"({"detect_fps": 10, "max_detect_fps": 12})";
+  std::ofstream(cfg) << R"({"detect_fps": 10})";
   const RedactOptions o = parseRedactArgs(
       {"--input", "a.mp4", "--out", "o", "--fake-detections", "f.jsonl", "--config", cfg.string(), "--detect-fps", "20"});
   EXPECT_DOUBLE_EQ(o.config.detectFps, 20);
-  EXPECT_DOUBLE_EQ(o.config.maxDetectFps, 20);
 }
 
 TEST(RedactCli, RejectsBadCommandLines) {
   const std::filesystem::path bad = test::tmpDir() / "redact_cli_bad.json";
   std::ofstream(bad) << R"({"detect_fps": 1})";
+  const std::filesystem::path removed = test::tmpDir() / "redact_cli_removed.json";
+  std::ofstream(removed) << R"({"detect_fps": 10, "max_detect_fps": 15})";
   const std::vector<Args> cases = {
       {"--out", "o", "--model", "m"},
       {"--input", "a.mp4", "--model", "m"},
@@ -110,6 +102,9 @@ TEST(RedactCli, RejectsBadCommandLines) {
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--hwaccel", "cuda"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "fast"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "2"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "4.9"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "61"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--config", removed.string()},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "10x"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--config", bad.string()},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--config", "missing.json"},
