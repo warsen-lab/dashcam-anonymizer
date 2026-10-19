@@ -13,10 +13,11 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 12> kKeys = {
+constexpr std::array<std::string_view, 14> kKeys = {
     "detect_fps",         "max_detect_fps",  "motion_threshold",       "score_threshold",
     "nms_iou",            "match_max_distance", "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",   "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
+    "motion_expand_fraction", "min_box_px",   "mosaic_min_block_px", "mosaic_blocks_per_long_side",
+    "face_score_threshold",   "face_nms_iou"};
 
 // Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
 constexpr double kMaxMosaicSetting = 4096;
@@ -65,6 +66,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.timeline.expandFraction), "expand_fraction must be finite");
   require(std::isfinite(c.timeline.motionExpandFraction), "motion_expand_fraction must be finite");
   require(std::isfinite(c.timeline.minBoxPx), "min_box_px must be finite");
+  require(std::isfinite(c.face.scoreThreshold), "face_score_threshold must be finite");
+  require(std::isfinite(c.face.nmsIou), "face_nms_iou must be finite");
   require(c.detectFps >= kMinBaseFps, "detect_fps must be >= " + plainNumber(kMinBaseFps));
   require(c.maxDetectFps >= c.detectFps, "max_detect_fps must be >= detect_fps");
   require(c.motionThreshold >= 0 && c.motionThreshold <= 1, "motion_threshold must be in [0, 1]");
@@ -79,6 +82,9 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
           "mosaic_min_block_px must be in [1, 4096]");
   require(c.mosaic.blocksPerLongSide >= 1 && c.mosaic.blocksPerLongSide <= kMaxMosaicSetting,
           "mosaic_blocks_per_long_side must be in [1, 4096]");
+  require(c.face.scoreThreshold >= 0 && c.face.scoreThreshold <= 1, "face_score_threshold must be in [0, 1]");
+  require(c.face.nmsIou > 0 && c.face.nmsIou <= 1, "face_nms_iou must be in (0, 1]");
+  require(c.face.topK >= 1, "the face model's top_k must be >= 1");
 }
 
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin) {
@@ -106,6 +112,8 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
     c.timeline.expandFraction = j.value("expand_fraction", c.timeline.expandFraction);
     c.timeline.motionExpandFraction = j.value("motion_expand_fraction", c.timeline.motionExpandFraction);
     c.timeline.minBoxPx = j.value("min_box_px", c.timeline.minBoxPx);
+    c.face.scoreThreshold = j.value("face_score_threshold", c.face.scoreThreshold);
+    c.face.nmsIou = j.value("face_nms_iou", c.face.nmsIou);
   } catch (const nlohmann::json::exception& e) {
     throw VcError(origin + ": " + e.what());
   }
@@ -137,6 +145,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["min_box_px"] = c.timeline.minBoxPx;
   j["mosaic_min_block_px"] = c.mosaic.minBlockPx;
   j["mosaic_blocks_per_long_side"] = c.mosaic.blocksPerLongSide;
+  j["face_score_threshold"] = jsonFloat(c.face.scoreThreshold);
+  j["face_nms_iou"] = jsonFloat(c.face.nmsIou);
   return j;
 }
 

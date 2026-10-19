@@ -19,6 +19,9 @@ struct RedactOptions {
   std::filesystem::path outRoot;  // outputs go to outRoot / <input stem>
   std::optional<std::filesystem::path> modelDir;        // model.onnx + model.json
   std::optional<std::filesystem::path> fakeDetections;  // detections.jsonl replayed instead
+  // The YuNet face model (`vc_train yunet`), run on every keyframe next to the detector above; its
+  // boxes are merged with the detector's (MergedDetector). Without it only that detector runs.
+  std::optional<std::filesystem::path> faceModelDir;
   RedactConfig config;
   bool detectEveryFrame = false;
   ExecutionProvider provider = ExecutionProvider::CoreML;
@@ -45,14 +48,15 @@ struct RedactStats {
   int64_t decodeErrors = 0;
   int64_t audioPackets = 0;
   std::string encoder;   // e.g. "h264_videotoolbox", "libx264"
-  std::string detector;  // "student/CoreML", "student/CPU" or "fake"
+  // "student/CoreML", "student/CPU" or "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
+  std::string detector;
   std::vector<std::string> droppedStreams;
   size_t audioStreams = 0;
   // decode, main and encode run in parallel on three threads; main is the processing thread, which
   // runs detect, track and mosaic one after another (its busy time is their sum).
   StageStat decode;
   StageStat main;    // items = frames
-  StageStat detect;  // items = keyframes
+  StageStat detect;  // items = keyframes; with a face model both detectors and the merge
   StageStat track;   // keyframe selection + BoxTimeline; items = frames
   StageStat mosaic;
   StageStat encode;
@@ -79,7 +83,7 @@ std::string redactSummary(const RedactStats& stats);
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
 // renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json.
 // The options, the output directory, the input (including whether MP4 can store its audio) and the
-// detector are checked, in that order, before anything is created or removed (with overwrite, the
+// detector (with the face model, if any) are checked, in that order, before anything is created or removed (with overwrite, the
 // previous output is removed once they pass); any later failure removes this run's files (and the output root and its new parent
 // directories when this run created them and they are empty) and rethrows. Decoding, detection plus
 // masking, and encoding run on three threads; the first error stops all of them.

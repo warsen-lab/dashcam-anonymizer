@@ -85,7 +85,8 @@ def _head_lines(summary: dict) -> list[str]:
     return [
         "# 代理验证结果",
         "",
-        f"- 模型：{summary['model']}；检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
+        f"- 模型：{summary['model']}；人脸模型：{summary.get('face_model') or '无'}；"
+        f"检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
         _candidate_line(summary),
         "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
         "- 覆盖率读的是 `masks.jsonl`（`vc_redact` 声明要打码的框），不是打码后视频的像素：马赛克有没有真的打在画面上，"

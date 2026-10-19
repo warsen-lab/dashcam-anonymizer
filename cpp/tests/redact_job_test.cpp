@@ -11,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -325,6 +326,54 @@ TEST(RedactJob, KeepsThePresentationOfTheInput) {
     EXPECT_EQ(out.colorPrimaries, in.colorPrimaries) << c.name;
     EXPECT_EQ(out.colorTrc, in.colorTrc) << c.name;
   }
+}
+
+// With a face model, every keyframe runs both detectors. On a cyan picture the constant YuNet model
+// (cpp/tests/data/const_yunet) finds every full 32x32 cell (640x360 pads to 640x384: 20 x 11 cells
+// lie fully inside); the fake face is exactly one of them, so that one is a single box found by both.
+TEST(RedactJob, AFaceModelAddsItsBoxesAndMergesTheOnesBothDetectorsFind) {
+  RedactOptions o = baseOptions("redact_face_model");
+  o.input = test::makeMedia("cyan.mp4", "-f lavfi -i color=c=cyan:s=640x360:r=30:d=2 -c:v libx264 -pix_fmt yuv420p");
+  {
+    std::ofstream fake(*o.fakeDetections);
+    for (int i = 0; i < 60; ++i) {
+      fake << R"({"video":"cyan.mp4","frame":)" << i
+           << R"(,"pts_ms":0,"cls":"face","x1":96,"y1":96,"x2":128,"y2":128,"score":0.5,"src":"fake"})" << '\n';
+    }
+  }
+  o.faceModelDir = fs::path(VC_TEST_DATA_DIR) / "const_yunet";
+  o.provider = ExecutionProvider::Cpu;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.detector, "fake + yunet/CPU");
+  EXPECT_EQ(s.detections, s.keyframes * 220);
+
+  std::ifstream in(s.outputDir / "detections.jsonl");
+  std::map<int64_t, std::map<std::string, int>> sources;  // frame -> src -> boxes
+  for (std::string line; std::getline(in, line);) {
+    const nlohmann::json d = nlohmann::json::parse(line);
+    const std::string src = d.at("src").get<std::string>();
+    ++sources[d.at("frame").get<int64_t>()][src];
+    EXPECT_EQ(d.at("cls").get<std::string>(), "face");
+    if (src == "fake+yunet") {
+      EXPECT_DOUBLE_EQ(d.at("x1").get<double>(), 96);
+      EXPECT_DOUBLE_EQ(d.at("y2").get<double>(), 128);
+      EXPECT_GT(d.at("score").get<double>(), 0.9);  // the higher of the two scores
+    }
+  }
+  EXPECT_EQ(static_cast<int64_t>(sources.size()), s.keyframes);
+  for (const auto& [frame, counts] : sources) {
+    EXPECT_EQ(counts, (std::map<std::string, int>{{"fake+yunet", 1}, {"yunet", 219}})) << "frame " << frame;
+  }
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  EXPECT_EQ(nlohmann::json::parse(statsFile).at("detector").get<std::string>(), "fake + yunet/CPU");
+}
+
+TEST(RedactJob, ChecksTheFaceModelBeforeCreatingAnything) {
+  RedactOptions o = baseOptions("redact_bad_face_model");
+  o.faceModelDir = fs::path(VC_TEST_DATA_DIR) / "const_yolo";  // a student model, not YuNet
+  o.provider = ExecutionProvider::Cpu;
+  EXPECT_THROW(runRedact(o), VcError);
+  EXPECT_FALSE(fs::exists(o.outRoot));
 }
 
 TEST(RedactJob, RejectsAnInvalidConfigBeforeCreatingAnything) {

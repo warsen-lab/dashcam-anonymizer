@@ -38,9 +38,13 @@ target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)
 
 add_library(vc_detect_lib STATIC
   src/detect/fake_detector.cpp
+  src/detect/merged_detector.cpp
   src/detect/model_info.cpp
   src/detect/onnx_yolo_detector.cpp
+  src/detect/ort_session.cpp
   src/detect/yolo_decode.cpp
+  src/detect/yunet_decode.cpp
+  src/detect/yunet_detector.cpp
 )
 # Only the .cpp files of this library include nlohmann/json; its headers do not.
 target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime PRIVATE vc_nlohmann_json)

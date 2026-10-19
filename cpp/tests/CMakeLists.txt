@@ -16,6 +16,7 @@ add_executable(vc_tests
   jpeg_writer_test.cpp
   letterbox_test.cpp
   luma_thumb_test.cpp
+  merged_detector_test.cpp
   model_info_test.cpp
   mosaic_test.cpp
   onnx_yolo_detector_test.cpp
@@ -26,6 +27,8 @@ add_executable(vc_tests
   video_reader_test.cpp
   video_writer_test.cpp
   yolo_decode_test.cpp
+  yunet_decode_test.cpp
+  yunet_detector_test.cpp
 )
 target_link_libraries(vc_tests PRIVATE vc_extract_lib vc_redact_lib vc_detect_lib vc_core GTest::gtest_main)
 target_compile_definitions(vc_tests PRIVATE

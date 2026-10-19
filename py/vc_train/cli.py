@@ -1,4 +1,4 @@
-"""python -m vc_train dataset | train | export (proxy-validation spec §4)."""
+"""python -m vc_train dataset | train | export (proxy-validation spec §4) | yunet (the face model for vc_redact)."""
 
 from __future__ import annotations
 
@@ -45,6 +45,11 @@ def _parser() -> argparse.ArgumentParser:
     e.add_argument("--height", type=int, default=1088)
     e.add_argument("--check-frames", type=Path, default=None, help="frames dir (frames.csv) for the consistency check")
     e.add_argument("--check-count", type=int, default=20, help="check frames, spread evenly over frames.csv (>= 1)")
+
+    y = sub.add_parser("yunet", help="YuNet face model with a free input size for vc_redact --face-model")
+    y.add_argument("--out", type=Path, required=True, help="new or empty directory for model.onnx + model.json")
+    y.add_argument("--source", type=Path, default=None, help="OpenCV Zoo ONNX (default: the cached face_detection_yunet_2023mar.onnx)")
+    y.add_argument("--frames-root", type=Path, default=Path("data/frames"), help="the out dir must not be under it")
     return p
 
 
@@ -135,13 +140,24 @@ def _export(args) -> int:
     return 0 if report.passed() else 1
 
 
+def _yunet(args) -> int:
+    # vc_extract --overwrite deletes a whole frames dir, model dir included
+    ensure_outside(args.frames_root, args.out)
+    from vc_label.paths import YUNET_MODEL
+    from vc_train.yunet import write_yunet_model
+
+    onnx_path = write_yunet_model(args.source or YUNET_MODEL, args.out)
+    print(f"yunet: {onnx_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # before any command can reach ultralytics, directly or by unpickling a checkpoint (defence in depth: train and
     # export call it again where they load a model)
     ultralytics_offline_env()
     args = _parser().parse_args(argv)
     try:
-        return {"dataset": _dataset, "train": _train, "export": _export}[args.command](args)
+        return {"dataset": _dataset, "train": _train, "export": _export, "yunet": _yunet}[args.command](args)
     except (ValueError, OSError) as e:  # FileNotFoundError is an OSError
         print(f"vc_train: {e}", file=sys.stderr)
         return 2

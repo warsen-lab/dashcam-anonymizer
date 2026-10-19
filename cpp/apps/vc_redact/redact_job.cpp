@@ -19,6 +19,8 @@
 
 #include "common/bounded_queue.h"
 #include "detect/fake_detector.h"
+#include "detect/merged_detector.h"
+#include "detect/yunet_detector.h"
 #include "io/av_ptr.h"
 #include "io/video_writer.h"
 #include "mask/mosaic.h"
@@ -155,8 +157,15 @@ void checkOptions(const RedactOptions& o) {
 }
 
 std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int height) {
-  if (o.fakeDetections) return std::make_unique<FakeDetector>(*o.fakeDetections);
-  return std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height);
+  std::unique_ptr<Detector> detector;
+  if (o.fakeDetections) {
+    detector = std::make_unique<FakeDetector>(*o.fakeDetections);
+  } else {
+    detector = std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height);
+  }
+  if (!o.faceModelDir) return detector;
+  auto face = std::make_unique<YuNetDetector>(*o.faceModelDir, o.provider, o.config.face, width, height);
+  return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 
 // Keyframe selection, detection, BoxTimeline and mosaic: everything between decode and encode.
@@ -195,13 +204,16 @@ class Processor {
     }
 
     const Clock::time_point detectStarted = Clock::now();
-    const std::vector<Box> boxes = detector_.detect(view);
+    const std::vector<SourcedBox> found = detector_.detectSourced(view);
     stats_.detect.busySec += secondsSince(detectStarted);
     ++stats_.detect.items;
     ++stats_.keyframes;
-    stats_.detections += static_cast<int64_t>(boxes.size());
-    for (const Box& b : boxes) {
-      detections_ << detectionRecord(video_, item.index, item.ptsMs, b, detector_.classes(), detector_.source());
+    stats_.detections += static_cast<int64_t>(found.size());
+    std::vector<Box> boxes;
+    boxes.reserve(found.size());
+    for (const SourcedBox& b : found) {
+      detections_ << detectionRecord(video_, item.index, item.ptsMs, b.box, detector_.classes(), b.src);
+      boxes.push_back(b.box);
     }
 
     const Clock::time_point trackStarted = Clock::now();
@@ -578,7 +590,7 @@ RedactStats runRedact(const RedactOptions& options) {
     stats.decodeErrors = reader.decodeErrors();
     stats.droppedStreams = reader.droppedStreams();
     stats.audioStreams = reader.audioStreams().size();
-    stats.detector = detector->backend().empty() ? detector->source() : detector->source() + "/" + detector->backend();
+    stats.detector = detector->description();
     stats.elapsedSec = secondsSince(started);
     writeStats(stats.outputDir / kStatsFile, stats, options);
     return stats;

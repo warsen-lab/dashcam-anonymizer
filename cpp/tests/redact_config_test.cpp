@@ -21,7 +21,8 @@ namespace {
 const std::set<std::string> kAllKeys = {
     "detect_fps",         "max_detect_fps",       "motion_threshold",    "score_threshold",
     "nms_iou",            "match_max_distance",   "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",       "mosaic_min_block_px", "mosaic_blocks_per_long_side"};
+    "motion_expand_fraction", "min_box_px",       "mosaic_min_block_px", "mosaic_blocks_per_long_side",
+    "face_score_threshold",   "face_nms_iou"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -37,6 +38,9 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.timeline.minBoxPx, d.timeline.minBoxPx);
   EXPECT_EQ(c.mosaic.minBlockPx, d.mosaic.minBlockPx);
   EXPECT_EQ(c.mosaic.blocksPerLongSide, d.mosaic.blocksPerLongSide);
+  EXPECT_FLOAT_EQ(c.face.scoreThreshold, d.face.scoreThreshold);
+  EXPECT_FLOAT_EQ(c.face.nmsIou, d.face.nmsIou);
+  EXPECT_EQ(c.face.topK, d.face.topK);
 }
 
 void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{}); }
@@ -57,6 +61,8 @@ RedactConfig nonDefaultConfig() {
   c.timeline.minBoxPx = 24.0;
   c.mosaic.minBlockPx = 12;
   c.mosaic.blocksPerLongSide = 6;
+  c.face.scoreThreshold = 0.4375f;
+  c.face.nmsIou = 0.25f;
   return c;
 }
 
@@ -79,6 +85,22 @@ TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.3);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
+}
+
+// The face model's defaults were chosen before looking at any held-out video: the score is the lower
+// bound of the teachers' low-confidence face band (configs/labeling.json face_low_score [0.3, 0.5]),
+// the NMS IoU the one the YuNet teacher uses; top_k is cv2.FaceDetectorYN's 5000.
+TEST(RedactConfig, FaceModelDefaultsAreChosenAPriori) {
+  const RedactConfig c;
+  EXPECT_FLOAT_EQ(c.face.scoreThreshold, 0.3f);
+  EXPECT_FLOAT_EQ(c.face.nmsIou, 0.3f);
+  EXPECT_EQ(c.face.topK, 5000);
+}
+
+TEST(RedactConfig, ReadsTheFaceModelSettings) {
+  const RedactConfig c = parseRedactConfig(R"({"face_score_threshold": 0.5, "face_nms_iou": 0.4})", "t");
+  EXPECT_FLOAT_EQ(c.face.scoreThreshold, 0.5f);
+  EXPECT_FLOAT_EQ(c.face.nmsIou, 0.4f);
 }
 
 TEST(RedactConfig, RepositoryFileMatchesTheDefaults) {
@@ -127,6 +149,11 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"mosaic_blocks_per_long_side": 0})",      R"({"mosaic_blocks_per_long_side": "8"})",
       // Numbers that overflow to infinity while parsing.
       R"({"detect_fps": 1e400})",                   R"({"expand_fraction": 1e400})",
+      R"({"face_score_threshold": 1e400})",
+      // The face model's settings: a score in [0, 1] and an IoU in (0, 1].
+      R"({"face_score_threshold": 1.5})",           R"({"face_score_threshold": -0.1})",
+      R"({"face_score_threshold": "0.3"})",         R"({"face_nms_iou": 0})",
+      R"({"face_nms_iou": 1.5})",                   R"({"face_nms_iou": -0.3})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -141,6 +168,7 @@ TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
       R"({"match_max_distance_loose": null})",
       R"({"expand_fraction": null})",  R"({"motion_expand_fraction": null})",
       R"({"min_box_px": null})",       R"({"mosaic_blocks_per_long_side": null})",
+      R"({"face_score_threshold": null})", R"({"face_nms_iou": null})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -183,6 +211,8 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"expand_fraction", [](RedactConfig& c, double v) { c.timeline.expandFraction = v; }},
       {"motion_expand_fraction", [](RedactConfig& c, double v) { c.timeline.motionExpandFraction = v; }},
       {"min_box_px", [](RedactConfig& c, double v) { c.timeline.minBoxPx = v; }},
+      {"face_score_threshold", [](RedactConfig& c, double v) { c.face.scoreThreshold = static_cast<float>(v); }},
+      {"face_nms_iou", [](RedactConfig& c, double v) { c.face.nmsIou = static_cast<float>(v); }},
   };
   const std::vector<double> nonFinite = {std::numeric_limits<double>::quiet_NaN(),
                                          std::numeric_limits<double>::infinity(),
@@ -213,7 +243,7 @@ TEST(RedactConfig, DetectFpsMessageFormatsTheMinimum) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 12u);
+  EXPECT_EQ(j.size(), 14u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -223,6 +253,8 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
   EXPECT_EQ(j.at("score_threshold").dump(), "0.05");
   EXPECT_EQ(j.at("nms_iou").dump(), "0.5");
+  EXPECT_EQ(j.at("face_score_threshold").dump(), "0.3");
+  EXPECT_EQ(j.at("face_nms_iou").dump(), "0.3");
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {

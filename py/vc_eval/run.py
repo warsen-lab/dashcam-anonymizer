@@ -46,6 +46,7 @@ class RunConfig:
     spot_frames: int = 30
     seed: int = 0
     overwrite: bool = False  # clear a non-empty `out` first instead of refusing it
+    face_model: Path | None = None  # vc_train yunet model dir, passed to every vc_redact run as --face-model
 
 
 def _same_or_below(path: Path, parent: Path) -> bool:
@@ -65,6 +66,8 @@ def _validate_out(cfg: RunConfig) -> None:
         for stem in cfg.stems:
             ensure_outside(cfg.frames_root / stem, base)  # a stem directory may be a symlink to elsewhere
     reads = [cfg.frames_root, cfg.labels_root, cfg.videos, cfg.model, cfg.vc_redact, cfg.vc_detect, cfg.config, cfg.redacted_root]
+    if cfg.face_model is not None:
+        reads.append(cfg.face_model)
     for path in reads:
         if _same_or_below(path, cfg.out):
             raise ValueError(f"{cfg.out} overlaps {path}; --out must be a directory of its own (--overwrite clears it)")
@@ -102,6 +105,10 @@ def _validate(cfg: RunConfig) -> None:
     if cfg.consistency_count < 1 or cfg.spot_frames < 0:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
     _validate_out(cfg)
+    if cfg.face_model is not None:
+        missing = [name for name in ("model.onnx", "model.json") if not (cfg.face_model / name).is_file()]
+        if missing:
+            raise ValueError(f"{cfg.face_model} has no {' / '.join(missing)}; write the face model with python -m vc_train yunet")
     for stem in cfg.stems:
         for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv"):
             if not needed.is_file():
@@ -124,9 +131,10 @@ def _fps_dir(cfg: RunConfig, fps: float) -> Path:
 
 
 def _redact(cfg: RunConfig, stem: str, out: Path, extra: list[str], runner) -> None:
+    face = ["--face-model", str(cfg.face_model)] if cfg.face_model is not None else []
     command = [
         str(cfg.vc_redact), "--input", str(cfg.videos / f"{stem}.mp4"), "--out", str(out), "--model", str(cfg.model),
-        "--config", str(cfg.config), *extra, "--overwrite",
+        *face, "--config", str(cfg.config), *extra, "--overwrite",
     ]
     try:
         runner(command, check=True, capture_output=True, text=True)
@@ -360,6 +368,7 @@ def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
     counts = _spot_counts(spot_reports)
     summary = {
         "model": str(cfg.model),
+        "face_model": None if cfg.face_model is None else str(cfg.face_model),
         "chosen_fps": chosen,
         "segments": segments,
         "reference": _reference_tiers(pooled[0]["coverage"]),

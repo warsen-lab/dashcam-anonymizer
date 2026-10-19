@@ -37,6 +37,18 @@ TEST(RedactCli, AppliesDefaults) {
   EXPECT_TRUE(o.preferHardwareEncoder);
   EXPECT_DOUBLE_EQ(o.config.detectFps, RedactConfig{}.detectFps);
   EXPECT_DOUBLE_EQ(o.config.maxDetectFps, RedactConfig{}.maxDetectFps);
+  EXPECT_FALSE(o.faceModelDir.has_value());  // without --face-model only the student detects
+}
+
+TEST(RedactCli, ParsesAFaceModelNextToEitherDetector) {
+  const RedactOptions o =
+      parseRedactArgs({"--input", "in.mp4", "--out", "out", "--model", "m", "--face-model", "data/models/yunet"});
+  ASSERT_TRUE(o.faceModelDir.has_value());
+  EXPECT_EQ(*o.faceModelDir, "data/models/yunet");
+  const RedactOptions fake =
+      parseRedactArgs({"--face-model", "y", "--input", "in.mp4", "--out", "out", "--fake-detections", "f.jsonl"});
+  ASSERT_TRUE(fake.faceModelDir.has_value());
+  EXPECT_EQ(*fake.faceModelDir, "y");
 }
 
 TEST(RedactCli, ParsesHardwareAndFakeDetectionOptions) {
@@ -103,6 +115,9 @@ TEST(RedactCli, RejectsBadCommandLines) {
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--config", "missing.json"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--bogus"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "stray"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--face-model"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--face-model", "--overwrite"},
+      {"--input", "a.mp4", "--out", "o", "--face-model", "y"},  // a face model alone is not a detector
       {"--input", "--out", "o", "--model", "m"},
       {"--input"},
       {},
@@ -120,7 +135,7 @@ TEST(RedactCli, RejectsNonFiniteDetectFps) {
 
 TEST(RedactCli, UsageMentionsEveryOption) {
   const std::string usage = redactUsage();
-  for (const char* option : {"--input", "--out", "--model", "--fake-detections", "--config", "--detect-fps",
+  for (const char* option : {"--input", "--out", "--model", "--face-model", "--fake-detections", "--config", "--detect-fps",
                              "--detect-every-frame", "--ep", "--hwaccel", "--encoder", "--overwrite"}) {
     EXPECT_NE(usage.find(option), std::string::npos) << option;
   }

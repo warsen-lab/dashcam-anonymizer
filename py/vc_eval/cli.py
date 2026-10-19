@@ -31,6 +31,10 @@ def _parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="detection-rate sweep, summary and spot-check page")
     r.add_argument("--stems", required=True, help="comma-separated held-out stems")
     r.add_argument("--model", type=Path, required=True)
+    r.add_argument(
+        "--face-model", type=Path, default=None,
+        help="YuNet face model dir (python -m vc_train yunet) passed to every vc_redact run as --face-model",
+    )
     r.add_argument("--out", type=Path, required=True)
     r.add_argument("--fps", default="5,10,15,30", help="comma-separated detection rates")
     r.add_argument("--vc-redact", type=Path, default=Path("build/cpp-release/vc_redact"))
@@ -105,7 +109,7 @@ def _run(args) -> int:
     cfg = RunConfig(
         stems=[s.strip() for s in args.stems.split(",") if s.strip()], model=args.model, fps_values=_fps_values(args.fps),
         out=args.out, vc_redact=args.vc_redact, vc_detect=args.vc_detect, config=args.config, overwrite=args.overwrite,
-        redacted_root=args.redacted_root,
+        redacted_root=args.redacted_root, face_model=args.face_model,
     )
     summary = run_all(cfg)
     chosen = summary["chosen_fps"]
