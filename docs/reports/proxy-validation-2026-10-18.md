@@ -144,6 +144,13 @@
   - `vc_train export` 用 `torch.load` 读检查点时先导入了 ultralytics，那时离线环境还没设好，ultralytics 可能做了一次 DNS 查询和连接探测。
   - 它还写出了 `~/Library/Application Support/Ultralytics/settings.json`（同步关闭、无 API key）。
   - 已修复（00c9e9e）：所有入口先设离线环境，并验证之后的导出没有再碰这个文件。
+- **onnxruntime 遥测出网（22:50 发现，已修复，6ad78ba）：**
+  - onnxruntime 1.30 的 macOS 版（Python 包和 C++ 库都是）内置微软 1DS 遥测。使用事件带着设备 ID，先排队写进 `~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/onnxruntime.db`，再通过系统网络栈上传，黑洞代理环境变量拦不住。
+  - 禁网实测：跑一次 `vc_detect` 会排队 17 条事件，共 10.8 KB。在此之前这个队列一直是空的，说明这一阶段的 `vc_redact`、`vc_detect`、测试和评测**都上传过遥测**。估计每个进程 15–25 KB（含 HTTPS 开销），合计约几 MB。
+  - 测试进程退出时的偶发 libc++ 崩溃也是它引起的：上传线程在进程退出时还在处理响应。
+  - 修复：C++ 在创建 `Ort::Env` 前设 `ORT_DISABLE_TELEMETRY=1` 并调用 `DisableTelemetryEvents()`；Python 在 `offline_model_env()` 和 `cpu_session()` 里同样处理。
+  - 在禁网沙箱里验证，修复后的 C++ 与 Python 都不再产生事件；按原来会崩溃的顺序连跑 6 次也不再崩溃。
+  - 遥测目录 10-14 就已存在，早于这个项目，本机别的工具也在用带遥测的 onnxruntime。
 - **下载（经你授权，都来自官方源）：**
   - 来源：
     - PyPI 上的训练依赖（ultralytics 8.4.172 及 onnx、onnxruntime、polars、matplotlib 等，见 `py/requirements-train.txt`）；
