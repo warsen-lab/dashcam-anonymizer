@@ -15,8 +15,9 @@ namespace vc {
 std::string detectionRecord(const std::string& video, int64_t frame, double ptsMs, const Box& box,
                             const std::vector<std::string>& classes, const std::string& src);
 
-// One masks.jsonl line for a frame (boxes may be empty), newline included. Throws VcError as
-// detectionRecord does for class indices and for non-finite coordinates.
+// One masks.jsonl line for a frame (boxes may be empty), newline included; each box is
+// {cls, x1, y1, x2, y2, track, origin}. Throws VcError as detectionRecord does for class indices and
+// for non-finite coordinates.
 std::string maskRecord(const std::string& video, int64_t frame, const std::vector<MaskBox>& boxes,
                        const std::vector<std::string>& classes);
 

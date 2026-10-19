@@ -67,6 +67,7 @@ std::string maskRecord(const std::string& video, int64_t frame, const std::vecto
     b["y1"] = round1(m.y1, "y1");
     b["x2"] = round1(m.x2, "x2");
     b["y2"] = round1(m.y2, "y2");
+    b["track"] = m.track;
     b["origin"] = toString(m.origin);
     j["boxes"].push_back(b);
   }

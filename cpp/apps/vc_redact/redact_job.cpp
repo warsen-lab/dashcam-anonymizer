@@ -225,18 +225,17 @@ class Processor {
     }
 
     const Clock::time_point trackStarted = Clock::now();
-    const std::vector<std::vector<MaskBox>> masks =
-        timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
+    const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
     stats_.track.busySec += secondsSince(trackStarted);
-    emit(masks);
+    emit(step.masks);
     buffer_.push_back(std::move(item));
   }
 
   void onEnd() {
     const Clock::time_point started = Clock::now();
-    const std::vector<std::vector<MaskBox>> masks = timeline_.finish(times());
+    const TimelineOutput step = timeline_.finish(times());
     stats_.track.busySec += secondsSince(started);
-    emit(masks);
+    emit(step.masks);
     if (!out_.push(Item{EndItem{}})) throw PipelineAborted{};
   }
 

@@ -157,7 +157,8 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
 
 // A face and a plate moving 2.5 and 2 box widths per keyframe interval (200 ms = 6 frames), turning
 // round at frame 30 and coming back. The fake detections list every frame (the pipeline asks only
-// for the keyframes), so they are also the ground truth: the box is pixelated on every output frame.
+// for the keyframes), so they are also the ground truth: the box is pixelated on every output frame up to the
+// last keyframe.
 TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
   struct Target {
     const char* cls;
@@ -205,27 +206,31 @@ TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
   for (int f = 0; f < 60; ++f) {
     for (const Target& t : targets) {
       const Rect r = rectAt(t, f);
-      const double before = roughness(*in[f], r.x1, r.y1, r.x2, r.y2);
-      const double after = roughness(*out[f], r.x1, r.y1, r.x2, r.y2);
-      EXPECT_GT(before, 0.45) << t.cls << " frame " << f;
-      EXPECT_LT(after, 0.1) << t.cls << " frame " << f;
+      EXPECT_GT(roughness(*in[f], r.x1, r.y1, r.x2, r.y2), 0.45) << t.cls << " frame " << f;
+      // After the last keyframe (54) a target is only held half a box side further (spec 2026-10-19 §3.3), so
+      // these targets, moving 2 to 2.5 widths per interval, leave their masks there.
+      if (f <= 54) EXPECT_LT(roughness(*out[f], r.x1, r.y1, r.x2, r.y2), 0.1) << t.cls << " frame " << f;
     }
     // Away from both paths the checkerboard survives the encoder, so a leak would show.
     EXPECT_GT(roughness(*out[f], 300, 150, 340, 200), 0.4) << "frame " << f;
   }
-  // Both targets are tracked: every frame between two keyframes (0, 6, ..., 54; the frames after the
-  // last one are extended) has an interpolated box of each class.
+  // Each target is one track: exactly one box of its class on every frame, detected on the keyframes (0, 6, ...,
+  // 54), interpolated between them and held after the last one.
   std::ifstream masks(s.outputDir / "masks.jsonl");
   for (std::string line; std::getline(masks, line);) {
     const nlohmann::json record = nlohmann::json::parse(line);
     const int frame = record.at("frame").get<int>();
-    if (frame % 6 == 0 || frame > 54) continue;
     for (const Target& t : targets) {
-      bool interpolated = false;
+      int boxes = 0;
+      std::string origin;
       for (const auto& box : record.at("boxes")) {
-        interpolated = interpolated || (box.at("cls") == t.cls && box.at("origin") == "interpolated");
+        if (box.at("cls") != t.cls) continue;
+        ++boxes;
+        origin = box.at("origin").get<std::string>();
       }
-      EXPECT_TRUE(interpolated) << t.cls << " frame " << frame;
+      EXPECT_EQ(boxes, 1) << t.cls << " frame " << frame;
+      const std::string expected = frame > 54 ? "held" : frame % 6 == 0 ? "detected" : "interpolated";
+      EXPECT_EQ(origin, expected) << t.cls << " frame " << frame;
     }
   }
 }

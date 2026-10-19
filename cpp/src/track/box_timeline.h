@@ -9,9 +9,9 @@
 
 namespace vc {
 
-enum class MaskOrigin { Detected, Interpolated, Extended };
+enum class MaskOrigin { Detected, Interpolated, Held };
 
-// "detected" | "interpolated" | "extended" — the values written to masks.jsonl.
+// "detected" | "interpolated" | "held" — the values written to masks.jsonl.
 const char* toString(MaskOrigin origin);
 
 struct MaskBox {
@@ -21,6 +21,7 @@ struct MaskBox {
   float x2 = 0;
   float y2 = 0;
   MaskOrigin origin = MaskOrigin::Detected;
+  int64_t track = 0;  // the track the mask is for (ids from 1); a track has at most one mask per frame
 };
 
 struct FrameTime {
@@ -41,32 +42,33 @@ struct TimelineConfig {
   double matchMaxDistanceLoose = 6.0; // second pass: max |dx| and |dy| / the largest side of the two boxes
 };
 
-// Turns detections on keyframes into masks for every frame (main spec §7.2): boxes matched across
-// keyframes are interpolated, unmatched ones are extended, and every mask is expanded.
+// What advance() and finish() return.
+struct TimelineOutput {
+  // The masks of each frame passed in, in the same order.
+  std::vector<std::vector<MaskBox>> masks{};
+  // One flag per box of the keyframe those frames start at, in Keyframe::boxes order: whether that box is
+  // masked. Empty for the first advance() call.
+  std::vector<bool> confirmed{};
+};
+
+// Turns detections on keyframes into one mask per target and frame (spec 2026-10-19 §3). Boxes on
+// consecutive keyframes are matched into tracks; a track has at most one mask per frame.
 //
 // Matching runs in two greedy, one-to-one passes over same-class pairs, cheapest first; both try the
 // target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
-// matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar
-// size (each side within a factor of 3 of the other's) whose centres are at most
-// matchMaxDistanceLoose times the largest side of the two boxes apart along each axis: a target that
-// moves several box widths between keyframes. A loose match, and a first-pass match of a track that
-// has no velocity yet (nothing to check the pairing against), is interpolated AND keeps the masks the
-// track and the box would have had unmatched (over the whole interval), so a wrong pairing can add
-// masks but never remove one. Any match gives the next interval a velocity.
+// matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar size
+// (each side within a factor of 3 of the other's) whose centres are at most matchMaxDistanceLoose times
+// the largest side of the two boxes apart along each axis.
 //
-// An unmatched track with a velocity masks the region it may have swept: on each frame the bounding
-// box of where the target was last detected, where the velocity takes it, and as far back from the
-// detection (it may have turned round), so a target that stopped or turned round stays covered. A box missed at one keyframe is kept for one more interval as a ghost
-// track (moved along its velocity, masked as `extended`, swept from its last real detection) and can
-// still be matched at the next keyframe; a second miss drops it. A track that is matched loosely
-// is kept as a ghost as well, whatever it was matched with: the second pass pairs any similar box
-// within reach, so a target missed while a look-alike (a false positive, a newly visible plate)
-// turns up nearby must not lose its extrapolation. A ghost that is matched also gets
-// the new box held in place over the whole interval (`extended`, next to the interpolated mask) and a
-// second interpolation from the target's last real detection: its position was a guess, and a target
-// that stopped or turned round after the missed keyframe must stay covered. The velocity of a match is
-// measured from the target's last real detection. Feed keyframes in order;
-// frames are identified by decode index.
+// A matched track is interpolated between its two keyframe boxes (centre and size, linearly in time). A
+// track missed at the next keyframe is held at its box, moved along its velocity by at most half the
+// box's width along x and half its height along y; it lives on for one keyframe as a ghost at the end of
+// that hold. A ghost matched at the following keyframe is interpolated from where it was held to the new
+// box; an unmatched ghost ends, and the interval after its last hold is not masked. A box that starts a
+// track is masked from its own keyframe on, never before. Every mask is grown by expandFraction of its box
+// plus motionExpandFraction of the interval's displacement along each axis (for a hold, of its capped
+// shift), to at least minBoxPx, and clipped to the frame. A track's velocity runs from its last real
+// detection. Feed keyframes in order; frames are identified by decode index.
 class BoxTimeline {
  public:
   // Throws std::invalid_argument for a non-positive frame size or invalid config.
@@ -78,52 +80,56 @@ class BoxTimeline {
   // when a box coordinate or the timestamp of `next` is not finite (the timeline is left
   // untouched). A non-finite or out-of-range pts of one of `frames` is not an error: the
   // positions in that interval then come from the decode indices.
-  std::vector<std::vector<MaskBox>> advance(const std::vector<FrameTime>& frames, const Keyframe& next);
+  TimelineOutput advance(const std::vector<FrameTime>& frames, const Keyframe& next);
 
-  // Masks for the frames from the last keyframe (inclusive) to the end, extending every box
-  // (ghosts included) forward along its velocity as the region it sweeps; the shift stops growing
-  // after one keyframe interval. Resets the timeline.
-  std::vector<std::vector<MaskBox>> finish(const std::vector<FrameTime>& frames);
+  // Masks for the frames from the last keyframe (inclusive) to the end of the video: every track
+  // detected on that keyframe is held there as above; ghosts end. Resets the timeline.
+  TimelineOutput finish(const std::vector<FrameTime>& frames);
 
  private:
-  struct Velocity {
+  // A velocity (px per frame) or a shift (px).
+  struct Offset {
     double x = 0;
     double y = 0;
   };
 
-  // A box on the last keyframe: a real detection (missed == 0) or a ghost (missed keyframes in a row).
+  // A target followed from keyframe to keyframe.
   struct Track {
-    Box box;
-    std::optional<Velocity> velocity;  // px per frame index
-    int missed = 0;
-    Box anchor;                        // the target's last real detection (the box itself when missed == 0)
-    double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 when missed == 0)
+    int64_t id = 0;
+    Box box{};                         // on the last keyframe: the detection, or where a ghost was held to
+    std::optional<Offset> velocity{};  // px per frame index
+    bool ghost = false;                // missed on the last keyframe (lives for one keyframe)
+    Box anchor{};                      // the target's last real detection (the box itself unless a ghost)
+    double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 unless a ghost)
+    int keyBox = -1;                   // index of `box` in the last keyframe's boxes; -1 for a ghost
   };
 
   struct Match {
     size_t track = 0;
     size_t next = 0;
-    bool loose = false;  // found by the second pass
   };
 
   std::vector<Match> match(const Keyframe& next, double steps) const;
-  // Masks `region`, grown by the margins of a box of `sized`'s width and height plus the motion margins.
-  void add(std::vector<MaskBox>& out, const Box& region, const Box& sized, double motionX, double motionY,
-           MaskOrigin origin) const;
-  void add(std::vector<MaskBox>& out, const Box& box, double motionX, double motionY, MaskOrigin origin) const {
-    add(out, box, box, motionX, motionY, origin);
-  }
-  // The swept region of an unmatched track `since` frames after the keyframe: its last real
-  // detection, the box moved along its velocity, and the detection moved as far the other way;
-  // motion margins for `span` frames of velocity.
-  void sweep(std::vector<MaskBox>& out, const Track& track, double since, double span, MaskOrigin origin) const;
+  // How far a held track has moved `since` frames after its keyframe: along its velocity, at most half
+  // its box's width along x and half its height along y.
+  Offset heldShift(const Track& track, double since) const;
+  // Appends the mask of `track` for `region`, grown by expandFraction of its size plus
+  // motionExpandFraction of `motion` per axis, to at least minBoxPx, clipped to the frame; nothing when
+  // it lies outside the frame.
+  void emit(std::vector<MaskBox>& out, const Track& track, const Box& region, Offset motion,
+            MaskOrigin origin) const;
+  // The masks of `track` held from its keyframe `from` over `frames` (which start there); the motion
+  // margin is the shift reached `span` frames after the keyframe.
+  void hold(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames, const FrameTime& from,
+            const Track& track, double span) const;
 
   TimelineConfig config_;
   int width_;
   int height_;
   std::optional<FrameTime> keyTime_;  // the last keyframe
-  std::vector<Track> tracks_;         // its boxes, then its ghosts
-  double lastSteps_ = 0;              // frames in the last interval
+  std::vector<Track> tracks_;         // its boxes in order, then its ghosts
+  size_t keyBoxes_ = 0;               // number of boxes on the last keyframe
+  int64_t nextId_ = 1;
 };
 
 }  // namespace vc
