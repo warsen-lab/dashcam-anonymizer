@@ -1,8 +1,10 @@
 #include "detect/model_info.h"
 
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -19,10 +21,16 @@ constexpr int kYuNetPadMultiple = 32;
 using Fail = std::function<VcError(const std::string&)>;
 
 // input.<field> as an int: get<int>() would silently truncate 1088.5 to 1088, so the JSON number
-// must be an integer.
+// must be an integer, and it would wrap 4294967328 (2^32 + 32) to 32, so the integer must be within
+// the int range (a number above INT64_MAX is read as unsigned).
 int integerField(const nlohmann::json& input, const char* field, const Fail& fail) {
   const nlohmann::json& v = input.at(field);
   if (!v.is_number_integer()) throw fail(std::string("input.") + field + " must be an integer");
+  constexpr int kIntMin = std::numeric_limits<int>::min();
+  constexpr int kIntMax = std::numeric_limits<int>::max();
+  const bool fits = v.is_number_unsigned() ? v.get<std::uint64_t>() <= static_cast<std::uint64_t>(kIntMax)
+                                           : v.get<std::int64_t>() >= kIntMin && v.get<std::int64_t>() <= kIntMax;
+  if (!fits) throw fail(std::string("input.") + field + " is outside the int range");
   return v.get<int>();
 }
 
@@ -39,7 +47,8 @@ void parseYolov8(const nlohmann::json& input, ModelInfo& m, const Fail& fail) {
 }
 
 void parseYuNet(const nlohmann::json& input, ModelInfo& m, const Fail& fail) {
-  if (m.classes.size() != 1) throw fail("a yunet model has exactly one class");
+  // The merge maps the class by name onto the student's "face": any other name must not get this far.
+  if (m.classes != std::vector<std::string>{"face"}) throw fail("a yunet model's classes must be exactly [\"face\"]");
   if (input.at("color").get<std::string>() != "BGR") throw fail("input.color must be \"BGR\"");
   if (input.at("letterbox").get<std::string>() != "top_left") throw fail("input.letterbox must be \"top_left\"");
   if (integerField(input, "pad_value", fail) != 0) throw fail("input.pad_value must be 0");
