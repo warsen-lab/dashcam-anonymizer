@@ -1,13 +1,18 @@
 #include "vc_redact/redact_job.h"
 
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -463,6 +468,50 @@ TEST(RedactJob, ChecksTheOutputDirectoryBeforeOpeningTheDetector) {
   fs::create_directories(o.outRoot / kStem);
   o.fakeDetections = test::tmpDir() / "redact_exists_first_missing.jsonl";  // would fail to open
   EXPECT_THROW(runRedact(o), OutputExistsError);
+}
+
+// Loading the detector (CoreML compiles the model) sits between the first check of the output directory
+// and its replacement, so the directory is checked again right before it is removed: something that
+// appeared there meanwhile is not deleted. No sleeps: the detections "file" is a FIFO, and opening it
+// blocks the run until this test opens the other end, which it does only once the run has got past the
+// first check and is loading the detector; the foreign file is created after that, and the FakeDetector
+// reads to the end of the FIFO (the writer closing it) before the run goes on to replace the directory.
+TEST(RedactJob, ChecksTheOutputDirectoryAgainBeforeReplacingIt) {
+  RedactOptions o = baseOptions("redact_recheck");
+  const fs::path dir = o.outRoot / kStem;
+  fs::create_directories(dir);  // empty: --overwrite may replace it
+  o.overwrite = true;
+  const fs::path fifo = test::tmpDir() / "redact_recheck.fifo";
+  fs::remove(fifo);
+  ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
+  o.fakeDetections = fifo;
+
+  std::thread writer([&] {
+    const int fd = open(fifo.c_str(), O_WRONLY);  // returns when the run opens the detections
+    if (fd < 0) return;
+    std::ofstream(dir / "notes.txt") << "keep me";
+    const char blankLine = '\n';
+    if (write(fd, &blankLine, 1) < 0) std::perror("write");
+    close(fd);
+  });
+  bool refused = false;
+  std::string failure;
+  try {
+    runRedact(o);
+  } catch (const OutputExistsError&) {
+    refused = true;
+  } catch (const std::exception& e) {
+    failure = e.what();
+  }
+  // A run that failed before it opened the FIFO would leave the writer blocked in open(): open the
+  // read end (and hold it, so that the writer's write cannot hit a closed pipe) to let it through.
+  const int reader = open(fifo.c_str(), O_RDONLY | O_NONBLOCK);
+  writer.join();
+  if (reader >= 0) close(reader);
+
+  EXPECT_TRUE(refused) << "the run was not refused; failure: " << failure;
+  EXPECT_TRUE(fs::exists(dir / "notes.txt"));
+  EXPECT_FALSE(fs::exists(dir / "masks.jsonl"));
 }
 
 fs::path failingDetections(const std::string& name) {

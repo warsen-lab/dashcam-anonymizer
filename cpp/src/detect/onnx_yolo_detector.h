@@ -29,11 +29,15 @@ std::optional<std::filesystem::path> coreMlCacheDirectory(const std::filesystem:
 class OnnxYoloDetector : public Detector {
  public:
   // Frames passed to detect() must be frameWidth x frameHeight. CoreML keeps its compiled model in
-  // coreMlCacheDirectory(model.onnx) (created; without it CoreML compiles on every construction) and
-  // falls back to the CPU provider (with a message on stderr) when it cannot be attached or when its
-  // session cannot be created. Throws VcError when the files are missing or invalid, when the ONNX input/output is not
-  // a float32 tensor, when model.json disagrees with the ONNX input shape or class count, or when
-  // onnxruntime fails (also on the CPU retry).
+  // coreMlCacheDirectory(model.onnx) (created; without it CoreML compiles on every construction).
+  // When the session cannot be created with that cache (processes that compile at the same time race
+  // on it, and a compile that died half-way leaves an unloadable model) it is created once more
+  // without the cache, leaving the shared directory as it is (another process may be writing it),
+  // with one line on stderr; only when that fails too, or when the provider cannot be attached, does
+  // the detector fall back to the CPU provider (also with a message on stderr). Throws VcError when
+  // the files are missing or invalid, when the ONNX input/output is not a float32 tensor, when
+  // model.json disagrees with the ONNX input shape or class count, or when onnxruntime fails (also
+  // on the CPU retry).
   OnnxYoloDetector(const std::filesystem::path& modelDir, ExecutionProvider provider,
                    const DecodeParams& params, int frameWidth, int frameHeight);
   ~OnnxYoloDetector() override;

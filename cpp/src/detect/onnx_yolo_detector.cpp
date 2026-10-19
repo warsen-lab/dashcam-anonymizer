@@ -122,6 +122,38 @@ Ort::SessionOptions makeOptions() {
   return options;
 }
 
+// One try at a session on the CoreML provider, compiling into `cache` (a temporary directory when
+// there is none).
+struct CoreMlAttempt {
+  Ort::Session session{nullptr};
+  bool attached = false;  // the provider was registered (the session may still have failed)
+  bool ok = false;        // `session` is usable
+  std::string error;      // why not, otherwise
+};
+
+CoreMlAttempt attemptCoreMl(const fs::path& onnx, const std::optional<fs::path>& cache) {
+  CoreMlAttempt attempt;
+  Ort::SessionOptions options = makeOptions();
+  try {
+    std::unordered_map<std::string, std::string> coreMl{
+        {"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"}, {"RequireStaticInputShapes", "1"}};
+    if (cache) coreMl["ModelCacheDirectory"] = cache->string();
+    options.AppendExecutionProvider("CoreML", coreMl);
+  } catch (const Ort::Exception& e) {
+    attempt.error = e.what();
+    return attempt;
+  }
+  attempt.attached = true;
+  try {
+    // CoreML compiles the model while the session is created.
+    attempt.session = Ort::Session(ortEnv(), onnx.c_str(), options);
+    attempt.ok = true;
+  } catch (const Ort::Exception& e) {
+    attempt.error = e.what();
+  }
+  return attempt;
+}
+
 }  // namespace
 
 std::optional<fs::path> coreMlCacheDirectory(const fs::path& onnx) {
@@ -192,28 +224,25 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
   const fs::path onnx = modelDir / "model.onnx";
   if (!fs::is_regular_file(onnx)) throw VcError("missing " + onnx.string());
   try {
-    bool coreMlAttached = false;
-    Ort::SessionOptions options = makeOptions();
     if (provider == ExecutionProvider::CoreML) {
-      try {
-        std::unordered_map<std::string, std::string> coreMl{
-            {"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"}, {"RequireStaticInputShapes", "1"}};
-        if (const std::optional<fs::path> cache = usableCoreMlCache(onnx)) {
-          coreMl["ModelCacheDirectory"] = cache->string();
-        }
-        options.AppendExecutionProvider("CoreML", coreMl);
-        coreMlAttached = true;
-      } catch (const Ort::Exception& e) {
-        std::fprintf(stderr, "vc: CoreML execution provider unavailable (%s); using CPU\n", e.what());
+      const std::optional<fs::path> cache = usableCoreMlCache(onnx);
+      CoreMlAttempt coreMl = attemptCoreMl(onnx, cache);
+      if (coreMl.attached && !coreMl.ok && cache) {
+        // The cache is shared: processes that compile at the same time race on it ("Error copying
+        // compiled model to cache path"), and a compile that died half-way leaves a model that cannot
+        // be loaded. Another process may be writing the directory, so it is left alone; compile
+        // without it once before giving the CoreML provider up.
+        std::fprintf(stderr, "vc: CoreML session failed with the compile cache %s (%s); retrying without the cache\n",
+                     cache->c_str(), coreMl.error.c_str());
+        coreMl = attemptCoreMl(onnx, std::nullopt);
       }
-    }
-    if (coreMlAttached) {
-      try {
-        s.session = Ort::Session(ortEnv(), onnx.c_str(), options);
+      if (coreMl.ok) {
+        s.session = std::move(coreMl.session);
         s.backend = "CoreML";
-      } catch (const Ort::Exception& e) {
-        // CoreML compiles the model while the session is created; retry once without it.
-        std::fprintf(stderr, "vc: CoreML session failed (%s); using CPU\n", e.what());
+      } else if (coreMl.attached) {
+        std::fprintf(stderr, "vc: CoreML session failed (%s); using CPU\n", coreMl.error.c_str());
+      } else {
+        std::fprintf(stderr, "vc: CoreML execution provider unavailable (%s); using CPU\n", coreMl.error.c_str());
       }
     }
     if (s.backend != "CoreML") {

@@ -562,6 +562,11 @@ RedactStats runRedact(const RedactOptions& options) {
   const fs::path partial = stats.outputDir / (stem + ".redacted.mp4.partial");
   const std::vector<fs::path> written{partial, stats.video, stats.outputDir / kDetectionsFile,
                                       stats.outputDir / kMasksFile, stats.outputDir / kStatsFile};
+  // The first check is long ago (loading the detector took its time, CoreML compiles the model there):
+  // check again right before anything is removed, and outside the try below, whose handler deletes
+  // `written` and the directory, which something else may own by now. What is left is the
+  // time of two filesystem calls.
+  checkOutputDir(options.input, stats.outputDir, options.overwrite);
   try {
     fs::remove_all(stats.outputDir);
     fs::create_directories(stats.outputDir);

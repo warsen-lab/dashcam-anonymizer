@@ -183,6 +183,75 @@ TEST(OnnxYoloDetector, ReusesTheCompiledCoreMlModel) {
   expectConstBoxes(second.detect(view(frame.get())), 1e-3f);
 }
 
+// Empties every regular file of the compiled model in `dir`, the way a compile that was killed
+// half-way leaves it; returns how many it emptied.
+size_t truncateCompiledModel(const fs::path& dir) {
+  size_t emptied = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+    if (!entry.is_regular_file()) continue;
+    if (entry.path().string().find("compiled_model.mlmodelc") == std::string::npos) continue;
+    std::ofstream(entry.path(), std::ios::trunc);
+    ++emptied;
+  }
+  return emptied;
+}
+
+// Concurrent first runs race on the shared cache ("Error copying compiled model to cache path"), and a
+// compile that died half-way leaves a model that cannot be loaded. Neither may cost the run CoreML:
+// the session is created once more without the cache (and the directory, which another process may
+// be writing, is left alone) before the CPU takes over. One stderr line names what happened.
+TEST(OnnxYoloDetector, RetriesCoreMlWithoutTheCacheWhenItsCompiledModelIsCorrupt) {
+  const fs::path root = freshCacheRoot("coreml_cache_corrupt");
+  const ScopedEnv cache("VC_CACHE", root.c_str());
+  const std::optional<fs::path> dir = coreMlCacheDirectory(constModel() / "model.onnx");
+  ASSERT_TRUE(dir.has_value());
+  {
+    OnnxYoloDetector first(constModel(), ExecutionProvider::CoreML, DecodeParams{}, 128, 128);
+    if (first.backend() != "CoreML") GTEST_SKIP() << "CoreML is not available here";
+  }
+  ASSERT_GT(truncateCompiledModel(*dir), 0u);
+  const auto corrupt = filesIn(*dir);
+
+  testing::internal::CaptureStderr();
+  OnnxYoloDetector second(constModel(), ExecutionProvider::CoreML, DecodeParams{}, 128, 128);
+  const std::string log = testing::internal::GetCapturedStderr();
+  EXPECT_EQ(second.backend(), "CoreML") << log;
+  EXPECT_NE(log.find("without the cache"), std::string::npos) << log;
+  EXPECT_EQ(log.find("using CPU"), std::string::npos) << log;
+  EXPECT_EQ(filesIn(*dir), corrupt);  // the shared directory is as it was: not repaired, not deleted
+  const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
+  expectConstBoxes(second.detect(view(frame.get())), 1e-3f);
+}
+
+// A cache directory CoreML cannot write to (a read-only volume) costs it the cache, not the backend
+// (onnxruntime copes with that by itself; this keeps it so).
+TEST(OnnxYoloDetector, UsesCoreMlWhenItsCacheCannotBeWritten) {
+  const fs::path root = freshCacheRoot("coreml_cache_readonly");
+  const ScopedEnv cache("VC_CACHE", root.c_str());
+  const std::optional<fs::path> dir = coreMlCacheDirectory(constModel() / "model.onnx");
+  ASSERT_TRUE(dir.has_value());
+  fs::create_directories(*dir);
+  fs::permissions(*dir, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+  struct Restore {
+    fs::path dir;
+    ~Restore() { fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace); }
+  } restore{*dir};
+  {
+    std::ofstream probe(*dir / "probe");
+    if (probe.is_open()) GTEST_SKIP() << "the directory is writable despite its mode (running as root?)";
+  }
+
+  testing::internal::CaptureStderr();
+  OnnxYoloDetector detector(constModel(), ExecutionProvider::CoreML, DecodeParams{}, 128, 128);
+  const std::string log = testing::internal::GetCapturedStderr();
+  if (log.find("CoreML execution provider unavailable") != std::string::npos) GTEST_SKIP() << "CoreML is not available here";
+  EXPECT_EQ(detector.backend(), "CoreML") << log;
+  EXPECT_EQ(log.find("using CPU"), std::string::npos) << log;
+  EXPECT_TRUE(fs::is_empty(*dir));
+  const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
+  expectConstBoxes(detector.detect(view(frame.get())), 1e-3f);
+}
+
 TEST(OnnxYoloDetector, RejectsAFrameOfAnotherSize) {
   OnnxYoloDetector detector(constModel(), ExecutionProvider::Cpu, DecodeParams{}, 128, 128);
   const auto frame = test::makeFrame(64, 64, AV_PIX_FMT_YUV420P, 128, 128, 128);
