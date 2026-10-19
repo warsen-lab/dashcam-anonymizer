@@ -61,6 +61,7 @@ find_package(Threads REQUIRED)
 add_library(vc_redact_lib STATIC
   apps/vc_detect/detect_cli.cpp
   apps/vc_detect/detect_images.cpp
+  apps/vc_redact/detect_rate.cpp
   apps/vc_redact/records.cpp
   apps/vc_redact/redact_cli.cpp
   apps/vc_redact/redact_config.cpp
