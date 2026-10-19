@@ -317,9 +317,13 @@ std::vector<std::vector<MaskBox>> BoxTimeline::advance(const std::vector<FrameTi
     const double span = track.anchorSteps + steps;
     tracks[m.next].velocity = Velocity{(b.x - a.x) / span, (b.y - a.y) / span};
   }
+  // A track that was matched loosely lives on as a ghost as well: the second pass pairs any similar
+  // box within reach, so a target that was missed while a look-alike (a false positive, a newly
+  // visible plate) turned up nearby would otherwise lose its extrapolation for the next interval.
   for (size_t i = 0; i < tracks_.size(); ++i) {
     const Track& track = tracks_[i];
-    if (matched[i] || track.missed >= kMaxMissedKeyframes) continue;
+    const bool pairedForSure = matched[i] && !matched[i]->loose;
+    if (pairedForSure || track.missed >= kMaxMissedKeyframes) continue;
     const Velocity v = track.velocity.value_or(Velocity{});
     tracks.push_back({shifted(track.box, v.x * steps, v.y * steps), track.velocity, track.missed + 1, track.anchor,
                       track.anchorSteps + steps});

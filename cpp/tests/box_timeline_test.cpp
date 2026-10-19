@@ -688,14 +688,16 @@ TEST(BoxTimeline, ALooseMatchInterpolatesAndHoldsBothEndpoints) {
 }
 
 // The loose match seeds the velocity like a normal one: the next interval is matched by the first
-// pass along the prediction, one interpolated mask per frame.
+// pass along the prediction, one interpolated mask per frame. The old track lives on as a ghost
+// (the pairing may have been wrong) and is held where it was, as `extended`, for that interval.
 TEST(BoxTimeline, ALooseMatchSeedsTheVelocity) {
   BoxTimeline timeline(exact(), 1000, 1000);
   timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
   timeline.advance(frames(0, 12), key(12, {face(160, 100, 180, 120)}));
   const auto masks = timeline.advance(frames(12, 24), key(24, {face(220, 100, 240, 120)}));
-  ASSERT_EQ(masks[6].size(), 1u);  // frame 18
+  ASSERT_EQ(masks[6].size(), 2u);  // frame 18
   expectBox(masks[6][0], 190, 100, 210, 120, MaskOrigin::Interpolated);
+  expectBox(masks[6][1], 100, 100, 120, 120, MaskOrigin::Extended);  // the ghost of the old track
   const auto tail = timeline.finish(frames(24, 30));
   ASSERT_EQ(tail[3].size(), 1u);  // frame 27: 5 px per frame from the keyframe, 15 px either way of 220
   expectBox(tail[3][0], 205, 100, 255, 120, MaskOrigin::Extended);
@@ -905,6 +907,41 @@ TEST(BoxTimeline, CoversATargetThatStopsOrTurnsRoundWhileMissed) {
       ASSERT_EQ(masks.size(), static_cast<size_t>(3 * kStep));
       for (size_t f = 0; f < masks.size(); ++f) {
         EXPECT_GE(coverage(masks[f], plate(static_cast<int64_t>(f))), 0.8) << "frame " << f;
+      }
+    }
+  }
+}
+
+// The re-review's repro: a 48 x 16 plate at 2 to 4 px per frame is missed at keyframe 36 while another
+// plate-class box turns up 100 or 200 px away (a false positive, or a newly visible plate). The second
+// pass pairs the plate's track with that box, but the track must still live on as a ghost: the plate
+// is found again at 48, and the frames 36 to 47 are masked before that detection exists, so only the
+// ghost's extrapolation covers them. Every frame of the plate is covered.
+TEST(BoxTimeline, ALooseMatchLeavesAGhostOfTheOldTrack) {
+  for (const bool parked : {false, true}) {  // the other box is gone again at 48 / stays where it is
+    for (const double dx : {100.0, 200.0}) {
+      for (const double v : {2.0, 3.0, 4.0}) {
+        SCOPED_TRACE(std::string(parked ? "parked box" : "one-off box") + ", " + std::to_string(dx) + " px away, v = " +
+                     std::to_string(v) + " px per frame");
+        const Mover plate{kPlate, 400, 500, 48, 16, v, 0};
+        const float otherX = plate.at(3 * kStep).x1 + static_cast<float>(dx);
+        const Box other{kPlate, otherX, 520, otherX + 48, 536, 0.9f};
+        BoxTimeline timeline(TimelineConfig{}, 1920, 1080);
+        timeline.advance({}, key(0, {plate.at(0)}));
+        std::vector<std::vector<MaskBox>> masks;
+        for (int64_t k = 1; k <= 6; ++k) {
+          std::vector<Box> boxes;
+          if (k != 3) boxes.push_back(plate.at(k * kStep));  // missed at keyframe 36
+          if (k == 3 || (parked && k > 3)) boxes.push_back(other);
+          for (auto& m : timeline.advance(frames((k - 1) * kStep, k * kStep), key(k * kStep, boxes))) {
+            masks.push_back(std::move(m));
+          }
+        }
+        for (auto& m : timeline.finish(frames(6 * kStep, 7 * kStep))) masks.push_back(std::move(m));
+        ASSERT_EQ(masks.size(), static_cast<size_t>(7 * kStep));
+        for (size_t f = 0; f < masks.size(); ++f) {
+          EXPECT_GE(coverage(masks[f], plate.at(static_cast<int64_t>(f))), 0.8) << "frame " << f;
+        }
       }
     }
   }

@@ -58,7 +58,10 @@ struct TimelineConfig {
 // box of where the target was last detected, where the velocity takes it, and as far back from the
 // detection (it may have turned round), so a target that stopped or turned round stays covered. A box missed at one keyframe is kept for one more interval as a ghost
 // track (moved along its velocity, masked as `extended`, swept from its last real detection) and can
-// still be matched at the next keyframe; a second miss drops it. A ghost that is matched also gets
+// still be matched at the next keyframe; a second miss drops it. A track that is matched loosely
+// is kept as a ghost as well, whatever it was matched with: the second pass pairs any similar box
+// within reach, so a target missed while a look-alike (a false positive, a newly visible plate)
+// turns up nearby must not lose its extrapolation. A ghost that is matched also gets
 // the new box held in place over the whole interval (`extended`, next to the interpolated mask) and a
 // second interpolation from the target's last real detection: its position was a guess, and a target
 // that stopped or turned round after the missed keyframe must stay covered. The velocity of a match is
