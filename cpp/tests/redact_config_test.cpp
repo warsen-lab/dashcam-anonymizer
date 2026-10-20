@@ -82,13 +82,18 @@ void expectRejected(const std::string& text) {
   }
 }
 
-// vc_redact's defaults are the ones the 2026-10-18 proxy validation chose (10 fps, score 0.05, expand
-// 0.3); the lower-level structs keep their own, which vc_detect and the unit tests use.
+// vc_redact's defaults: 10 fps and score 0.05 from the 2026-10-18 proxy validation, the mask and confirmation
+// settings from the 2026-10-19 calibration (docs/reports/stable-masks-2026-10-19.md); the lower-level structs keep
+// their own, which vc_detect and the unit tests use.
 TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   const RedactConfig c;
   EXPECT_DOUBLE_EQ(c.detectFps, 10.0);
   EXPECT_FLOAT_EQ(c.decode.scoreThreshold, 0.05f);
-  EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.3);
+  EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.2);
+  EXPECT_DOUBLE_EQ(c.timeline.motionExpandFraction, 0.25);
+  EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, 0.2);
+  EXPECT_FLOAT_EQ(c.faceConfirmScore, 0.5f);
+  EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.2f);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
 }
@@ -131,10 +136,10 @@ TEST(RedactConfig, ReadsTheLooseMatchingDistance) {
   EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"match_max_distance_loose": 3.5})", "t").timeline.matchMaxDistanceLoose, 3.5);
 }
 
-// Mask smoothing (spec 2026-10-19 §3.1): a mask's width and height shrink by at most 2 % per frame, and a mask
-// covers at most 4 times its box. The values are calibrated in the last task of the plan.
+// Mask smoothing (spec 2026-10-19 §3.1): a mask's width and height shrink by at most 20 % per frame, and a mask
+// covers at most 4 times its box. The shrink rate is the 2026-10-19 calibration's.
 TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
-  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.shrinkPerFrame, 0.02);
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.shrinkPerFrame, 0.2);
   EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.maxMaskAreaRatio, 4.0);
   const RedactConfig c = parseRedactConfig(R"({"shrink_per_frame": 0.05, "max_mask_area_ratio": 3})", "t");
   EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, 0.05);
@@ -142,11 +147,11 @@ TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
   EXPECT_NO_THROW(parseRedactConfig(R"({"shrink_per_frame": 1, "max_mask_area_ratio": 1})", "t"));
 }
 
-// Low-score confirmation (spec 2026-10-19 §3.4): faces below 0.5 and plates below 0.15 are masked only once seen on
-// two consecutive keyframes. The values are calibrated in the last task of the plan.
+// Low-score confirmation (spec 2026-10-19 §3.4): faces below 0.5 and plates below 0.2 are masked only once seen on
+// two consecutive keyframes. The values are the 2026-10-19 calibration's.
 TEST(RedactConfig, ReadsTheConfirmScores) {
   EXPECT_FLOAT_EQ(RedactConfig{}.faceConfirmScore, 0.5f);
-  EXPECT_FLOAT_EQ(RedactConfig{}.plateConfirmScore, 0.15f);
+  EXPECT_FLOAT_EQ(RedactConfig{}.plateConfirmScore, 0.2f);
   const RedactConfig c = parseRedactConfig(R"({"face_confirm_score": 0.4, "plate_confirm_score": 0})", "t");
   EXPECT_FLOAT_EQ(c.faceConfirmScore, 0.4f);
   EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.0f);
@@ -322,7 +327,7 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   EXPECT_EQ(j.at("face_score_threshold").dump(), "0.3");
   EXPECT_EQ(j.at("face_nms_iou").dump(), "0.3");
   EXPECT_EQ(j.at("face_confirm_score").dump(), "0.5");
-  EXPECT_EQ(j.at("plate_confirm_score").dump(), "0.15");
+  EXPECT_EQ(j.at("plate_confirm_score").dump(), "0.2");
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {

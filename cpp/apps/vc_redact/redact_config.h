@@ -15,7 +15,8 @@ namespace vc {
 
 // configs/redact.json (proxy-validation spec §5.2, updated by spec 2026-10-19); the defaults equal the
 // repository file. DecodeParams and TimelineConfig keep their own defaults, which vc_detect and the unit
-// tests use.
+// tests use. The mask and confirmation settings are the 2026-10-19 calibration's
+// (docs/reports/stable-masks-2026-10-19.md).
 //
 // `face` is the YuNet face model's (vc_redact --face-model; unused without it). Its score threshold
 // 0.3 is the lower bound of the teachers' low-confidence face band (configs/labeling.json
@@ -24,13 +25,13 @@ namespace vc {
 struct RedactConfig {
   double detectFps = 10.0;  // keyframes per second of video, in [5, 60]; spaced by frame index (detect_rate.h)
   DecodeParams decode{.scoreThreshold = 0.05f};
-  TimelineConfig timeline{.expandFraction = 0.3};
+  TimelineConfig timeline{.expandFraction = 0.2, .motionExpandFraction = 0.25, .shrinkPerFrame = 0.2};
   MosaicConfig mosaic;
   YuNetParams face{.scoreThreshold = 0.3f, .nmsIou = 0.3f};
   // Boxes scoring below these are masked only once their track is matched at two consecutive keyframes
   // (spec 2026-10-19 §3.4), by class whatever the detector; a merged box goes by its (higher) merged score.
   float faceConfirmScore = 0.5f;
-  float plateConfirmScore = 0.15f;
+  float plateConfirmScore = 0.2f;
 };
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
