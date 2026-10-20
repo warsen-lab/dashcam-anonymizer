@@ -32,13 +32,18 @@ struct RedactConfig {
   // (spec 2026-10-19 §3.4), by class whatever the detector; a merged box goes by its (higher) merged score.
   float faceConfirmScore = 0.5f;
   float plateConfirmScore = 0.2f;
+  // A face box over largeFaceAreaFraction of the frame (its own area, before any margin) scoring below
+  // largeFaceMinScore is dropped before it reaches the timeline (spec 2026-10-19 §3.6): giant YuNet false
+  // positives on road and buildings. largeFaceMinScore 0 switches the rule off.
+  double largeFaceAreaFraction = 0.05;
+  float largeFaceMinScore = 0.6f;
 };
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096]; every other value must be a finite number. face_score_threshold, face_confirm_score and
-// plate_confirm_score are in [0, 1], face_nms_iou in (0, 1].
+// [1, 4096]; every other value must be a finite number. face_score_threshold, face_confirm_score,
+// plate_confirm_score and large_face_min_score are in [0, 1], face_nms_iou and large_face_area_fraction in (0, 1].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);

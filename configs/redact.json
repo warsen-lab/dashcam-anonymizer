@@ -14,5 +14,7 @@
   "face_score_threshold": 0.3,
   "face_nms_iou": 0.3,
   "face_confirm_score": 0.5,
-  "plate_confirm_score": 0.2
+  "plate_confirm_score": 0.2,
+  "large_face_area_fraction": 0.05,
+  "large_face_min_score": 0.6
 }

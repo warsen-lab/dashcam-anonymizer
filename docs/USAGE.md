@@ -105,6 +105,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小 |
 | `face_confirm_score` | 0.5 | 人脸分数低于它的框要在相邻两个关键帧都出现才打码。调低多打、调高少打（误检少，但只露一次的小脸会漏） |
 | `plate_confirm_score` | 0.2 | 车牌的同一门槛 |
+| `large_face_area_fraction` | 0.05 | 人脸框（外扩之前）面积超过画面的这个比例，才适用下一行的更高分数要求，范围 (0, 1]。调小则更小的人脸框也要过 `large_face_min_score`，调大则只管更大的框（取 1 等于不管） |
+| `large_face_min_score` | 0.6 | 面积超过上一行比例的人脸框，分数低于它的直接丢弃（YuNet 会把路面、楼群认成占画面很大的人脸，分数多在 0.3–0.6；丢了几个见 `stats.json` 的 `large_faces_dropped`）。调高丢得多、大块误打少，但贴近镜头的低分真人脸会漏；调低保留得多；0 关闭这条规则 |
 
 用法：`--config my.json`。省略的键取默认值，写错的键直接报错。
 

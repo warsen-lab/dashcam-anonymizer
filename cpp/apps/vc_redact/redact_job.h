@@ -42,7 +42,8 @@ struct RedactStats {
   std::filesystem::path video;  // the redacted file
   int64_t frames = 0;
   int64_t keyframes = 0;
-  int64_t detections = 0;
+  int64_t detections = 0;  // the boxes kept: not counting largeFacesDropped
+  int64_t largeFacesDropped = 0;  // large faces scoring below large_face_min_score (spec 2026-10-19 §3.6)
   int64_t maskedFrames = 0;
   int64_t maskBoxes = 0;
   int64_t decodeErrors = 0;

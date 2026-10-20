@@ -109,7 +109,7 @@ cmake --build build/cpp -j 4
 - `<视频名>.redacted.mp4`：打码后的视频。先写成 `.redacted.mp4.partial`，全部成功后才改名，所以不会出现写了一半的成品
 - `detections.jsonl`：关键帧上检测器的原始输出，每个框一行（格式见主设计 §3.2），`src` 为 `student`（回放时为 `fake`）；加了 `--face-model` 时还有 `yunet`（只有人脸模型检出）和 `student+yunet`（两个检测器检出的同一个目标，合并后的框，见下方“人脸模型”）；每行最后有 `confirmed`（true / false），false 表示分数低于本类确认门槛、只在一个关键帧出现、没有打码的框。一个关键帧的检测要等到下一个关键帧（或视频结尾）才写出
 - `masks.jsonl`：每一帧一行，列出这一帧实际打码的框：`cls`、坐标、`track`（轨迹编号，从 1 起；同一条轨迹每帧至多一个框）和来源 `origin`（`detected` 为轨迹在这个关键帧上检测到的框，`interpolated` 为前后两个关键帧之间插值出来的，`held` 为目标在下一个关键帧没被检出时原地保持（按速度外推，至多半个框边）的框），以及打码用的马赛克块大小 `block`
-- `stats.json`：帧数、关键帧数、检测与打码数量、实际使用的检测后端和编码器、音频与被丢弃的流、本次生效的完整配置、各阶段的忙碌时间和帧率（`stages`，见下）、准备时间 `setup_s` 和总耗时 `elapsed_s`；关键帧间隔 `video_fps`、`keyframe_stride`、`detect_fps_actual`（实际每秒检测次数 = video_fps / keyframe_stride）
+- `stats.json`：帧数、关键帧数、检测与打码数量（含被丢弃的大人脸个数 `large_faces_dropped`，见“人脸模型”）、实际使用的检测后端和编码器、音频与被丢弃的流、本次生效的完整配置、各阶段的忙碌时间和帧率（`stages`，见下）、准备时间 `setup_s` 和总耗时 `elapsed_s`；关键帧间隔 `video_fps`、`keyframe_stride`、`detect_fps_actual`（实际每秒检测次数 = video_fps / keyframe_stride）
 
 流水线是三个并行的阶段，各占一个线程：**decode**（解码）、**main**（处理线程，依次做 detect 检测、track 关键帧选择与跟踪、mosaic 打码）、**encode**（编码与写文件）。`stages` 里的 `decode` / `main` / `encode` 就是这三个线程各自的忙碌时间（不含排队等待），`main` 的忙碌时间等于 `detect + track + mosaic` 之和（`items` 为帧数；`detect` 的 `items` 为关键帧数，是每个关键帧检测的墙钟时间之和（有人脸模型时另有 `detect_student`、`detect_face`）），后三项只是 main 的分解，彼此不并行。整体帧率大致受三者中最慢的那个限制。`setup_s` 是从启动到第一帧进入处理线程的时间：打开输入、检查输出目录、加载模型（CoreML 在这一步编译模型）、启动线程、解出第一帧；编码器要等编码线程收到第一帧才打开，这部分时间算在 `encode` 里。
 
@@ -161,8 +161,9 @@ cmake --build build/cpp -j 4
 - **参数**：`configs/redact.json` 的 `face_score_threshold`（默认 0.3）和 `face_nms_iou`（默认 0.3），不加 `--face-model` 时不起作用。0.3 是标注配置 `configs/labeling.json` 里人脸低置信区间 `face_low_score` [0.3, 0.5] 的下限、NMS 0.3 与 YuNet 老师相同，都是事先定的，**没有在留出视频上调过**。
 - **速度代价**（本机 Apple Silicon Mac，Release 构建，`sg_drive_2400s`，1920×1080 H.264，10 fps 关键帧，r3 学生模型，两个模型都在 CoreML 上）：每个关键帧的检测从约 23.8 ms 增加到约 35.2 ms，整体从约 175 fps 降到 144 fps，处理线程（main）成为瓶颈；YuNet 第一次在某个尺寸上运行时 CoreML 要编译，之后走缓存（`setup` 0.81 s）。YuNet 在 CPU 上 1920×1088 约 32 ms 一帧；4K 的输入像素是 1080p 的 4 倍，耗时大致同比增加。
 - **代价二：多打的码**：YuNet 独有的框（`src` 为 `yunet`）在 `sg_drive_2400s` 上有 2490 个（1199 个关键帧），分数中位数 0.38，其中有不是人脸的框，它们和真目标一样进入跟踪；两帧上恰好相隔较远的两个误检仍可能被第二轮宽松配对配上，插值框会在两者之间移动（见上面“已知的局限”里“第二轮配错”那一条）。下面的面积数字是 2026-10-19 的基线，用旧的插值和串行检测测得：`sg_drive_2400s` 上误打面积均值从 3.3% 增加到 4.2%，95 分位从 6.8% 到 8.6%，个别帧（1 / 150 个标注帧）超过 20%。
+  **其中最大的一类误检直接丢弃**（设计 §3.6）：YuNet 会把路面、楼群、隧道墙认成占画面很大的人脸，64 分钟的全片上超过画面 5% 的人脸框有 81 个，全部来自 YuNet，分数 0.30–0.58，个别帧的打码面积因此超过 30%（全片最大 40.9%）。所以类别为 `face`、框本身（外扩之前）的面积超过画面 `large_face_area_fraction`（默认 0.05）、分数又低于 `large_face_min_score`（默认 0.6，取 0 即关闭）的框一律丢弃：不进跟踪、不打码、不写 `detections.jsonl`，按类别判断，与来源无关，合并框按合并后的框和分数判断；丢了几个写在 `stats.json` 的 `large_faces_dropped` 和统计行的 `large faces dropped` 里（`detections` 只数留下的框）。代价是离镜头很近、分数又低于 0.6 的真人脸会漏；行车视频里人脸占画面 5% 以上很少见，YuNet 对这么大的真脸给分通常很高。
 
-运行结束打印的统计行依次是输出文件、帧数与检测/打码数量、检测频率（`detect rate`：实际每秒检测次数、每隔几帧、视频帧率）、检测后端、编码器、音频与被丢弃的流、准备时间（`setup`）、各阶段帧率（`decode`、`main`（括号里是它的 detect / track / mosaic 分解）、`encode`）、解码错误数和总耗时。
+运行结束打印的统计行依次是输出文件、帧数与检测/打码数量（检测数后面是被丢弃的大人脸个数 `large faces dropped`，为 0 也显示）、检测频率（`detect rate`：实际每秒检测次数、每隔几帧、视频帧率）、检测后端、编码器、音频与被丢弃的流、准备时间（`setup`）、各阶段帧率（`decode`、`main`（括号里是它的 detect / track / mosaic 分解）、`encode`）、解码错误数和总耗时。
 
 退出码：0 成功，1 处理失败，2 参数错误（含无法读取或非法的 `--config`），3 输出目录已存在（或存在但不是 `vc_redact` 的输出）。
 
