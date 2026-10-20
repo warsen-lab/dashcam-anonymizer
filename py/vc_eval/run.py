@@ -241,6 +241,9 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
             for e in coverage.excluded
         ],
         "stages": stats.get("stages", {}),
+        # the rate vc_redact actually ran at (None in a stats.json written before it recorded them)
+        "detect_fps_actual": stats.get("detect_fps_actual"),
+        "keyframe_stride": stats.get("keyframe_stride"),
         "elapsed_s": stats.get("elapsed_s"),
         "setup_s": stats.get("setup_s"),
         "frames": stats.get("frames"),

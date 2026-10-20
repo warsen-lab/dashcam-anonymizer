@@ -162,7 +162,7 @@ def evaluate_viewing(masks_path: Path, width: int, height: int, *, require_insid
             if require_inside and any(x1 < 0 or y1 < 0 or x2 > width or y2 > height for x1, y1, x2, y2, _ in boxes):
                 raise ValueError(
                     f"{masks_path} line {n}: a box extends beyond the {width}x{height} picture; "
-                    "give the video's real size (display size for rotated video)"
+                    "give the video's real size: the coded width and height ffprobe reports for the video stream (not swapped for rotation)"
                 )
             plain, screen = _rasterise(boxes, width, height, rows, cols)
             box_areas.append(np.count_nonzero(plain) / cells)

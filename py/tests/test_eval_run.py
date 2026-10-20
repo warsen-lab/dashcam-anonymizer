@@ -524,6 +524,22 @@ def test_the_default_recall_target_is_named_in_the_summary(tmp_path, monkeypatch
     assert "- P1 召回目标：人脸 ≥ 99%，车牌 ≥ 99%" in md
 
 
+def test_a_run_entry_records_the_detection_rate_vc_redact_actually_used(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], stats_extra={"detect_fps_actual": 10.0, "keyframe_stride": 6}))
+    assert [(r["fps"], r["detect_fps_actual"], r["keyframe_stride"]) for r in summary["runs"]] == [(5, 10.0, 6), (10, 10.0, 6)]
+    on_disk = json.loads((tmp_path / "report" / "summary.json").read_text())
+    assert on_disk["runs"][0]["detect_fps_actual"] == 10.0 and on_disk["runs"][0]["keyframe_stride"] == 6
+
+
+def test_a_run_entry_of_an_old_stats_json_has_no_detection_rate(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))  # a stats.json without detect_fps_actual and keyframe_stride
+    assert all(r["detect_fps_actual"] is None and r["keyframe_stride"] is None for r in summary["runs"])
+
+
 def test_the_candidate_line_and_the_cli_do_not_claim_more_than_p1_to_p3(tmp_path, monkeypatch, capsys):
     _setup(tmp_path)
     _python_dets(monkeypatch)

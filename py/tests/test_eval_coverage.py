@@ -935,6 +935,21 @@ def test_a_class_passes_at_its_own_recall_target(tmp_path):
     assert lowered.class_passed("face")  # 19 / 20 is exactly 95 %
 
 
+def test_each_class_is_judged_against_its_own_recall_target(tmp_path):
+    frames = _frames(tmp_path, "a", list(range(20)))
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    plate = Box("plate", 300, 300, 360, 320, src="teacher_owlv2")
+    labels = _labels(tmp_path, "a", {fr: [face, plate] for fr in range(20)})
+    # both classes are covered in 19 of 20 frames: 95 %, above a 0.95 bar and below the default 0.99 one
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {fr: [face, plate] for fr in range(1, 20)}, list(range(20)))
+    face_only = evaluate_coverage(frames, labels, masks, {"face": 0.95})
+    assert face_only.recall_targets == {"face": 0.95, "plate": 0.99}
+    assert face_only.class_passed("face") and not face_only.class_passed("plate")
+    plate_only = evaluate_coverage(frames, labels, masks, {"plate": 0.95})
+    assert plate_only.recall_targets == {"face": 0.99, "plate": 0.95}
+    assert plate_only.class_passed("plate") and not plate_only.class_passed("face")
+
+
 def test_pooling_needs_the_same_recall_targets():
     def classes():
         return {c: _empty_class(H) for c in ("face", "plate")}
