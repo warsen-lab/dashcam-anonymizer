@@ -52,18 +52,28 @@ def spot_fps(summary: dict) -> float:
     return chosen if chosen is not None else min(p["fps"] for p in summary["pooled"])
 
 
-def _thin_samples(coverage: dict) -> list[tuple[str, dict]]:
+def _target_text(target: float) -> str:
+    return f"{target * 100:g}%"
+
+
+def _targets(coverage: dict) -> dict[str, float]:
+    """P1's bar per class; summaries written before recall targets existed used CLASS_PASS for every class."""
+    return coverage.get("recall_targets") or dict.fromkeys(LABEL_CLASSES, CLASS_PASS)
+
+
+def _thin_samples(coverage: dict) -> list[tuple[str, dict, float]]:
     """Classes that pass P1 although their sample cannot prove it: the lower end of the 95 % interval is under the bar."""
+    targets = _targets(coverage)
     return [
-        (cls, coverage[cls])
+        (cls, coverage[cls], targets[cls])
         for cls in LABEL_CLASSES
-        if coverage[cls]["total"] and coverage[cls]["value"] >= CLASS_PASS and coverage[cls]["ci"][0] < CLASS_PASS
+        if coverage[cls]["total"] and coverage[cls]["value"] >= targets[cls] and coverage[cls]["ci"][0] < targets[cls]
     ]
 
 
-def _thin_sample_line(cls: str, rate: dict) -> str:
+def _thin_sample_line(cls: str, rate: dict, target: float) -> str:
     lead = "即使全部遮住" if rate["hits"] == rate["total"] else f"实测 {rate['hits']}/{rate['total']}"
-    return f"- {CLS_NAME[cls]} n={rate['total']}：{lead}，95% 区间下限只有 {rate['ci'][0]:.1%}，样本不足以证明 ≥ {CLASS_PASS:.0%}"
+    return f"- {CLS_NAME[cls]} n={rate['total']}：{lead}，95% 区间下限只有 {rate['ci'][0]:.1%}，样本不足以证明 ≥ {_target_text(target)}"
 
 
 def _candidate_line(summary: dict) -> str:
@@ -76,9 +86,15 @@ def _candidate_line(summary: dict) -> str:
         line += f"（没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 空洞满足；空间上的薄弱点只能靠 P4 抽查把关）"
     thin = _thin_samples(coverage)
     if thin:
-        names = "、".join(CLS_NAME[cls] for cls, _ in thin)
-        line += f"；注意：{names}的目标数太少，样本量不足以证明 ≥ {CLASS_PASS:.0%}（见覆盖率表下的提醒）"
+        names = "、".join(CLS_NAME[cls] for cls, _, _ in thin)
+        line += f"；注意：{names}的目标数太少，样本量不足以证明达到召回目标（见覆盖率表下的提醒）"
     return line
+
+
+def _target_line(summary: dict) -> str:
+    targets = _targets(summary["pooled"][0]["coverage"]) if summary["pooled"] else dict.fromkeys(LABEL_CLASSES, CLASS_PASS)
+    shown = "，".join(f"{CLS_NAME[cls]} ≥ {_target_text(targets[cls])}" for cls in LABEL_CLASSES)
+    return f"- P1 召回目标：{shown}（`vc_eval run --recall-target` 设定，默认各 {_target_text(CLASS_PASS)}）"
 
 
 def _head_lines(summary: dict) -> list[str]:
@@ -89,6 +105,7 @@ def _head_lines(summary: dict) -> list[str]:
         f"- 模型：{summary['model']}；人脸模型：{summary.get('face_model') or '无'}；"
         f"检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
         _candidate_line(summary),
+        _target_line(summary),
         "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
         "- 覆盖率读的是 `masks.jsonl`（`vc_redact` 声明要打码的框），不是打码后视频的像素：马赛克有没有真的打在画面上，"
         "不是这份报告测的，只由 C++ 单元测试和 P4（你看 index.html）验证。",
@@ -107,7 +124,7 @@ def _coverage_lines(summary: dict) -> list[str]:
             lines.append(f"| {r['stem']} | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | — |")
         c = _pooled_at(summary, fps)["coverage"]
         lines.append(f"| 合计 | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
-        thin = [_thin_sample_line(cls, rate) for cls, rate in _thin_samples(c)]
+        thin = [_thin_sample_line(cls, rate, target) for cls, rate, target in _thin_samples(c)]
         if thin:
             lines += ["", *thin]
     lines += ["", "合计行是各段目标数相加后的覆盖率，P1 / P2 以它为准，“通过”一栏只在合计行；各段行仅供参考。"]

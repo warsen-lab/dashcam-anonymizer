@@ -43,6 +43,39 @@ EXCLUDE_IOU = 0.5  # a reference box is excluded by a row of its frame and class
 EXCLUSION_TIERS = ("confident", "uncertain", "best_effort")  # the tiers a reference box can have counted in
 
 
+def default_recall_targets() -> dict[str, float]:
+    """P1's bar per class: CLASS_PASS (the main design's production target) unless the run sets another."""
+    return dict.fromkeys(LABEL_CLASSES, CLASS_PASS)
+
+
+def parse_recall_targets(text: str) -> dict[str, float]:
+    """"face=0.95,plate=0.98" -> {"face": 0.95, "plate": 0.98}; a class left out keeps CLASS_PASS.
+
+    Raises ValueError for an unknown class, a part without "=", a class given twice, or a value that is not a number in
+    (0, 1].
+    """
+    targets = default_recall_targets()
+    seen: set[str] = set()
+    for part in (p.strip() for p in text.split(",")):
+        if not part:
+            continue
+        cls, sep, value = part.partition("=")
+        cls = cls.strip()
+        if not sep or cls not in LABEL_CLASSES:
+            raise ValueError(f"--recall-target expects <class>=<value> with class {' or '.join(LABEL_CLASSES)}, got {part!r}")
+        if cls in seen:
+            raise ValueError(f"--recall-target gives {cls} twice")
+        try:
+            target = float(value)
+        except ValueError:
+            raise ValueError(f"--recall-target {cls}: {value.strip()!r} is not a number") from None
+        if not 0 < target <= 1:  # NaN fails too
+            raise ValueError(f"--recall-target {cls}: {value.strip()} must be in (0, 1]")
+        seen.add(cls)
+        targets[cls] = target
+    return targets
+
+
 @dataclass(frozen=True)
 class Miss:
     frame: int
@@ -104,10 +137,11 @@ class CoverageReport:
     excluded: list[Exclusion] = field(default_factory=list)  # reference boxes excluded_refs.csv left out
     exclusion_rows: int = 0  # rows in excluded_refs.csv
     unmatched_exclusions: list[ExcludedRef] = field(default_factory=list)  # rows that matched no reference box
+    recall_targets: dict[str, float] = field(default_factory=default_recall_targets)  # P1's bar per class
 
     def class_passed(self, cls: str) -> bool:
         rate = self.classes[cls].rate
-        return rate.total > 0 and rate.value >= CLASS_PASS
+        return rate.total > 0 and rate.value >= self.recall_targets[cls]
 
     def weakest_cell(self) -> tuple[str, int, int, Rate] | None:
         cells = [
@@ -210,13 +244,19 @@ def _drop_excluded(
     return kept
 
 
-def evaluate_coverage(frames_dir: Path, labels_dir: Path, masks_path: Path) -> CoverageReport:
+def evaluate_coverage(
+    frames_dir: Path, labels_dir: Path, masks_path: Path, recall_targets: dict[str, float] | None = None
+) -> CoverageReport:
+    """recall_targets: P1's bar per class (default_recall_targets() for the classes it leaves out)."""
     labels = load_label_inputs(frames_dir, labels_dir)
     video, width, height, targets = labels.video, labels.width, labels.height, labels.targets
     mask_videos, masks = read_masks(masks_path)
     if mask_videos - {video}:
         raise ValueError(f"{masks_path} is for {', '.join(sorted(mask_videos))}, not {video}")
-    report = CoverageReport(video, len(labels.used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES})
+    report = CoverageReport(
+        video, len(labels.used), width, height, {c: _empty_class(height) for c in LABEL_CLASSES},
+        recall_targets={**default_recall_targets(), **(recall_targets or {})},
+    )
     stray = []
     excluded_by_frame: dict[int, list[ExcludedRef]] = {}
     for row in labels.excluded:
@@ -272,7 +312,8 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
     The uncertain rates are summed too. Misses (confident and uncertain) and exclusions (matched and unmatched rows) are
     concatenated (their frame numbers belong to their own segment), `stray_max` and `stray_p95` are the worst of the
     segments, `stray_mean` is weighted by the number of labelled frames, `video` joins the names with commas. Reports
-    of different frame sizes are refused: their size bins and heatmap cells do not line up.
+    of different frame sizes are refused: their size bins and heatmap cells do not line up. So are reports judged
+    against different recall targets: the pooled verdict would have no single bar.
     """
     if not reports:
         raise ValueError("no coverage reports to pool")
@@ -281,6 +322,8 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
         shown = ", ".join(f"{r.video} {r.width}x{r.height}" for r in reports)
         raise ValueError(f"cannot pool coverage of different frame sizes ({shown})")
     first = reports[0]
+    if any(r.recall_targets != first.recall_targets for r in reports):
+        raise ValueError("cannot pool coverage judged against different recall targets")
     classes = {}
     for cls in LABEL_CLASSES:
         parts = [r.classes[cls] for r in reports]
@@ -307,4 +350,5 @@ def pool(reports: list[CoverageReport]) -> CoverageReport:
         stray_max=max(r.stray_max for r in reports),
         stray_mean=sum(r.stray_mean * r.frames for r in reports) / frames if frames else 0.0,
         stray_p95=max(r.stray_p95 for r in reports),
+        recall_targets=dict(first.recall_targets),
     )

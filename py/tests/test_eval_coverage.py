@@ -8,7 +8,7 @@ import pytest
 
 from vc_label.contracts import Box, Detection, write_jsonl
 from vc_label.rules import TEMPORAL_SOURCE
-from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, pool
+from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, parse_recall_targets, pool
 from vc_eval.metrics import Rate, heat_cell
 from vc_eval.records import detections_by_frame, read_excluded, read_masks, read_uncertain
 from vc_eval.temporal import evaluate_temporal
@@ -891,3 +891,56 @@ def test_rows_that_all_overlap_one_reference_box_are_all_matched_and_the_closest
     r = evaluate_coverage(frames, labels, _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0]))
     assert [e.reason for e in r.excluded] == ["exactly"]
     assert r.unmatched_exclusions == [] and r.exclusion_rows == 3
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("", {"face": 0.99, "plate": 0.99}),
+        ("face=0.95,plate=0.98", {"face": 0.95, "plate": 0.98}),
+        (" plate = 0.98 ", {"face": 0.99, "plate": 0.98}),
+        ("face=1", {"face": 1.0, "plate": 0.99}),
+    ],
+)
+def test_parse_recall_targets(text, expected):
+    assert parse_recall_targets(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("car=0.9", "car"),
+        ("face", "<class>=<value>"),
+        ("face=0.9,face=0.95", "twice"),
+        ("face=high", "not a number"),
+        ("face=0", r"\(0, 1\]"),
+        ("plate=1.5", r"\(0, 1\]"),
+        ("face=nan", r"\(0, 1\]"),
+    ],
+)
+def test_parse_recall_targets_refuses_bad_text(text, message):
+    with pytest.raises(ValueError, match=message):
+        parse_recall_targets(text)
+
+
+def test_a_class_passes_at_its_own_recall_target(tmp_path):
+    frames = _frames(tmp_path, "a", list(range(20)))
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    labels = _labels(tmp_path, "a", {fr: [face] for fr in range(20)})
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {fr: [face] for fr in range(1, 20)}, list(range(20)))  # 19 of 20
+    default = evaluate_coverage(frames, labels, masks)
+    assert default.recall_targets == {"face": 0.99, "plate": 0.99} and not default.class_passed("face")
+    lowered = evaluate_coverage(frames, labels, masks, {"face": 0.95})
+    assert lowered.recall_targets == {"face": 0.95, "plate": 0.99}
+    assert lowered.class_passed("face")  # 19 / 20 is exactly 95 %
+
+
+def test_pooling_needs_the_same_recall_targets():
+    def classes():
+        return {c: _empty_class(H) for c in ("face", "plate")}
+
+    a = CoverageReport("a.mp4", 1, W, H, classes(), recall_targets={"face": 0.95, "plate": 0.98})
+    b = CoverageReport("b.mp4", 1, W, H, classes())
+    with pytest.raises(ValueError, match="different recall targets"):
+        pool([a, b])
+    assert pool([a, a]).recall_targets == {"face": 0.95, "plate": 0.98}

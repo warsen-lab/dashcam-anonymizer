@@ -50,6 +50,7 @@ class RunConfig:
     seed: int = 0
     overwrite: bool = False  # clear a non-empty `out` first instead of refusing it
     face_model: Path | None = None  # vc_train yunet model dir, passed to every vc_redact run as --face-model
+    recall_targets: dict[str, float] | None = None  # P1's bar per class; None: CLASS_PASS for every class
 
 
 def _same_or_below(path: Path, parent: Path) -> bool:
@@ -131,6 +132,10 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError(f"detection rates must be finite numbers from {MIN_DETECT_FPS:g} to {MAX_DETECT_FPS:g} fps")
     if len({float(fps) for fps in cfg.fps_values}) != len(cfg.fps_values):
         raise ValueError("a detection rate is listed twice")
+    if cfg.recall_targets is not None:
+        bad = {cls: v for cls, v in cfg.recall_targets.items() if cls not in LABEL_CLASSES or not 0 < v <= 1}
+        if bad:
+            raise ValueError(f"recall targets must be {' / '.join(LABEL_CLASSES)} in (0, 1], got {bad}")
     if cfg.consistency_count < 1 or cfg.spot_frames < 0:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
     _validate_out(cfg)
@@ -204,13 +209,14 @@ def coverage_json(c: CoverageReport) -> dict:
         "unmatched_rows": len(c.unmatched_exclusions),
         "by_class": {cls: {tier: by_tier[(cls, tier)] for tier in EXCLUSION_TIERS} for cls in LABEL_CLASSES},
     }
+    out["recall_targets"] = dict(c.recall_targets)
     out["passed"] = c.passed()
     return out
 
 
 def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport, ViewingReport]:
     run_dir = _fps_dir(cfg, fps) / stem
-    coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl")
+    coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl", cfg.recall_targets)
     temporal = evaluate_temporal(cfg.redacted_root / "dense" / stem / "detections.jsonl", run_dir / "masks.jsonl", coverage.height)
     integrity = check_integrity(cfg.videos / f"{stem}.mp4", run_dir / f"{stem}.redacted.mp4")
     viewing = evaluate_viewing(run_dir / "masks.jsonl", coverage.width, coverage.height)

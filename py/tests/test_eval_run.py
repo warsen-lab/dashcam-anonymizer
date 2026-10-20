@@ -503,6 +503,27 @@ def test_no_sample_size_warning_for_a_class_that_fails_or_has_no_targets(tmp_pat
     assert "样本量不足以证明" not in md.split("- 候选检测频率")[1].splitlines()[0]
 
 
+def test_recall_targets_set_the_p1_bar_per_class(tmp_path, monkeypatch):
+    summary = _grid_run(tmp_path, monkeypatch, missed_faces=5, recall_targets={"face": 0.95, "plate": 0.98})
+    pooled = [p for p in summary["pooled"] if p["fps"] == 5][0]
+    assert (pooled["coverage"]["face"]["hits"], pooled["coverage"]["face"]["total"]) == (195, 200)
+    assert pooled["coverage"]["recall_targets"] == {"face": 0.95, "plate": 0.98}
+    assert pooled["passed"] is True and summary["chosen_fps"] == 5  # 97.5 % clears 95 %; the default 99 % would not
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- P1 召回目标：人脸 ≥ 95%，车牌 ≥ 98%" in md
+    lo = f"{wilson_interval(195, 200)[0]:.1%}"
+    assert f"- 人脸 n=200：实测 195/200，95% 区间下限只有 {lo}，样本不足以证明 ≥ 95%" in md
+
+
+def test_the_default_recall_target_is_named_in_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["runs"][0]["coverage"]["recall_targets"] == {"face": 0.99, "plate": 0.99}
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- P1 召回目标：人脸 ≥ 99%，车牌 ≥ 99%" in md
+
+
 def test_the_candidate_line_and_the_cli_do_not_claim_more_than_p1_to_p3(tmp_path, monkeypatch, capsys):
     _setup(tmp_path)
     _python_dets(monkeypatch)
@@ -934,6 +955,8 @@ def test_report_and_redacted_dirs_anywhere_under_the_frames_root_are_refused(tmp
         ({"fps_values": [5, 5.0]}, "twice"),
         ({"stems": [STEM, STEM]}, "twice"),
         ({"stems": ["missing"]}, "missing.mp4"),
+        ({"recall_targets": {"car": 0.9}}, "recall targets"),
+        ({"recall_targets": {"face": 1.5}}, "recall targets"),
     ],
 )
 def test_bad_configuration_is_refused_before_any_run(tmp_path, kw, message):
@@ -1017,6 +1040,9 @@ def test_cli_coverage_and_errors(tmp_path, capsys):
     assert json.loads((tmp_path / "c.json").read_text())["face"]["total"] == 5
     assert main(["coverage", "--frames", str(tmp_path / "nope"), "--labels", str(tmp_path), "--masks", str(masks)]) == 2
     assert "vc_eval:" in capsys.readouterr().err
+    args = ["coverage", "--frames", str(tmp_path / "frames" / STEM), "--labels", str(tmp_path / "labels" / STEM), "--masks", str(masks)]
+    assert main([*args, "--recall-target", "plate=x"]) == 2
+    assert "--recall-target" in capsys.readouterr().err
 
 
 def test_cli_coverage_passes_with_covering_masks(tmp_path, capsys):
@@ -1102,12 +1128,18 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert cfg.overwrite is False
     assert cfg.vc_redact == Path("build/cpp-release/vc_redact") and cfg.config == Path("configs/redact.json")
     assert cfg.redacted_root == Path("data/redacted")
+    assert cfg.recall_targets == {"face": 0.99, "plate": 0.99}
     printed = capsys.readouterr().out
     assert "10 fps" in printed and str(out / "index.html") in printed
 
     assert main([*argv, "--overwrite"]) == 0 and seen[-1].overwrite is True
     # a second config gets its own videos, or its run would overwrite the ones the first report links to
     assert main([*argv, "--redacted-root", str(tmp_path / "tuned")]) == 0 and seen[-1].redacted_root == tmp_path / "tuned"
+    assert main([*argv, "--recall-target", "face=0.95,plate=0.98"]) == 0
+    assert seen[-1].recall_targets == {"face": 0.95, "plate": 0.98}
+    capsys.readouterr()
+    assert main([*argv, "--recall-target", "face=2"]) == 2
+    assert "--recall-target" in capsys.readouterr().err
     capsys.readouterr()
 
     outcome["chosen_fps"] = None
