@@ -11,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -277,6 +278,152 @@ TEST(RedactJob, MasksALowScoreFaceOnlyOnceItIsConfirmed) {
     EXPECT_EQ(record.at("boxes").size(), frame >= 24 && frame < 36 ? 1u : 0u) << "frame " << frame;
   }
   EXPECT_EQ(s.maskedFrames, 12);
+}
+
+// ---- Large faces need a higher score (spec 2026-10-19 §3.6). The video is 640 x 360 (230,400 px), keyframes every
+// 6 frames; every box is detected on keyframe 12 only, so a kept box is masked on frames 12 to 17 (detected, then
+// held).
+
+struct FakeBox {
+  const char* cls;
+  double x1;
+  double y1;
+  double x2;
+  double y2;
+  double score;
+};
+
+// Runs the job over fake detections that hold `boxes` on frame 12 and nothing else.
+RedactStats runWithBoxesOnOneKeyframe(const std::string& name, const std::vector<FakeBox>& boxes,
+                                      const std::function<void(RedactConfig&)>& configure = {}) {
+  RedactOptions o = baseOptions(name);
+  if (configure) configure(o.config);
+  const fs::path fake = test::tmpDir() / (name + ".jsonl");
+  {
+    std::ofstream out(fake);
+    for (const FakeBox& b : boxes) {
+      out << R"({"video":"noisy_audio.mp4","frame":12,"pts_ms":0,"cls":")" << b.cls << R"(","x1":)" << b.x1
+          << R"(,"y1":)" << b.y1 << R"(,"x2":)" << b.x2 << R"(,"y2":)" << b.y2 << R"(,"score":)" << b.score
+          << R"(,"src":"fake"})" << '\n';
+    }
+  }
+  o.fakeDetections = fake;
+  return runRedact(o);
+}
+
+nlohmann::json statsJson(const RedactStats& s) {
+  std::ifstream in(s.outputDir / "stats.json");
+  return nlohmann::json::parse(in);
+}
+
+// The cls and frame of every detections.jsonl line.
+std::vector<nlohmann::json> detectionLines(const RedactStats& s) {
+  std::vector<nlohmann::json> out;
+  std::ifstream in(s.outputDir / "detections.jsonl");
+  for (std::string line; std::getline(in, line);) out.push_back(nlohmann::json::parse(line));
+  return out;
+}
+
+size_t maskedBoxCount(const RedactStats& s) {
+  size_t n = 0;
+  std::ifstream in(s.outputDir / "masks.jsonl");
+  for (std::string line; std::getline(in, line);) n += nlohmann::json::parse(line).at("boxes").size();
+  return n;
+}
+
+// A face of 30 % of the frame (320 x 216 px of 640 x 360) scoring 0.5 is a giant false positive: dropped before the
+// timeline, so it is not masked, not in detections.jsonl and not in stats.detections; it is counted.
+TEST(RedactJob, DropsALargeFaceBelowTheMinimumScore) {
+  const RedactStats s = runWithBoxesOnOneKeyframe("redact_large_face_dropped", {{"face", 100, 50, 420, 266, 0.5}});
+  EXPECT_EQ(s.largeFacesDropped, 1);
+  EXPECT_EQ(s.detections, 0);
+  EXPECT_EQ(s.maskedFrames, 0);
+  EXPECT_EQ(s.maskBoxes, 0);
+  EXPECT_EQ(maskedBoxCount(s), 0u);
+  EXPECT_TRUE(detectionLines(s).empty());
+  const nlohmann::json stats = statsJson(s);
+  EXPECT_EQ(stats.at("large_faces_dropped").get<int>(), 1);
+  EXPECT_EQ(stats.at("detections").get<int>(), 0);
+  EXPECT_DOUBLE_EQ(stats.at("config").at("large_face_area_fraction").get<double>(), 0.05);
+  EXPECT_DOUBLE_EQ(stats.at("config").at("large_face_min_score").get<double>(), 0.6);
+}
+
+// The same face scoring 0.7, or exactly the minimum (below is strict), is kept and masked.
+TEST(RedactJob, KeepsALargeFaceAtOrAboveTheMinimumScore) {
+  for (const double score : {0.7, 0.6}) {
+    SCOPED_TRACE("score " + std::to_string(score));
+    const RedactStats s = runWithBoxesOnOneKeyframe("redact_large_face_kept", {{"face", 100, 50, 420, 266, score}});
+    EXPECT_EQ(s.largeFacesDropped, 0);
+    EXPECT_EQ(s.detections, 1);
+    EXPECT_EQ(s.maskedFrames, 6);
+    EXPECT_EQ(detectionLines(s).size(), 1u);
+    EXPECT_EQ(statsJson(s).at("large_faces_dropped").get<int>(), 0);
+  }
+}
+
+// Only large faces are held to the higher score: a small face at 0.5 and a plate of 30 % of the frame at 0.5 stay.
+TEST(RedactJob, KeepsASmallFaceAndALargePlateAtScoreHalf) {
+  const RedactStats s = runWithBoxesOnOneKeyframe(
+      "redact_large_face_other_boxes", {{"face", 100, 100, 200, 180, 0.5}, {"plate", 300, 50, 620, 266, 0.5}});
+  EXPECT_EQ(s.largeFacesDropped, 0);
+  EXPECT_EQ(s.detections, 2);
+  EXPECT_EQ(s.maskedFrames, 6);
+  EXPECT_EQ(s.maskBoxes, 12);
+  const std::vector<nlohmann::json> lines = detectionLines(s);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0].at("cls").get<std::string>(), "face");
+  EXPECT_EQ(lines[1].at("cls").get<std::string>(), "plate");
+}
+
+// "Exceeds" is strict, and the area is the box's own: at a quarter of the frame, 320 x 180 is kept and 321 x 180 is
+// dropped.
+TEST(RedactJob, ABoxExactlyAtTheAreaLimitIsKept) {
+  const RedactStats s = runWithBoxesOnOneKeyframe(
+      "redact_large_face_limit", {{"face", 0, 0, 320, 180, 0.5}, {"face", 0, 180, 321, 360, 0.5}},
+      [](RedactConfig& c) { c.largeFaceAreaFraction = 0.25; });
+  EXPECT_EQ(s.largeFacesDropped, 1);
+  EXPECT_EQ(s.detections, 1);
+  const std::vector<nlohmann::json> lines = detectionLines(s);
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_EQ(lines[0].at("x2").get<int>(), 320);
+  EXPECT_EQ(lines[0].at("y1").get<int>(), 0);
+  EXPECT_EQ(s.maskedFrames, 6);
+}
+
+// large_face_min_score 0 switches the rule off; so does a bigger area fraction.
+TEST(RedactJob, TheLargeFaceRuleCanBeSwitchedOff) {
+  const std::vector<FakeBox> giant = {{"face", 100, 50, 420, 266, 0.31}};
+  const RedactStats off =
+      runWithBoxesOnOneKeyframe("redact_large_face_off", giant, [](RedactConfig& c) {
+        c.largeFaceMinScore = 0.0f;
+        c.faceConfirmScore = 0.0f;
+      });
+  EXPECT_EQ(off.largeFacesDropped, 0);
+  EXPECT_EQ(off.detections, 1);
+  EXPECT_EQ(off.maskedFrames, 6);
+  const RedactStats wide = runWithBoxesOnOneKeyframe("redact_large_face_wide", giant, [](RedactConfig& c) {
+    c.largeFaceAreaFraction = 1.0;
+    c.faceConfirmScore = 0.0f;
+  });
+  EXPECT_EQ(wide.largeFacesDropped, 0);
+  EXPECT_EQ(wide.maskedFrames, 6);
+}
+
+TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
+  RedactStats s;
+  s.frames = 600;
+  s.keyframes = 100;
+  s.detections = 250;
+  s.largeFacesDropped = 3;
+  s.maskedFrames = 400;
+  s.maskBoxes = 520;
+  const std::string summary = redactSummary(s);
+  EXPECT_NE(summary.find("frames:        600 (keyframes 100, detections 250, large faces dropped 3, "
+                         "masked 400 frames / 520 boxes)\n"),
+            std::string::npos)
+      << summary;
+  s.largeFacesDropped = 0;
+  EXPECT_NE(redactSummary(s).find("large faces dropped 0,"), std::string::npos);  // shown even when 0
 }
 
 TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {

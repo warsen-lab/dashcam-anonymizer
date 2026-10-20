@@ -182,6 +182,39 @@ std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int he
   return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 
+// A keyframe's detections after the large-face rule, and how many it dropped.
+struct LargeFaceFilter {
+  std::vector<SourcedBox> kept;
+  int64_t dropped = 0;
+};
+
+// Drops every face box whose own area exceeds config.largeFaceAreaFraction of the width x height frame and whose
+// score is below config.largeFaceMinScore (spec 2026-10-19 §3.6: giant false positives on road and buildings). Faces
+// are the boxes whose class name in `classes` is "face", whichever detector found them; other classes, smaller or
+// higher-scoring faces are all kept, in order. "Exceeds" and "below" are strict.
+LargeFaceFilter dropLargeLowScoreFaces(std::vector<SourcedBox> found, const std::vector<std::string>& classes,
+                                       const RedactConfig& config, int width, int height) {
+  const auto faceClass = std::find(classes.begin(), classes.end(), "face");
+  if (faceClass == classes.end()) return {std::move(found), 0};
+  const auto face = static_cast<int>(faceClass - classes.begin());
+  const double limit = config.largeFaceAreaFraction * static_cast<double>(width) * static_cast<double>(height);
+  const auto isDropped = [&](const SourcedBox& b) {
+    const double w = std::max(0.0, static_cast<double>(b.box.x2) - static_cast<double>(b.box.x1));
+    const double h = std::max(0.0, static_cast<double>(b.box.y2) - static_cast<double>(b.box.y1));
+    return b.box.cls == face && w * h > limit && b.box.score < config.largeFaceMinScore;
+  };
+  LargeFaceFilter out;
+  out.kept.reserve(found.size());
+  for (SourcedBox& b : found) {
+    if (isDropped(b)) {
+      ++out.dropped;
+    } else {
+      out.kept.push_back(std::move(b));
+    }
+  }
+  return out;
+}
+
 // Keyframe choice, detection, BoxTimeline and mosaic: everything between decode and encode.
 class Processor {
  public:
@@ -196,6 +229,8 @@ class Processor {
         masks_(masks),
         out_(out),
         stats_(stats),
+        width_(info.width),
+        height_(info.height),
         timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
         blocks_(options.config.mosaic) {}
 
@@ -214,11 +249,16 @@ class Processor {
 
     const VideoFrame view = viewOf(item);
     const Clock::time_point detectStarted = Clock::now();
-    const std::vector<SourcedBox> found = detector_.detectSourced(view);
+    std::vector<SourcedBox> detected = detector_.detectSourced(view);
     stats_.detect.busySec += secondsSince(detectStarted);
     ++stats_.detect.items;
     ++stats_.keyframes;
+    // Giant low-score faces never reach the timeline, detections.jsonl or the masks (spec 2026-10-19 §3.6).
+    const LargeFaceFilter filtered =
+        dropLargeLowScoreFaces(std::move(detected), detector_.classes(), options_.config, width_, height_);
+    const std::vector<SourcedBox>& found = filtered.kept;
     stats_.detections += static_cast<int64_t>(found.size());
+    stats_.largeFacesDropped += filtered.dropped;
     std::vector<Box> boxes;
     boxes.reserve(found.size());
     for (const SourcedBox& b : found) boxes.push_back(b.box);
@@ -317,6 +357,8 @@ class Processor {
   std::ostream& masks_;
   BoundedQueue<Item>& out_;
   RedactStats& stats_;
+  int width_;
+  int height_;
   BoxTimeline timeline_;
   TrackBlocks blocks_;
   bool sawKeyframe_ = false;
@@ -520,6 +562,7 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["frames"] = s.frames;
   j["keyframes"] = s.keyframes;
   j["detections"] = s.detections;
+  j["large_faces_dropped"] = s.largeFacesDropped;
   j["masked_frames"] = s.maskedFrames;
   j["mask_boxes"] = s.maskBoxes;
   j["decode_errors"] = s.decodeErrors;
@@ -575,10 +618,12 @@ std::vector<std::string> redactWarnings(const RedactStats& stats) {
 std::string redactSummary(const RedactStats& s) {
   const double fps = s.elapsedSec > 0 ? static_cast<double>(s.frames) / s.elapsedSec : 0;
   std::string out = "output:        " + s.video.string() + "\n";
-  out += formatted("frames:        %lld (keyframes %lld, detections %lld, masked %lld frames / %lld boxes)\n",
-                   static_cast<long long>(s.frames), static_cast<long long>(s.keyframes),
-                   static_cast<long long>(s.detections), static_cast<long long>(s.maskedFrames),
-                   static_cast<long long>(s.maskBoxes));
+  out += formatted(
+      "frames:        %lld (keyframes %lld, detections %lld, large faces dropped %lld, "
+      "masked %lld frames / %lld boxes)\n",
+      static_cast<long long>(s.frames), static_cast<long long>(s.keyframes), static_cast<long long>(s.detections),
+      static_cast<long long>(s.largeFacesDropped), static_cast<long long>(s.maskedFrames),
+      static_cast<long long>(s.maskBoxes));
   out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,
                    static_cast<long long>(s.keyframeStride), s.videoFps);
   out += "detector:      " + s.detector + "\n";

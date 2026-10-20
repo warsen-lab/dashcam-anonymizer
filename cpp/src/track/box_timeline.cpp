@@ -184,7 +184,10 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
   }
   takeGreedily(std::move(strict));
 
-  // Second pass, over what is left: both axes in the largest side of the two boxes, similar sizes only.
+  // Second pass, over what is left: both axes in the largest side of the two boxes, similar sizes only. A pair
+  // with either side below its class's confirm score is left to the first pass (spec §3.8): two far-apart
+  // low-score boxes are more likely two false positives than one target, and joining them sweeps a mask
+  // between them. A track's side is its last real detection (a ghost's, from before it was lost).
   std::vector<Candidate> loose;
   for (size_t i = 0; i < tracks_.size(); ++i) {
     if (usedTrack[i]) continue;
@@ -192,6 +195,7 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       const Box& b = next.boxes[j];
       if (usedNext[j] || a.cls != b.cls || !similarSizes(a, b)) continue;
+      if (needsConfirmation(tracks_[i].anchor) || needsConfirmation(b)) continue;
       const Point actual = centerOf(b);
       const double side = std::max({1.0, widthOf(a), heightOf(a), widthOf(b), heightOf(b)});
       const double cost = cheapest(tracks_[i], [&](Point p) {
@@ -280,6 +284,11 @@ void BoxTimeline::hold(std::vector<std::vector<MaskBox>>& masks, const std::vect
   }
 }
 
+void BoxTimeline::holdGhost(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames,
+                            const Track& track) {
+  for (size_t k = 0; k < frames.size(); ++k) emit(masks[k], track, track.box, Offset{}, MaskOrigin::Held);
+}
+
 TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const Keyframe& next) {
   requireFinite(next);
   if (!keyTime_) {
@@ -331,8 +340,10 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
       }
     } else if (!track.ghost && masked) {
       hold(out.masks, frames, prevTime, track, steps);
+    } else if (track.ghost && config_.holdLostGhosts) {
+      holdGhost(out.masks, frames, track);  // lost for the second keyframe in a row: held, then it ends (spec §3.7)
     }
-    // An unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
+    // Otherwise an unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
   }
 
   // The boxes of `next` in order (a matched one continues its track, confirmed), then the ghosts of the
@@ -389,7 +400,11 @@ TimelineOutput BoxTimeline::finish(const std::vector<FrameTime>& frames) {
   const double span = frames.empty() ? 0.0 : static_cast<double>(frames.back().index - prevTime.index + 1);
   for (const Track& track : tracks_) {
     if (track.keyBox >= 0) out.confirmed[static_cast<size_t>(track.keyBox)] = track.confirmed;
-    if (!track.ghost && track.confirmed) hold(out.masks, frames, prevTime, track, span);
+    if (!track.ghost && track.confirmed) {
+      hold(out.masks, frames, prevTime, track, span);
+    } else if (track.ghost && config_.holdLostGhosts) {
+      holdGhost(out.masks, frames, track);
+    }
   }
   keyTime_.reset();
   tracks_.clear();

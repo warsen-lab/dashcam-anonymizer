@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
@@ -13,13 +14,14 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 16> kKeys = {
+constexpr std::array<std::string_view, 19> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
-    "plate_confirm_score"};
+    "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
+    "hold_lost_ghosts"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -54,6 +56,30 @@ int mosaicSetting(const nlohmann::json& j, const char* key, int fallback, const 
   return static_cast<int>(value);
 }
 
+// The setting as a double: `key` must be a JSON number (absent: `fallback`); any other type is refused naming the key.
+double numberSetting(const nlohmann::json& j, const char* key, double fallback, const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end()) return fallback;
+  if (!it->is_number()) throw VcError(origin + ": " + key + " must be a number");
+  return it->get<double>();
+}
+
+// numberSetting() as a float; a finite number beyond the float range saturates (and then fails the range check)
+// instead of overflowing in the conversion.
+float floatSetting(const nlohmann::json& j, const char* key, float fallback, const std::string& origin) {
+  const double v = numberSetting(j, key, static_cast<double>(fallback), origin);
+  constexpr double kMax = std::numeric_limits<float>::max();
+  return static_cast<float>(std::isfinite(v) ? std::clamp(v, -kMax, kMax) : v);
+}
+
+// The setting as a bool: `key` must be a JSON boolean (not 0 / 1, not a string); absent: `fallback`.
+bool boolSetting(const nlohmann::json& j, const char* key, bool fallback, const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end()) return fallback;
+  if (!it->is_boolean()) throw VcError(origin + ": " + key + " must be true or false");
+  return it->get<bool>();
+}
+
 }  // namespace
 
 void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
@@ -75,6 +101,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.face.nmsIou), "face_nms_iou must be finite");
   require(std::isfinite(c.faceConfirmScore), "face_confirm_score must be finite");
   require(std::isfinite(c.plateConfirmScore), "plate_confirm_score must be finite");
+  require(std::isfinite(c.largeFaceAreaFraction), "large_face_area_fraction must be finite");
+  require(std::isfinite(c.largeFaceMinScore), "large_face_min_score must be finite");
   require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
           "detect_fps must be in [" + plainNumber(kMinDetectFps) + ", " + plainNumber(kMaxDetectFps) + "]");
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
@@ -94,6 +122,8 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.face.nmsIou > 0 && c.face.nmsIou <= 1, "face_nms_iou must be in (0, 1]");
   require(c.faceConfirmScore >= 0 && c.faceConfirmScore <= 1, "face_confirm_score must be in [0, 1]");
   require(c.plateConfirmScore >= 0 && c.plateConfirmScore <= 1, "plate_confirm_score must be in [0, 1]");
+  require(c.largeFaceAreaFraction > 0 && c.largeFaceAreaFraction <= 1, "large_face_area_fraction must be in (0, 1]");
+  require(c.largeFaceMinScore >= 0 && c.largeFaceMinScore <= 1, "large_face_min_score must be in [0, 1]");
   require(c.face.topK >= 1, "the face model's top_k must be >= 1");
 }
 
@@ -134,6 +164,9 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   } catch (const nlohmann::json::exception& e) {
     throw VcError(origin + ": " + e.what());
   }
+  c.largeFaceAreaFraction = numberSetting(j, "large_face_area_fraction", c.largeFaceAreaFraction, origin);
+  c.largeFaceMinScore = floatSetting(j, "large_face_min_score", c.largeFaceMinScore, origin);
+  c.timeline.holdLostGhosts = boolSetting(j, "hold_lost_ghosts", c.timeline.holdLostGhosts, origin);
   c.mosaic.minBlockPx = mosaicSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, origin);
   c.mosaic.blocksPerLongSide = mosaicSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, origin);
   validateRedactConfig(c, origin);
@@ -166,6 +199,9 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["face_nms_iou"] = jsonFloat(c.face.nmsIou);
   j["face_confirm_score"] = jsonFloat(c.faceConfirmScore);
   j["plate_confirm_score"] = jsonFloat(c.plateConfirmScore);
+  j["large_face_area_fraction"] = c.largeFaceAreaFraction;
+  j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
+  j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
   return j;
 }
 

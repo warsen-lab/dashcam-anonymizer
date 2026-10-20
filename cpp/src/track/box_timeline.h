@@ -47,6 +47,9 @@ struct TimelineConfig {
   // Per class index: a box scoring below its class's entry is masked only once its track is matched at
   // two consecutive keyframes (spec 2026-10-19 §3.4); a class without an entry needs no confirmation.
   std::vector<float> confirmScore{};
+  // Whether a ghost that is missed again at the next keyframe is still masked, at the box it was held to, over
+  // its whole interval (spec 2026-10-19 §3.7); off: that interval is not masked.
+  bool holdLostGhosts = false;
 };
 
 // What advance() and finish() return.
@@ -65,16 +68,19 @@ struct TimelineOutput {
 // target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
 // matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar size
 // (each side within a factor of 3 of the other's) whose centres are at most matchMaxDistanceLoose times
-// the largest side of the two boxes apart along each axis.
+// the largest side of the two boxes apart along each axis, and only if neither box is below its class's
+// confirmScore (spec §3.8; a ghost counts by its last real detection): such pairs match in the first pass only.
 //
 // A matched track is interpolated between its two keyframe boxes (centre and size, linearly in time). A
 // track missed at the next keyframe is held at its box, moved along its velocity by at most half the
 // box's width along x and half its height along y; it lives on for one keyframe as a ghost at the end of
 // that hold. A ghost matched at the following keyframe is interpolated from where it was held to the new
-// box; an unmatched ghost ends, and the interval after its last hold is not masked. A box that starts a
-// track is masked from its own keyframe on, never before. Every mask is grown by expandFraction of its box
-// plus motionExpandFraction of the interval's displacement along each axis (for a hold, of its capped
-// shift), to at least minBoxPx, and clipped to the frame.
+// box; an unmatched ghost ends, and the interval after its last hold is not masked, unless holdLostGhosts
+// is set: then that interval (and, for a ghost left after the last keyframe, the tail of the video) is
+// masked at the box the hold ended at, which does not move on, with no motion margin and origin held, and
+// the track ends after it. A box that starts a track is masked from its own keyframe on, never before. Every
+// mask is grown by expandFraction of its box plus motionExpandFraction of the interval's displacement along
+// each axis (for a hold, of its capped shift), to at least minBoxPx, and clipped to the frame.
 //
 // The mask's size is smoothed per track (spec §3.1), around the centre of the box it is for: its width and
 // height grow to the box's at once but shrink by at most shrinkPerFrame of themselves per frame, never
@@ -103,7 +109,8 @@ class BoxTimeline {
   TimelineOutput advance(const std::vector<FrameTime>& frames, const Keyframe& next);
 
   // Masks for the frames from the last keyframe (inclusive) to the end of the video: every track
-  // detected on that keyframe is held there as above; ghosts end. Resets the timeline.
+  // detected on that keyframe is held there as above; ghosts end (with holdLostGhosts they are held at
+  // their box over these frames first). Resets the timeline.
   TimelineOutput finish(const std::vector<FrameTime>& frames);
 
  private:
@@ -157,6 +164,9 @@ class BoxTimeline {
   // margin is the shift reached `span` frames after the keyframe.
   void hold(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames, const FrameTime& from,
             const Track& track, double span);
+  // The masks of the ghost `track` over `frames` (which start at its keyframe), for holdLostGhosts: its box, where
+  // its hold ended, on every frame and no further shift, motion margin 0, all held (so none shrinks).
+  void holdGhost(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames, const Track& track);
 
   TimelineConfig config_;
   int width_;

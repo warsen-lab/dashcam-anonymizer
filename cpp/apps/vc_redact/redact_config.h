@@ -15,7 +15,8 @@ namespace vc {
 
 // configs/redact.json (proxy-validation spec §5.2, updated by spec 2026-10-19); the defaults equal the
 // repository file. DecodeParams and TimelineConfig keep their own defaults, which vc_detect and the unit
-// tests use.
+// tests use. The mask and confirmation settings are the 2026-10-19 calibration's
+// (docs/reports/stable-masks-2026-10-19.md).
 //
 // `face` is the YuNet face model's (vc_redact --face-model; unused without it). Its score threshold
 // 0.3 is the lower bound of the teachers' low-confidence face band (configs/labeling.json
@@ -24,20 +25,26 @@ namespace vc {
 struct RedactConfig {
   double detectFps = 10.0;  // keyframes per second of video, in [5, 60]; spaced by frame index (detect_rate.h)
   DecodeParams decode{.scoreThreshold = 0.05f};
-  TimelineConfig timeline{.expandFraction = 0.3};
+  TimelineConfig timeline{.expandFraction = 0.2, .motionExpandFraction = 0.25, .shrinkPerFrame = 0.2};
   MosaicConfig mosaic;
   YuNetParams face{.scoreThreshold = 0.3f, .nmsIou = 0.3f};
   // Boxes scoring below these are masked only once their track is matched at two consecutive keyframes
   // (spec 2026-10-19 §3.4), by class whatever the detector; a merged box goes by its (higher) merged score.
   float faceConfirmScore = 0.5f;
-  float plateConfirmScore = 0.15f;
+  float plateConfirmScore = 0.2f;
+  // A face box over largeFaceAreaFraction of the frame (its own area, before any margin) scoring below
+  // largeFaceMinScore is dropped before it reaches the timeline (spec 2026-10-19 §3.6): giant YuNet false
+  // positives on road and buildings. largeFaceMinScore 0 switches the rule off.
+  double largeFaceAreaFraction = 0.05;
+  float largeFaceMinScore = 0.6f;
 };
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096]; every other value must be a finite number. face_score_threshold, face_confirm_score and
-// plate_confirm_score are in [0, 1], face_nms_iou in (0, 1].
+// [1, 4096]; every other value must be a finite number except hold_lost_ghosts, which must be a JSON boolean.
+// face_score_threshold, face_confirm_score, plate_confirm_score and large_face_min_score are in [0, 1],
+// face_nms_iou and large_face_area_fraction in (0, 1].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);
