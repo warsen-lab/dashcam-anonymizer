@@ -68,7 +68,8 @@ struct TimelineOutput {
 // target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
 // matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar size
 // (each side within a factor of 3 of the other's) whose centres are at most matchMaxDistanceLoose times
-// the largest side of the two boxes apart along each axis.
+// the largest side of the two boxes apart along each axis, and only if neither box is below its class's
+// confirmScore (spec §3.8; a ghost counts by its last real detection): such pairs match in the first pass only.
 //
 // A matched track is interpolated between its two keyframe boxes (centre and size, linearly in time). A
 // track missed at the next keyframe is held at its box, moved along its velocity by at most half the

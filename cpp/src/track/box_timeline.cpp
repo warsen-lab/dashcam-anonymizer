@@ -184,7 +184,10 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
   }
   takeGreedily(std::move(strict));
 
-  // Second pass, over what is left: both axes in the largest side of the two boxes, similar sizes only.
+  // Second pass, over what is left: both axes in the largest side of the two boxes, similar sizes only. A pair
+  // with either side below its class's confirm score is left to the first pass (spec §3.8): two far-apart
+  // low-score boxes are more likely two false positives than one target, and joining them sweeps a mask
+  // between them. A track's side is its last real detection (a ghost's, from before it was lost).
   std::vector<Candidate> loose;
   for (size_t i = 0; i < tracks_.size(); ++i) {
     if (usedTrack[i]) continue;
@@ -192,6 +195,7 @@ std::vector<BoxTimeline::Match> BoxTimeline::match(const Keyframe& next, double 
     for (size_t j = 0; j < next.boxes.size(); ++j) {
       const Box& b = next.boxes[j];
       if (usedNext[j] || a.cls != b.cls || !similarSizes(a, b)) continue;
+      if (needsConfirmation(tracks_[i].anchor) || needsConfirmation(b)) continue;
       const Point actual = centerOf(b);
       const double side = std::max({1.0, widthOf(a), heightOf(a), widthOf(b), heightOf(b)});
       const double cost = cheapest(tracks_[i], [&](Point p) {

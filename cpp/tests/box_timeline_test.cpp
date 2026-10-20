@@ -1292,6 +1292,136 @@ TEST(BoxTimeline, HoldLostGhostsDoesNotMaskAnUnconfirmedTrack) {
   for (const auto& m : ending.finish(frames(0, 6)).masks) EXPECT_TRUE(m.empty());
 }
 
+// ---- Low-score pairs match only in the strict first pass (spec 2026-10-19 §3.8) ----
+//
+// All with confirming(): faces below 0.5 and plates below 0.15 are low-score. Boxes 20 px wide, 60 px apart, are
+// beyond the first pass (1 mean side) and within the second (6 largest sides).
+
+// A confirmed low-score track at keyframes 0 and 12 (track 1), moving 0.5 px per frame.
+void startConfirmedWeakTrack(BoxTimeline& timeline) {
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput out = timeline.advance(frames(0, 12), key(12, {weakFace(106, 100, 126, 120)}));
+  ASSERT_EQ(out.confirmed, std::vector<bool>{true});
+}
+
+// A high-score track and a low-score box too far for the first pass: the track is held, the box starts a track of
+// its own and, unconfirmed, is not masked on its own.
+TEST(BoxTimeline, AHighScoreTrackAndALowScoreBoxFarApartAreNotMatched) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  const TimelineOutput first = timeline.advance(frames(0, 12), key(12, {weakFace(160, 100, 180, 120)}));
+  for (size_t k = 0; k < first.masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(first.masks[k].size(), 1u);
+    EXPECT_EQ(first.masks[k][0].track, 1);
+    expectBox(first.masks[k][0], 100, 100, 120, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Held);
+  }
+  // Seen again where it was, the box confirms its own track (id 2), masked from keyframe 12 on; the old one is gone.
+  const TimelineOutput second = timeline.advance(frames(12, 24), key(24, {weakFace(160, 100, 180, 120)}));
+  EXPECT_EQ(second.confirmed, std::vector<bool>{true});
+  for (size_t k = 0; k < second.masks.size(); ++k) {
+    ASSERT_EQ(second.masks[k].size(), 1u);
+    EXPECT_EQ(second.masks[k][0].track, 2);
+    expectBox(second.masks[k][0], 160, 100, 180, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+}
+
+// The same with the sides swapped: a confirmed low-score track, and a high-score box far from it.
+TEST(BoxTimeline, ALowScoreTrackAndAHighScoreBoxFarApartAreNotMatched) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  startConfirmedWeakTrack(timeline);
+  const TimelineOutput out = timeline.advance(frames(12, 24), key(24, {face(166, 100, 186, 120)}));
+  for (const auto& m : out.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 1);
+    EXPECT_NE(m[0].origin, MaskOrigin::Interpolated);
+    EXPECT_LT(m[0].x2, 150);  // held near the track, never interpolated towards the box
+  }
+  // The high-score box is a track of its own (id 2), masked from keyframe 24 on; the old track left no more masks.
+  const TimelineOutput next = timeline.advance(frames(24, 36), key(36, {face(166, 100, 186, 120)}));
+  for (size_t k = 0; k < next.masks.size(); ++k) {
+    ASSERT_EQ(next.masks[k].size(), 1u);
+    EXPECT_EQ(next.masks[k][0].track, 2);
+    expectBox(next.masks[k][0], 166, 100, 186, 120,
+              k == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+}
+
+// A ghost is judged by the last real detection it was held from: a low-score one does not meet a far high-score box.
+TEST(BoxTimeline, AGhostOfALowScoreDetectionIsNotMatchedToAFarHighScoreBox) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  startConfirmedWeakTrack(timeline);
+  for (const auto& m : timeline.advance(frames(12, 24), key(24, {})).masks) ASSERT_EQ(m.size(), 1u);  // held
+  const TimelineOutput out = timeline.advance(frames(24, 36), key(36, {face(200, 100, 220, 120)}));
+  for (const auto& m : out.masks) EXPECT_TRUE(m.empty());  // the ghost ended; the new box starts at keyframe 36
+  const TimelineOutput next = timeline.advance(frames(36, 48), key(48, {}));
+  for (const auto& m : next.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 2);
+  }
+}
+
+// The 20862 -> 20874 case: two low-score boxes far apart are two targets, so no mask sweeps from one to the other.
+TEST(BoxTimeline, TwoFarLowScoreBoxesAreNotJoinedByASweepingMask) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  startConfirmedWeakTrack(timeline);
+  const TimelineOutput out = timeline.advance(frames(12, 24), key(24, {weakFace(166, 100, 186, 120)}));
+  for (const auto& m : out.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 1);
+    EXPECT_LT(m[0].x2, 150);  // no mask reaches the second box
+  }
+  EXPECT_EQ(out.confirmed, std::vector<bool>{true});
+  // The second box is unconfirmed (seen once) and not masked on its own.
+  const TimelineOutput next = timeline.advance(frames(24, 36), key(36, {}));
+  for (const auto& m : next.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(next.confirmed, std::vector<bool>{false});
+}
+
+// Two high-score boxes that far apart are still paired by the second pass, as before.
+TEST(BoxTimeline, TwoFarHighScoreBoxesAreStillMatchedInTheSecondPass) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  const auto masks = timeline.advance(frames(0, 12), key(12, {face(160, 100, 180, 120)})).masks;
+  ASSERT_EQ(masks.size(), 12u);
+  for (size_t k = 0; k < masks.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(k));
+    ASSERT_EQ(masks[k].size(), 1u);
+    EXPECT_EQ(masks[k][0].track, 1);
+    const float x = 100 + 5.0f * static_cast<float>(k);
+    expectBox(masks[k][0], x, 100, x + 20, 120, k == 0 ? MaskOrigin::Detected : MaskOrigin::Interpolated);
+  }
+}
+
+// Within the first pass a low-score pair matches and confirms as before.
+TEST(BoxTimeline, ALowScorePairWithinTheFirstPassIsStillMatchedAndConfirmed) {
+  BoxTimeline timeline(confirming(), 1000, 1000);
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput out = timeline.advance(frames(0, 12), key(12, {weakFace(118, 100, 138, 120)}));  // 0.9 sides
+  EXPECT_EQ(out.confirmed, std::vector<bool>{true});
+  for (const auto& m : out.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    EXPECT_EQ(m[0].track, 1);
+  }
+  expectBox(out.masks[6][0], 109, 100, 129, 120, MaskOrigin::Interpolated);
+}
+
+// A class without a confirm score (an entry of 0, no entry at all) has no low scores: its loose matching is unchanged.
+TEST(BoxTimeline, AClassWithoutAConfirmScoreStillMatchesLoosely) {
+  for (const std::vector<float>& scores : {std::vector<float>{0.5f, 0.0f}, std::vector<float>{0.5f}}) {
+    SCOPED_TRACE("entries: " + std::to_string(scores.size()));
+    TimelineConfig c = exact();
+    c.confirmScore = scores;
+    BoxTimeline timeline(c, 1000, 1000);
+    timeline.advance({}, key(0, {Box{kPlate, 100, 100, 148, 116, 0.01f}}));
+    const auto masks = timeline.advance(frames(0, 12), key(12, {Box{kPlate, 220, 100, 268, 116, 0.01f}})).masks;
+    ASSERT_EQ(masks.size(), 12u);
+    ASSERT_EQ(masks[6].size(), 1u);
+    EXPECT_EQ(masks[6][0].origin, MaskOrigin::Interpolated);
+    EXPECT_EQ(masks[6][0].track, 1);
+  }
+}
+
 TEST(BoxTimeline, HoldLostGhostsIsOffByDefault) { EXPECT_FALSE(TimelineConfig{}.holdLostGhosts); }
 
 }  // namespace
