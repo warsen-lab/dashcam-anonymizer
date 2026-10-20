@@ -73,7 +73,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
    ```bash
    PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source <原视频> --redacted <输出>.redacted.mp4
    ```
-4. **观感**（需要 Python 环境）：每帧打码面积、帧间跳变、每帧框数、同一轨迹在同一帧有没有多个框。`--width` / `--height` 用视频的真实尺寸（有旋转的视频用显示尺寸）；给小了会报错。打印的 `area` 是画面上真正被马赛克盖住的面积（框对齐到马赛克网格），行尾的 `box-union area` 是框本身的并集，与旧基线可比。
+4. **观感**（需要 Python 环境）：每帧打码面积、帧间跳变、每帧框数、同一轨迹在同一帧有没有多个框。`--width` / `--height` 用视频的真实尺寸：`ffprobe` 对视频流报的编码宽、高，有旋转的视频也不要对调（`vc_redact` 不转画面，`masks.jsonl` 的坐标按存储方向）；给小了会报错。打印的 `area` 是画面上真正被马赛克盖住的面积（框对齐到马赛克网格），行尾的 `box-union area` 是框本身的并集，与旧基线可比。
    ```bash
    PYTHONPATH=py .venv/bin/python -m vc_eval viewing --masks <输出>/masks.jsonl --width 1920 --height 1080
    ```
@@ -100,7 +100,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `score_threshold` | 0.05 | 学生模型阈值。调小会多打，减少车牌漏遮 |
 | `face_score_threshold` | 0.3 | YuNet 阈值。调小会多打人脸 |
 | `expand_fraction` | 0.3 | 打码框每边外扩比例。调大可以盖住检测框偏小的情况 |
-| `shrink_per_frame` | 0.02 | 打码框的宽、高每帧最多缩小的比例（变大不受限）。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
+| `shrink_per_frame` | 0.02 | 打码框的宽、高每帧最多缩小的比例（变大不受限）。按帧算，所以每秒缩小的幅度随视频帧率变：在 60 fps 片子上调好的值，放到 30 fps 的片子上，每秒缩小的幅度只有一半。调大框收得快、面积小，但更容易跳；调小更稳、面积大 |
 | `max_mask_area_ratio` | 4 | 打码框面积最多是当帧要盖的框的几倍。调小面积小 |
 | `face_confirm_score` | 0.5 | 人脸分数低于它的框要在相邻两个关键帧都出现才打码。调低多打、调高少打（误检少，但只露一次的小脸会漏） |
 | `plate_confirm_score` | 0.15 | 车牌的同一门槛 |
@@ -114,7 +114,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
   - 三段留出视频上，高置信人脸 48/48；车牌人工核查后 766/768。
   - 漏的是公交车上的小车牌，学生模型完全没检出，需要补这类训练数据。
   - 详见 `docs/reports/proxy-validation-2026-10-19-yunet.md`。
-- **补框的残余漏洞：** 每个目标每帧只有一个打码框。目标在两次检测之间掉头、在漏检的那一段停下或掉头，或在第一次检测前就出现，中间几帧可能盖不全（`cpp/README.md` 已知局限）。
+- **补框的残余漏洞：** 每个目标每帧只有一个打码框。目标在两次检测之间掉头、在漏检的那一段停下或掉头，或在第一次检测前就出现，中间几帧可能盖不全（`cpp/README.md` 已知局限）。同一个目标连续两个关键帧都漏检时，这两个间隔里它没有打码框（60 fps、`detect_fps` 10 时约 12 帧，0.2 秒）；只漏一个关键帧仍然盖得住。调大 `detect_fps` 会缩短这段空档。
 - **误打：** 平均约 3–4% 的画面被多打码，偶有个别帧大面积误打。
 - **验收：** 按老师参照自动判定的 P1（≥ 99%）没通过，主要是参照本身有误检。严格验收需要人工金标准。
 
