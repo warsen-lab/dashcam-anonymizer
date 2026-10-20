@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 
 from vc_label.contracts import Box, Detection, write_jsonl
-from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, pool
-from vc_eval.metrics import Rate
-from vc_eval.records import detections_by_frame, read_masks, read_uncertain
+from vc_label.rules import TEMPORAL_SOURCE
+from vc_eval.coverage import CoverageReport, _empty_class, evaluate_coverage, parse_recall_targets, pool
+from vc_eval.metrics import Rate, heat_cell
+from vc_eval.records import detections_by_frame, read_excluded, read_masks, read_uncertain
 from vc_eval.temporal import evaluate_temporal
 
 W, H = 1920, 1080
@@ -71,6 +72,17 @@ def _masks(path, video, masks_by_frame, frames):
             boxes = [{"cls": b.cls, "x1": b.x1, "y1": b.y1, "x2": b.x2, "y2": b.y2, "origin": "detected"} for b in masks_by_frame.get(fr, [])]
             f.write(json.dumps({"video": video, "frame": fr, "boxes": boxes}) + "\n")
     return path
+
+
+# A parked bus's tail light the teachers took for a plate: 60 x 20 px, must-mask at 1080 p.
+LIGHT = Box("plate", 1800, 1000, 1860, 1020, src="teacher_owlv2")
+
+
+def _excluded(labels, rows):
+    with (labels / "excluded_refs.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "cls", "x1", "y1", "x2", "y2", "reason"])
+        w.writerows(rows)
 
 
 def test_read_masks_returns_boxes_by_frame(tmp_path):
@@ -374,6 +386,25 @@ def test_temporal_accepts_masks_covering_exactly_the_frames_of_the_dense_run(tmp
     sparse = _masks(tmp_path / "sparse.jsonl", "a.mp4", {0: [Box("face", 95, 95, 125, 135)]}, [0, 1, 2, 3])
     r = evaluate_temporal(dense, sparse, 1080)
     assert r.frames == 4 and (r.classes["face"].hits, r.classes["face"].total) == (1, 1)
+
+
+def test_temporal_leaves_out_dense_boxes_vc_redact_never_masked(tmp_path):
+    """A box the dense run marked "confirmed": false (a low-score box seen once) is no reference; the others are."""
+    dense = tmp_path / "dense" / "detections.jsonl"
+    dense.parent.mkdir()
+    box = Box("face", 100, 100, 140, 150, score=0.3, src="student")
+    records = [
+        {**Detection("a.mp4", 0, 0.0, box).to_record(), "confirmed": False},
+        {**Detection("a.mp4", 1, 16.7, box).to_record(), "confirmed": True},
+    ]
+    dense.write_text("".join(json.dumps(r) + "\n" for r in records))
+    _dense_stats(dense, 2)
+    sparse = _masks(tmp_path / "s.jsonl", "a.mp4", {}, [0, 1])
+    report = evaluate_temporal(dense, sparse, H)
+    assert (report.classes["face"].hits, report.classes["face"].total) == (0, 1)
+    assert [m.frame for m in report.misses] == [1]
+    assert set(detections_by_frame(dense)[1]) == {0, 1}  # without confirmed_only every box is read
+    assert set(detections_by_frame(dense, confirmed_only=True)[1]) == {1}
 
 
 def test_coverage_refuses_a_missing_processed_file(tmp_path):
@@ -689,3 +720,242 @@ def test_pool_refuses_reports_of_different_frame_sizes(tmp_path):
     small = CoverageReport("c.mp4", 1, 640, 360, {c: _empty_class(360) for c in ("face", "plate")})
     with pytest.raises(ValueError, match="frame size"):
         pool([a, small])
+
+
+def test_excluded_refs_leave_matching_targets_out_of_every_rate(tmp_path):
+    frames = _frames(tmp_path, "a", [0, 10])
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    labels = _labels(tmp_path, "a", {0: [face, LIGHT], 10: [face, LIGHT]})
+    _excluded(labels, [[0, "plate", 1802, 1001, 1862, 1021, "公交尾灯"]])  # IoU 0.85 with the light, frame 0 only
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {0: [face], 10: [face]}, [0, 10])
+    r = evaluate_coverage(frames, labels, masks)
+    assert (r.classes["plate"].rate.hits, r.classes["plate"].rate.total) == (0, 1)  # frame 10's light still counts
+    assert sum(rate.total for rate in r.classes["plate"].bins.values()) == 1
+    assert [(e.frame, e.box.cls, e.box.x1, e.reason) for e in r.excluded] == [(0, "plate", 1800, "公交尾灯")]
+    assert r.unmatched_exclusions == []
+    assert [m.frame for m in r.misses] == [10]
+
+
+def test_an_iou_of_exactly_one_half_excludes(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [LIGHT]})
+    _excluded(labels, [[0, "plate", 1800, 1000, 1860, 1040, "x"]])  # 1200 / 2400 px^2
+    r = evaluate_coverage(frames, labels, _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0]))
+    assert r.classes["plate"].rate.total == 0 and len(r.excluded) == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        [0, "plate", 1830, 1000, 1890, 1020, "x"],  # IoU 1/3
+        [0, "face", 1800, 1000, 1860, 1020, "x"],  # another class
+        [5, "plate", 1800, 1000, 1860, 1020, "x"],  # a frame without labels
+    ],
+)
+def test_a_row_that_matches_no_reference_box_excludes_nothing_and_is_reported(tmp_path, row):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [LIGHT]})
+    _excluded(labels, [row])
+    r = evaluate_coverage(frames, labels, _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0]))
+    assert r.classes["plate"].rate.total == 1 and r.excluded == []
+    assert [(e.frame, e.box.cls, e.line) for e in r.unmatched_exclusions] == [(row[0], row[1], 2)]
+
+
+def test_pooled_exclusions_are_concatenated(tmp_path):
+    for stem in ("a", "b"):
+        frames = _frames(tmp_path, stem, [0])
+        labels = _labels(tmp_path, stem, {0: [LIGHT]})
+        _excluded(labels, [[0, "plate", 1800, 1000, 1860, 1020, "公交尾灯"], [3, "plate", 1, 1, 2, 2, "x"]])
+    reports = [
+        evaluate_coverage(tmp_path / "frames" / s, tmp_path / "labels" / s, _masks(tmp_path / f"{s}.jsonl", f"{s}.mp4", {}, [0]))
+        for s in ("a", "b")
+    ]
+    pooled = pool(reports)
+    assert len(pooled.excluded) == 2 and len(pooled.unmatched_exclusions) == 2 and pooled.exclusion_rows == 4
+
+
+def test_read_excluded_without_a_file_excludes_nothing(tmp_path):
+    assert read_excluded(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("frame,cls,x1,y1,x2,y2\n0,plate,1,1,2,2\n", "no reason column"),
+        ("frame,cls,x1,y1,x2,y2,reason\nzero,plate,1,1,2,2,x\n", "line 2: bad row"),
+        ("frame,cls,x1,y1,x2,y2,reason\n0,sign,1,1,2,2,x\n", "line 2: class 'sign'"),
+        ("frame,cls,x1,y1,x2,y2,reason\n0,plate,1,1,2,2,x\n0,plate,5,5,5,9,y\n", "line 3: the box is empty"),
+        ("frame,cls,x1,y1,x2,y2,reason\n0,plate,nan,1,2,2,x\n", "line 2: coordinates must be finite"),
+        ("frame,cls,x1,y1,x2,y2,reason\n0,plate,1,1,2,2,x\n0,plate,1,1,inf,2,y\n", "line 3: coordinates must be finite"),
+        ("frame,cls,x1,y1,x2,y2,reason\n0,plate,1,1,2,2,  \n", "line 2: no reason"),
+    ],
+)
+def test_read_excluded_names_the_line_of_a_bad_row(tmp_path, text, message):
+    (tmp_path / "excluded_refs.csv").write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        read_excluded(tmp_path)
+
+
+def test_read_excluded_accepts_the_bom_excel_writes(tmp_path):
+    text = "frame,cls,x1,y1,x2,y2,reason\n0,plate,1,1,2,2,公交尾灯\n"
+    (tmp_path / "excluded_refs.csv").write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+    assert [(r.frame, r.box.cls, r.reason, r.line) for r in read_excluded(tmp_path)] == [(0, "plate", "公交尾灯", 2)]
+
+
+def test_read_excluded_names_the_file_when_it_is_not_utf8(tmp_path):
+    (tmp_path / "excluded_refs.csv").write_bytes("frame,cls,x1,y1,x2,y2,reason\n0,plate,1,1,2,2,尾灯\n".encode("gbk"))
+    with pytest.raises(ValueError, match=r"excluded_refs\.csv is not UTF-8"):
+        read_excluded(tmp_path)
+
+
+# Excluding a reference must be exactly as if it had never been labelled, in every tier and every statistic.
+FAR_PLATE = Box("plate", 400, 500, 460, 520, src="teacher_owlv2")  # a second confident plate, never excluded
+FAR_FACE = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+FLAGGED_LIGHT = Box("plate", 1800, 1000, 1860, 1020, score=0.35, src="teacher_owlv2")  # low_score in flags.csv: uncertain
+TINY_LIGHT = Box("plate", 1800, 1000, 1812, 1004, src="teacher_owlv2")  # 12 x 4 px: too small to demand, best effort
+FILL_LIGHT = Box("plate", 1800, 1000, 1860, 1020, src=TEMPORAL_SOURCE)  # a confident box the temporal fill made up
+
+
+def _three_reports(tmp_path, extra, covered, flagged=False):
+    """(excluded, kept, gone): the coverage with `extra` in the labels and a row excluding it, with it and no row, and without it.
+
+    The masks sit exactly on the face and the far plate, and on `extra` too when `covered`.
+    """
+    reports = {}
+    for stem, in_labels, excluded in (("excl", True, True), ("kept", True, False), ("gone", False, False)):
+        frames = _frames(tmp_path, stem, [0])
+        labels = _labels(tmp_path, stem, {0: [FAR_FACE, FAR_PLATE, *([extra] if in_labels else [])]},
+                         flags=[(0, "low_score", extra)] if in_labels and flagged else [])
+        if excluded:
+            _excluded(labels, [[0, extra.cls, extra.x1, extra.y1, extra.x2, extra.y2, "x"]])
+        masks = _masks(tmp_path / f"{stem}.jsonl", f"{stem}.mp4", {0: [FAR_FACE, FAR_PLATE, *([extra] if covered else [])]}, [0])
+        reports[stem] = evaluate_coverage(frames, labels, masks)
+    return reports["excl"], reports["kept"], reports["gone"]
+
+
+@pytest.mark.parametrize(
+    "extra, covered, flagged, tier",
+    [
+        pytest.param(LIGHT, True, False, "confident", id="confident-covered"),
+        pytest.param(LIGHT, False, False, "confident", id="confident-missed"),
+        pytest.param(FILL_LIGHT, True, False, "confident", id="temporal-fill"),
+        pytest.param(TINY_LIGHT, True, False, "best_effort", id="best-effort-covered"),
+        pytest.param(TINY_LIGHT, False, False, "best_effort", id="best-effort-missed"),
+        pytest.param(FLAGGED_LIGHT, True, True, "uncertain", id="uncertain-covered"),
+        pytest.param(FLAGGED_LIGHT, False, True, "uncertain", id="uncertain-missed"),
+    ],
+)
+def test_excluding_a_reference_equals_never_having_labelled_it(tmp_path, extra, covered, flagged, tier):
+    excl, kept, gone = _three_reports(tmp_path, extra, covered, flagged)
+    assert kept.classes != gone.classes  # the extra box does count when nothing excludes it
+    assert excl.classes == gone.classes  # every rate, size bin, heatmap cell, temporal fill, best-effort and uncertain count
+    assert excl.misses == gone.misses and excl.uncertain_misses == gone.uncertain_misses
+    assert (excl.stray_max, excl.stray_mean, excl.stray_p95) == (gone.stray_max, gone.stray_mean, gone.stray_p95)
+    assert [(e.tier, e.covered) for e in excl.excluded] == [(tier, covered)]
+
+
+def test_an_excluded_reference_that_was_covered_is_no_hit_and_its_mask_is_stray_area(tmp_path):
+    excl, kept, _ = _three_reports(tmp_path, LIGHT, covered=True)
+    plate = lambda r: (r.classes["plate"].rate.hits, r.classes["plate"].rate.total)  # noqa: E731
+    assert plate(kept) == (2, 2) and plate(excl) == (1, 1)  # both counts drop, not just the denominator
+    assert kept.stray_max == 0.0
+    assert excl.stray_max == pytest.approx(60 * 20 / (W * H))  # the mask on the light has no reference any more
+
+
+def test_an_excluded_temporal_fill_box_leaves_its_heatmap_cell_and_the_fill_rate(tmp_path):
+    excl, kept, _ = _three_reports(tmp_path, FILL_LIGHT, covered=True)
+    row, col = heat_cell(FILL_LIGHT, W, H)
+    assert (kept.classes["plate"].temporal_fill, kept.classes["plate"].heatmap[row][col]) == (Rate(1, 1), Rate(1, 1))
+    assert (excl.classes["plate"].temporal_fill, excl.classes["plate"].heatmap[row][col]) == (Rate(0, 0), Rate(0, 0))
+
+
+def test_one_row_excludes_every_reference_box_it_overlaps(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    other = Box("plate", 1810, 1000, 1870, 1020, src="teacher_owlv2")  # IoU 0.85 with the row, as is LIGHT
+    labels = _labels(tmp_path, "a", {0: [LIGHT, other]})
+    _excluded(labels, [[0, "plate", 1805, 1000, 1865, 1020, "公交尾灯"]])
+    r = evaluate_coverage(frames, labels, _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0]))
+    assert r.classes["plate"].rate.total == 0
+    assert [e.box.x1 for e in r.excluded] == [1800, 1810] and [e.reason for e in r.excluded] == ["公交尾灯"] * 2
+    assert r.exclusion_rows == 1 and r.unmatched_exclusions == []
+
+
+def test_rows_that_all_overlap_one_reference_box_are_all_matched_and_the_closest_gives_the_reason(tmp_path):
+    frames = _frames(tmp_path, "a", [0])
+    labels = _labels(tmp_path, "a", {0: [LIGHT]})
+    _excluded(labels, [
+        [0, "plate", 1802, 1001, 1862, 1021, "roughly"],  # IoU 0.85
+        [0, "plate", 1800, 1000, 1860, 1020, "exactly"],  # IoU 1
+        [0, "plate", 1810, 1000, 1870, 1020, "also"],  # IoU 0.71
+    ])
+    r = evaluate_coverage(frames, labels, _masks(tmp_path / "m.jsonl", "a.mp4", {}, [0]))
+    assert [e.reason for e in r.excluded] == ["exactly"]
+    assert r.unmatched_exclusions == [] and r.exclusion_rows == 3
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("", {"face": 0.99, "plate": 0.99}),
+        ("face=0.95,plate=0.98", {"face": 0.95, "plate": 0.98}),
+        (" plate = 0.98 ", {"face": 0.99, "plate": 0.98}),
+        ("face=1", {"face": 1.0, "plate": 0.99}),
+    ],
+)
+def test_parse_recall_targets(text, expected):
+    assert parse_recall_targets(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("car=0.9", "car"),
+        ("face", "<class>=<value>"),
+        ("face=0.9,face=0.95", "twice"),
+        ("face=high", "not a number"),
+        ("face=0", r"\(0, 1\]"),
+        ("plate=1.5", r"\(0, 1\]"),
+        ("face=nan", r"\(0, 1\]"),
+    ],
+)
+def test_parse_recall_targets_refuses_bad_text(text, message):
+    with pytest.raises(ValueError, match=message):
+        parse_recall_targets(text)
+
+
+def test_a_class_passes_at_its_own_recall_target(tmp_path):
+    frames = _frames(tmp_path, "a", list(range(20)))
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    labels = _labels(tmp_path, "a", {fr: [face] for fr in range(20)})
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {fr: [face] for fr in range(1, 20)}, list(range(20)))  # 19 of 20
+    default = evaluate_coverage(frames, labels, masks)
+    assert default.recall_targets == {"face": 0.99, "plate": 0.99} and not default.class_passed("face")
+    lowered = evaluate_coverage(frames, labels, masks, {"face": 0.95})
+    assert lowered.recall_targets == {"face": 0.95, "plate": 0.99}
+    assert lowered.class_passed("face")  # 19 / 20 is exactly 95 %
+
+
+def test_each_class_is_judged_against_its_own_recall_target(tmp_path):
+    frames = _frames(tmp_path, "a", list(range(20)))
+    face = Box("face", 100, 100, 130, 140, src="teacher_retinaface")
+    plate = Box("plate", 300, 300, 360, 320, src="teacher_owlv2")
+    labels = _labels(tmp_path, "a", {fr: [face, plate] for fr in range(20)})
+    # both classes are covered in 19 of 20 frames: 95 %, above a 0.95 bar and below the default 0.99 one
+    masks = _masks(tmp_path / "m.jsonl", "a.mp4", {fr: [face, plate] for fr in range(1, 20)}, list(range(20)))
+    face_only = evaluate_coverage(frames, labels, masks, {"face": 0.95})
+    assert face_only.recall_targets == {"face": 0.95, "plate": 0.99}
+    assert face_only.class_passed("face") and not face_only.class_passed("plate")
+    plate_only = evaluate_coverage(frames, labels, masks, {"plate": 0.95})
+    assert plate_only.recall_targets == {"face": 0.99, "plate": 0.95}
+    assert plate_only.class_passed("plate") and not plate_only.class_passed("face")
+
+
+def test_pooling_needs_the_same_recall_targets():
+    def classes():
+        return {c: _empty_class(H) for c in ("face", "plate")}
+
+    a = CoverageReport("a.mp4", 1, W, H, classes(), recall_targets={"face": 0.95, "plate": 0.98})
+    b = CoverageReport("b.mp4", 1, W, H, classes())
+    with pytest.raises(ValueError, match="different recall targets"):
+        pool([a, b])
+    assert pool([a, a]).recall_targets == {"face": 0.95, "plate": 0.98}

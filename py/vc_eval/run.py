@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -15,18 +16,20 @@ from urllib.parse import quote
 from vc_label.contracts import LABEL_CLASSES, read_frames_csv
 from vc_label.review import ensure_outside
 from vc_eval.consistency import compare_detections, python_detections, run_vc_detect, same_pixel_subset
-from vc_eval.coverage import CoverageReport, evaluate_coverage, load_label_inputs, pool
+from vc_eval.coverage import EXCLUSION_TIERS, CoverageReport, evaluate_coverage, load_label_inputs, pool
 from vc_eval.integrity import check_integrity, probe, probe_cache
 from vc_eval.metrics import Rate
 from vc_eval.report import summary_md
 from vc_eval.spotcheck import Item, Section, extract_frames, miss_tile, thumbnail, write_spotcheck
 from vc_eval.temporal import TemporalReport, evaluate_temporal
+from vc_eval.viewing import ViewingReport, evaluate_viewing, pool_viewing, viewing_json
 
 MAX_MISS_TILES = 60
 MAX_UNCERTAIN_TILES = 60
 MAX_TEMPORAL_TILES = 30
 STDERR_TAIL_LINES = 20
 MIN_DETECT_FPS = 5.0
+MAX_DETECT_FPS = 60.0
 
 
 @dataclass
@@ -47,6 +50,7 @@ class RunConfig:
     seed: int = 0
     overwrite: bool = False  # clear a non-empty `out` first instead of refusing it
     face_model: Path | None = None  # vc_train yunet model dir, passed to every vc_redact run as --face-model
+    recall_targets: dict[str, float] | None = None  # P1's bar per class; None: CLASS_PASS for every class
 
 
 def _same_or_below(path: Path, parent: Path) -> bool:
@@ -124,10 +128,14 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError("a stem is listed twice")
     if not cfg.fps_values:
         raise ValueError("no detection rates to sweep")
-    if not all(math.isfinite(fps) and fps >= MIN_DETECT_FPS for fps in cfg.fps_values):
-        raise ValueError(f"detection rates must be finite numbers of at least {MIN_DETECT_FPS:g} fps")
+    if not all(math.isfinite(fps) and MIN_DETECT_FPS <= fps <= MAX_DETECT_FPS for fps in cfg.fps_values):
+        raise ValueError(f"detection rates must be finite numbers from {MIN_DETECT_FPS:g} to {MAX_DETECT_FPS:g} fps")
     if len({float(fps) for fps in cfg.fps_values}) != len(cfg.fps_values):
         raise ValueError("a detection rate is listed twice")
+    if cfg.recall_targets is not None:
+        bad = {cls: v for cls, v in cfg.recall_targets.items() if cls not in LABEL_CLASSES or not 0 < v <= 1}
+        if bad:
+            raise ValueError(f"recall targets must be {' / '.join(LABEL_CLASSES)} in (0, 1], got {bad}")
     if cfg.consistency_count < 1 or cfg.spot_frames < 0:
         raise ValueError("consistency_count must be at least 1 and spot_frames at least 0")
     _validate_out(cfg)
@@ -172,6 +180,10 @@ def rate_json(rate: Rate) -> dict:
     return {"hits": rate.hits, "total": rate.total, "value": None if rate.total == 0 else rate.value, "ci": [lo, hi]}
 
 
+def _box_json(box) -> dict:
+    return {"cls": box.cls, "x1": box.x1, "y1": box.y1, "x2": box.x2, "y2": box.y2}
+
+
 def coverage_json(c: CoverageReport) -> dict:
     out = {cls: rate_json(c.classes[cls].rate) for cls in LABEL_CLASSES}
     weakest = c.weakest_cell()
@@ -185,15 +197,29 @@ def coverage_json(c: CoverageReport) -> dict:
     out["bins"] = {cls: {k: rate_json(v) for k, v in c.classes[cls].bins.items()} for cls in LABEL_CLASSES}
     # the whole grid (rows top to bottom, columns left to right), not just the weakest cell: the cells under 30 targets are the ones P2 skips
     out["heatmap"] = {cls: [[rate_json(rate) for rate in row] for row in c.classes[cls].heatmap] for cls in LABEL_CLASSES}
+    # reference boxes excluded_refs.csv left out (teacher false positives a person checked): `rows` rows of the file
+    # excluded `count` boxes, `covered` of which the masks had covered; `by_class` says in which tier they would have counted
+    # (the confident ones are what P1's denominators lose), `unmatched_rows` rows overlapped no reference box
+    by_tier = Counter((e.box.cls, e.tier) for e in c.excluded)
+    out["excluded"] = {
+        "rows": c.exclusion_rows,
+        "count": len(c.excluded),
+        "covered": sum(e.covered for e in c.excluded),
+        "reasons": dict(Counter(e.reason for e in c.excluded)),
+        "unmatched_rows": len(c.unmatched_exclusions),
+        "by_class": {cls: {tier: by_tier[(cls, tier)] for tier in EXCLUSION_TIERS} for cls in LABEL_CLASSES},
+    }
+    out["recall_targets"] = dict(c.recall_targets)
     out["passed"] = c.passed()
     return out
 
 
-def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport]:
+def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageReport, TemporalReport, ViewingReport]:
     run_dir = _fps_dir(cfg, fps) / stem
-    coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl")
+    coverage = evaluate_coverage(cfg.frames_root / stem, cfg.labels_root / stem, run_dir / "masks.jsonl", cfg.recall_targets)
     temporal = evaluate_temporal(cfg.redacted_root / "dense" / stem / "detections.jsonl", run_dir / "masks.jsonl", coverage.height)
     integrity = check_integrity(cfg.videos / f"{stem}.mp4", run_dir / f"{stem}.redacted.mp4")
+    viewing = evaluate_viewing(run_dir / "masks.jsonl", coverage.width, coverage.height)
     stats = json.loads((run_dir / "stats.json").read_text(encoding="utf-8"))
     entry = {
         "stem": stem,
@@ -205,15 +231,26 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
             "redacted_frames": integrity.redacted_frames,
         },
         "stray": {"max": coverage.stray_max, "mean": coverage.stray_mean, "p95": coverage.stray_p95},
+        "viewing": viewing_json(viewing),
         "misses": {"confident": len(coverage.misses), "uncertain": len(coverage.uncertain_misses), "temporal": len(temporal.misses)},
+        # every confident miss with its reference box: what excluded_refs.csv rows are written from
+        "miss_list": [{"frame": m.frame, **_box_json(m.box), "covered": round(m.covered, 3)} for m in coverage.misses],
+        # every reference box excluded_refs.csv left out, to audit the file
+        "excluded_list": [
+            {"frame": e.frame, **_box_json(e.box), "tier": e.tier, "covered": e.covered, "reason": e.reason}
+            for e in coverage.excluded
+        ],
         "stages": stats.get("stages", {}),
+        # the rate vc_redact actually ran at (None in a stats.json written before it recorded them)
+        "detect_fps_actual": stats.get("detect_fps_actual"),
+        "keyframe_stride": stats.get("keyframe_stride"),
         "elapsed_s": stats.get("elapsed_s"),
         "setup_s": stats.get("setup_s"),
         "frames": stats.get("frames"),
         "detector": stats.get("detector", ""),
         "encoder": stats.get("encoder", ""),
     }
-    return entry, coverage, temporal
+    return entry, coverage, temporal, viewing
 
 
 def _spread(items: list, limit: int) -> list:
@@ -231,7 +268,13 @@ def _consistency(cfg: RunConfig, runner) -> dict:
     return {**asdict(report), "passed": report.passed()}
 
 
-def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]]) -> dict:
+def _pooled_entry(
+    stems: list[str],
+    fps: float,
+    runs: list[dict],
+    reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]],
+    viewings: dict[tuple[str, float], ViewingReport],
+) -> dict:
     """P1 / P2 on the coverage of all segments together (one final recall per class); P3 must hold for every segment."""
     pooled = pool([reports[(stem, fps)][0] for stem in stems])
     coverage = coverage_json(pooled)
@@ -241,6 +284,7 @@ def _pooled_entry(stems: list[str], fps: float, runs: list[dict], reports: dict[
         "stems": list(stems),
         "coverage": coverage,
         "stray": {"max": pooled.stray_max, "mean": pooled.stray_mean, "p95": pooled.stray_p95},
+        "viewing": viewing_json(pool_viewing([viewings[(stem, fps)] for stem in stems])),
         "misses": {kind: sum(r["misses"][kind] for r in runs if r["fps"] == fps) for kind in ("confident", "uncertain", "temporal")},
         "integrity_passed": integrity_passed,
         "passed": coverage["passed"] and integrity_passed,
@@ -374,18 +418,20 @@ def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
     runs: list[dict] = []
     segments: list[dict] = []
     reports: dict[tuple[str, float], tuple[CoverageReport, TemporalReport]] = {}
+    viewings: dict[tuple[str, float], ViewingReport] = {}
     for stem in cfg.stems:
         _redact(cfg, stem, cfg.redacted_root / "dense", ["--detect-every-frame"], runner)
         for fps in cfg.fps_values:
             _redact(cfg, stem, _fps_dir(cfg, fps), ["--detect-fps", f"{fps:g}"], runner)
         for fps in cfg.fps_values:
-            entry, coverage, temporal = _evaluate(cfg, stem, fps)
+            entry, coverage, temporal, viewing = _evaluate(cfg, stem, fps)
             runs.append(entry)
             reports[(stem, fps)] = (coverage, temporal)
+            viewings[(stem, fps)] = viewing
         coverage = reports[(stem, cfg.fps_values[0])][0]
         codec = probe(cfg.videos / f"{stem}.mp4").video.codec
         segments.append({"stem": stem, "width": coverage.width, "height": coverage.height, "codec": codec})
-    pooled = [_pooled_entry(cfg.stems, fps, runs, reports) for fps in sorted(cfg.fps_values)]
+    pooled = [_pooled_entry(cfg.stems, fps, runs, reports, viewings) for fps in sorted(cfg.fps_values)]
     chosen = _choose(pooled)
     spot_fps = chosen if chosen is not None else min(cfg.fps_values)
     spot_reports = {stem: reports[(stem, spot_fps)] for stem in cfg.stems}

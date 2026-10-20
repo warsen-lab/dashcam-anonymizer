@@ -49,8 +49,9 @@ def evaluate_temporal(dense_detections: Path, sparse_masks: Path, frame_height: 
 
     The dense run's stats.json (next to its detections.jsonl) must say it detected every frame, and the masks must cover
     exactly frames 0 .. stats.frames-1: a dense reference is only a reference for the frames it really covers.
+    Boxes the dense run never masked (written "confirmed": false) are no reference.
     """
-    dense_videos, dense = detections_by_frame(dense_detections)
+    dense_videos, dense = detections_by_frame(dense_detections, confirmed_only=True)
     dense_frames = _dense_frame_count(dense_detections)
     mask_videos, masks = read_masks(sparse_masks)
     if not masks:

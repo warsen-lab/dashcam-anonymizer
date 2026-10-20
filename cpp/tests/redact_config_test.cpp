@@ -19,16 +19,16 @@ namespace {
 
 // The keys of configs/redact.json (and of redactConfigToJson).
 const std::set<std::string> kAllKeys = {
-    "detect_fps",         "max_detect_fps",       "motion_threshold",    "score_threshold",
-    "nms_iou",            "match_max_distance",   "match_max_distance_loose", "expand_fraction",
-    "motion_expand_fraction", "min_box_px",       "mosaic_min_block_px", "mosaic_blocks_per_long_side",
-    "face_score_threshold",   "face_nms_iou"};
+    "detect_fps",          "score_threshold",        "nms_iou",
+    "match_max_distance",  "match_max_distance_loose", "expand_fraction",
+    "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
+    "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
+    "face_score_threshold", "face_nms_iou",       "face_confirm_score",
+    "plate_confirm_score"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.detectFps, d.detectFps);
-  EXPECT_DOUBLE_EQ(c.maxDetectFps, d.maxDetectFps);
-  EXPECT_DOUBLE_EQ(c.motionThreshold, d.motionThreshold);
   EXPECT_FLOAT_EQ(c.decode.scoreThreshold, d.decode.scoreThreshold);
   EXPECT_FLOAT_EQ(c.decode.nmsIou, d.decode.nmsIou);
   EXPECT_DOUBLE_EQ(c.timeline.matchMaxDistance, d.timeline.matchMaxDistance);
@@ -36,11 +36,15 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, d.timeline.expandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.motionExpandFraction, d.timeline.motionExpandFraction);
   EXPECT_DOUBLE_EQ(c.timeline.minBoxPx, d.timeline.minBoxPx);
+  EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, d.timeline.shrinkPerFrame);
+  EXPECT_DOUBLE_EQ(c.timeline.maxMaskAreaRatio, d.timeline.maxMaskAreaRatio);
   EXPECT_EQ(c.mosaic.minBlockPx, d.mosaic.minBlockPx);
   EXPECT_EQ(c.mosaic.blocksPerLongSide, d.mosaic.blocksPerLongSide);
   EXPECT_FLOAT_EQ(c.face.scoreThreshold, d.face.scoreThreshold);
   EXPECT_FLOAT_EQ(c.face.nmsIou, d.face.nmsIou);
   EXPECT_EQ(c.face.topK, d.face.topK);
+  EXPECT_FLOAT_EQ(c.faceConfirmScore, d.faceConfirmScore);
+  EXPECT_FLOAT_EQ(c.plateConfirmScore, d.plateConfirmScore);
 }
 
 void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{}); }
@@ -50,8 +54,6 @@ void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{})
 RedactConfig nonDefaultConfig() {
   RedactConfig c;
   c.detectFps = 12.0;
-  c.maxDetectFps = 30.0;
-  c.motionThreshold = 0.125;
   c.decode.scoreThreshold = 0.25f;
   c.decode.nmsIou = 0.375f;
   c.timeline.matchMaxDistance = 1.5;
@@ -59,10 +61,14 @@ RedactConfig nonDefaultConfig() {
   c.timeline.expandFraction = 0.2;
   c.timeline.motionExpandFraction = 0.75;
   c.timeline.minBoxPx = 24.0;
+  c.timeline.shrinkPerFrame = 0.125;
+  c.timeline.maxMaskAreaRatio = 2.5;
   c.mosaic.minBlockPx = 12;
   c.mosaic.blocksPerLongSide = 6;
   c.face.scoreThreshold = 0.4375f;
   c.face.nmsIou = 0.25f;
+  c.faceConfirmScore = 0.375f;
+  c.plateConfirmScore = 0.0625f;
   return c;
 }
 
@@ -115,9 +121,8 @@ TEST(RedactConfig, RepositoryFileMatchesTheDefaults) {
 
 TEST(RedactConfig, EmptyObjectGivesDefaultsAndKeysOverride) {
   expectDefaults(parseRedactConfig("{}", "t"));
-  const RedactConfig c = parseRedactConfig(R"({"detect_fps": 10, "max_detect_fps": 30, "expand_fraction": 0.2})", "t");
-  EXPECT_DOUBLE_EQ(c.detectFps, 10);
-  EXPECT_DOUBLE_EQ(c.maxDetectFps, 30);
+  const RedactConfig c = parseRedactConfig(R"({"detect_fps": 15, "expand_fraction": 0.2})", "t");
+  EXPECT_DOUBLE_EQ(c.detectFps, 15);
   EXPECT_DOUBLE_EQ(c.timeline.expandFraction, 0.2);
 }
 
@@ -126,9 +131,41 @@ TEST(RedactConfig, ReadsTheLooseMatchingDistance) {
   EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"match_max_distance_loose": 3.5})", "t").timeline.matchMaxDistanceLoose, 3.5);
 }
 
+// Mask smoothing (spec 2026-10-19 §3.1): a mask's width and height shrink by at most 2 % per frame, and a mask
+// covers at most 4 times its box. The values are calibrated in the last task of the plan.
+TEST(RedactConfig, ReadsTheMaskSmoothingSettings) {
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.shrinkPerFrame, 0.02);
+  EXPECT_DOUBLE_EQ(RedactConfig{}.timeline.maxMaskAreaRatio, 4.0);
+  const RedactConfig c = parseRedactConfig(R"({"shrink_per_frame": 0.05, "max_mask_area_ratio": 3})", "t");
+  EXPECT_DOUBLE_EQ(c.timeline.shrinkPerFrame, 0.05);
+  EXPECT_DOUBLE_EQ(c.timeline.maxMaskAreaRatio, 3.0);
+  EXPECT_NO_THROW(parseRedactConfig(R"({"shrink_per_frame": 1, "max_mask_area_ratio": 1})", "t"));
+}
+
+// Low-score confirmation (spec 2026-10-19 §3.4): faces below 0.5 and plates below 0.15 are masked only once seen on
+// two consecutive keyframes. The values are calibrated in the last task of the plan.
+TEST(RedactConfig, ReadsTheConfirmScores) {
+  EXPECT_FLOAT_EQ(RedactConfig{}.faceConfirmScore, 0.5f);
+  EXPECT_FLOAT_EQ(RedactConfig{}.plateConfirmScore, 0.15f);
+  const RedactConfig c = parseRedactConfig(R"({"face_confirm_score": 0.4, "plate_confirm_score": 0})", "t");
+  EXPECT_FLOAT_EQ(c.faceConfirmScore, 0.4f);
+  EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.0f);
+}
+
+// The thresholds go to the timeline by the detector's class names, in its class order; other classes need none.
+TEST(RedactConfig, ConfirmScoresFollowTheDetectorsClassNames) {
+  RedactConfig c;
+  c.faceConfirmScore = 0.4f;
+  c.plateConfirmScore = 0.2f;
+  c.timeline.expandFraction = 0.25;
+  EXPECT_EQ(timelineFor(c, {"plate", "face"}).confirmScore, (std::vector<float>{0.2f, 0.4f}));
+  EXPECT_EQ(timelineFor(c, {"face", "plate", "sign"}).confirmScore, (std::vector<float>{0.4f, 0.2f, 0.0f}));
+  EXPECT_DOUBLE_EQ(timelineFor(c, {"face"}).expandFraction, 0.25);
+}
+
 TEST(RedactConfig, RejectsBadInput) {
   const std::vector<std::string> bad = {
-      R"({"detect_fps": 4})",          R"({"detect_fps": 20, "max_detect_fps": 10})",
+      R"({"detect_fps": 4})",          R"({"detect_fps": 61})",          R"({"detect_fps": 4.99})",
       R"({"score_threshold": 1.5})",   R"({"nms_iou": 0})",
       R"({"match_max_distance": 0})",  R"({"expand_fraction": -0.1})",
       R"({"match_max_distance_loose": 0})", R"({"match_max_distance_loose": -1})",
@@ -154,21 +191,28 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"face_score_threshold": 1.5})",           R"({"face_score_threshold": -0.1})",
       R"({"face_score_threshold": "0.3"})",         R"({"face_nms_iou": 0})",
       R"({"face_nms_iou": 1.5})",                   R"({"face_nms_iou": -0.3})",
+      // Mask smoothing: a shrink fraction in (0, 1] and an area ratio of at least 1.
+      R"({"shrink_per_frame": 0})",                 R"({"shrink_per_frame": 1.5})",
+      R"({"shrink_per_frame": "0.02"})",            R"({"max_mask_area_ratio": 0.5})",
+      R"({"max_mask_area_ratio": 1e400})",
+      // The confirmation thresholds are scores in [0, 1].
+      R"({"face_confirm_score": 1.5})",             R"({"plate_confirm_score": -0.1})",
+      R"({"face_confirm_score": "0.5"})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
 
 TEST(RedactConfig, RejectsOutOfRangeValuesAndNulls) {
   const std::vector<std::string> bad = {
-      R"({"motion_threshold": 1.5})",  R"({"motion_threshold": -0.1})",
       R"({"nms_iou": 1.5})",           R"({"min_box_px": -1})",
-      R"({"detect_fps": null})",       R"({"max_detect_fps": null})",
-      R"({"motion_threshold": null})", R"({"score_threshold": null})",
+      R"({"detect_fps": null})",       R"({"score_threshold": null})",
       R"({"nms_iou": null})",          R"({"match_max_distance": null})",
       R"({"match_max_distance_loose": null})",
       R"({"expand_fraction": null})",  R"({"motion_expand_fraction": null})",
       R"({"min_box_px": null})",       R"({"mosaic_blocks_per_long_side": null})",
       R"({"face_score_threshold": null})", R"({"face_nms_iou": null})",
+      R"({"shrink_per_frame": null})",     R"({"max_mask_area_ratio": null})",
+      R"({"face_confirm_score": null})",   R"({"plate_confirm_score": null})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -202,8 +246,6 @@ struct NumericField {
 TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
   const std::vector<NumericField> fields = {
       {"detect_fps", [](RedactConfig& c, double v) { c.detectFps = v; }},
-      {"max_detect_fps", [](RedactConfig& c, double v) { c.maxDetectFps = v; }},
-      {"motion_threshold", [](RedactConfig& c, double v) { c.motionThreshold = v; }},
       {"score_threshold", [](RedactConfig& c, double v) { c.decode.scoreThreshold = static_cast<float>(v); }},
       {"nms_iou", [](RedactConfig& c, double v) { c.decode.nmsIou = static_cast<float>(v); }},
       {"match_max_distance", [](RedactConfig& c, double v) { c.timeline.matchMaxDistance = v; }},
@@ -211,8 +253,12 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"expand_fraction", [](RedactConfig& c, double v) { c.timeline.expandFraction = v; }},
       {"motion_expand_fraction", [](RedactConfig& c, double v) { c.timeline.motionExpandFraction = v; }},
       {"min_box_px", [](RedactConfig& c, double v) { c.timeline.minBoxPx = v; }},
+      {"shrink_per_frame", [](RedactConfig& c, double v) { c.timeline.shrinkPerFrame = v; }},
+      {"max_mask_area_ratio", [](RedactConfig& c, double v) { c.timeline.maxMaskAreaRatio = v; }},
       {"face_score_threshold", [](RedactConfig& c, double v) { c.face.scoreThreshold = static_cast<float>(v); }},
       {"face_nms_iou", [](RedactConfig& c, double v) { c.face.nmsIou = static_cast<float>(v); }},
+      {"face_confirm_score", [](RedactConfig& c, double v) { c.faceConfirmScore = static_cast<float>(v); }},
+      {"plate_confirm_score", [](RedactConfig& c, double v) { c.plateConfirmScore = static_cast<float>(v); }},
   };
   const std::vector<double> nonFinite = {std::numeric_limits<double>::quiet_NaN(),
                                          std::numeric_limits<double>::infinity(),
@@ -232,18 +278,38 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
   }
 }
 
-TEST(RedactConfig, DetectFpsMessageFormatsTheMinimum) {
-  try {
-    parseRedactConfig(R"({"detect_fps": 4})", "cfg");
-    ADD_FAILURE() << "accepted detect_fps 4";
-  } catch (const VcError& e) {
-    EXPECT_EQ(std::string(e.what()), "cfg: detect_fps must be >= 5");
+TEST(RedactConfig, DetectFpsMessageGivesTheRange) {
+  for (const char* text : {R"({"detect_fps": 4})", R"({"detect_fps": 61})"}) {
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted " << text;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()), "cfg: detect_fps must be in [5, 60]");
+    }
+  }
+}
+
+TEST(RedactConfig, AcceptsTheDetectFpsBounds) {
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"detect_fps": 5})", "t").detectFps, 5);
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"detect_fps": 60})", "t").detectFps, 60);
+}
+
+// The motion-triggered rate is gone (spec 2026-10-19 §2): an old config that still sets it is refused with a message
+// that says the key was removed, not that it is an unknown typo.
+TEST(RedactConfig, RejectsTheRemovedKeysByName) {
+  for (const std::string key : {"max_detect_fps", "motion_threshold"}) {
+    try {
+      parseRedactConfig("{\"" + key + "\": 15}", "cfg");
+      ADD_FAILURE() << "accepted " << key;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()).rfind("cfg: " + key + " was removed", 0), 0u) << e.what();
+    }
   }
 }
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 14u);
+  EXPECT_EQ(j.size(), 16u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -255,6 +321,8 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   EXPECT_EQ(j.at("nms_iou").dump(), "0.5");
   EXPECT_EQ(j.at("face_score_threshold").dump(), "0.3");
   EXPECT_EQ(j.at("face_nms_iou").dump(), "0.3");
+  EXPECT_EQ(j.at("face_confirm_score").dump(), "0.5");
+  EXPECT_EQ(j.at("plate_confirm_score").dump(), "0.15");
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {

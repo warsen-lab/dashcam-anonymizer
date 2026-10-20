@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "common/vc_error.h"
 
@@ -17,6 +18,9 @@ extern "C" {
 namespace vc {
 namespace {
 
+// A track's block moves up the ladder only when its mask asks for more than this many times the block.
+constexpr double kBlockUpgradeFactor = 1.5;
+
 int ceilShift(int value, int shift) { return -((-value) >> shift); }
 
 PixelRect clipped(const PixelRect& r, int width, int height) {
@@ -24,24 +28,23 @@ PixelRect clipped(const PixelRect& r, int width, int height) {
           std::clamp(r.y2, 0, height)};
 }
 
-// End of the block that starts at `begin` on an axis ending at `end`: `size` further, but a remainder
-// after it that is narrower than half a block joins this block (a thin strip would keep near-original
-// detail), and nothing runs past `end`.
-int blockEnd(int begin, int end, int size) {
-  const int64_t next = static_cast<int64_t>(begin) + size;
-  if (next >= end) return end;
-  const int64_t remainder = end - next;
-  return remainder * 2 < size ? end : static_cast<int>(next);
+// `r` (inside the frame) with its edges moved out to multiples of `block`, clipped to the frame.
+PixelRect snapped(const PixelRect& r, int block, int width, int height) {
+  const auto down = [block](int v) { return v / block * block; };
+  const auto up = [block](int v) {
+    return static_cast<int>((static_cast<int64_t>(v) + block - 1) / block * block);
+  };
+  return clipped({down(r.x1), down(r.y1), up(r.x2), up(r.y2)}, width, height);
 }
 
-// Sets every blockW x blockH block of `rect` (plane pixels) to its rounded mean; see blockEnd for the
-// trailing blocks. `step` is the byte distance between neighbouring samples, `offset` the first
-// sample's byte (NV12 chroma: 2, 0/1).
-void pixelate(uint8_t* data, int stride, const PixelRect& rect, int blockW, int blockH, int step, int offset) {
-  for (int by = rect.y1, ey = 0; by < rect.y2; by = ey) {
-    ey = blockEnd(by, rect.y2, blockH);
-    for (int bx = rect.x1, ex = 0; bx < rect.x2; bx = ex) {
-      ex = blockEnd(bx, rect.x2, blockW);
+// Sets every cell of the cellW x cellH grid anchored at the plane's origin inside `area` (plane pixels,
+// its edges on the grid or at the plane's edge) to the cell's rounded mean. `step` is the byte distance
+// between neighbouring samples, `offset` the first sample's byte (NV12 chroma: 2, 0 / 1).
+void pixelateGrid(uint8_t* data, int stride, const PixelRect& area, int cellW, int cellH, int step, int offset) {
+  for (int by = area.y1; by < area.y2; by += cellH) {
+    const int ey = std::min(by + cellH, area.y2);
+    for (int bx = area.x1; bx < area.x2; bx += cellW) {
+      const int ex = std::min(bx + cellW, area.x2);
       uint64_t sum = 0;
       for (int y = by; y < ey; ++y) {
         const uint8_t* row = data + static_cast<ptrdiff_t>(y) * stride + offset;
@@ -60,6 +63,26 @@ void pixelate(uint8_t* data, int stride, const PixelRect& rect, int blockW, int 
 void requireValidConfig(const MosaicConfig& config) {
   if (config.minBlockPx < 1 || config.blocksPerLongSide < 1) {
     throw std::invalid_argument("mosaic block settings must be >= 1");
+  }
+}
+
+// Even and >= 2 for every format (the chroma grid of 4:2:0 and 4:2:2, half the block, lines up with the luma grid).
+// A format whose chroma is subsampled by more than 2 needs more: requireBlocksFitChroma.
+void requireValidBlock(int block) {
+  if (block < 2 || block % 2 != 0) {
+    throw std::invalid_argument("mosaic block sizes must be even and >= 2, got " + std::to_string(block));
+  }
+}
+
+// A block must be a whole number of chroma samples along both axes, so that the chroma grid lines up with the luma
+// grid and no chroma cell is empty: a multiple of 2 for 4:2:0, 4:2:2 and NV12, of 4 for 4:1:1 and 4:1:0.
+void requireBlocksFitChroma(const std::vector<MosaicRect>& rects, const AVPixFmtDescriptor& desc) {
+  const int multiple = 1 << std::max(desc.log2_chroma_w, desc.log2_chroma_h);
+  for (const MosaicRect& r : rects) {
+    if (r.block % multiple != 0) {
+      throw std::invalid_argument("mosaic block " + std::to_string(r.block) + " is not a multiple of " +
+                                  std::to_string(multiple) + ", the chroma subsampling of " + desc.name);
+    }
   }
 }
 
@@ -84,8 +107,35 @@ int mosaicBlockSize(const PixelRect& rect, const MosaicConfig& config) {
   return static_cast<int>(std::max<int64_t>(config.minBlockPx, perBlock));
 }
 
-void applyMosaic(AVFrame& frame, const std::vector<PixelRect>& rects, const MosaicConfig& config) {
-  requireValidConfig(config);  // before any pixel is touched, whatever the rects are
+int ladderBlock(int wanted) {
+  for (const int step : kMosaicBlockLadder) {
+    if (step >= wanted) return step;
+  }
+  return kMosaicBlockLadder.back();
+}
+
+int nextTrackBlock(int current, int wanted) {
+  if (current <= 0) return ladderBlock(wanted);
+  if (static_cast<double>(wanted) > kBlockUpgradeFactor * current) return std::max(current, ladderBlock(wanted));
+  return current;
+}
+
+TrackBlocks::TrackBlocks(const MosaicConfig& config) : config_(config) { requireValidConfig(config); }
+
+int TrackBlocks::blockFor(int64_t track, const PixelRect& rect) {
+  const auto it = previous_.find(track);
+  const int block = nextTrackBlock(it == previous_.end() ? 0 : it->second, mosaicBlockSize(rect, config_));
+  current_[track] = block;
+  return block;
+}
+
+void TrackBlocks::endFrame() {
+  previous_ = std::move(current_);
+  current_.clear();
+}
+
+void applyMosaic(AVFrame& frame, const std::vector<MosaicRect>& rects) {
+  for (const MosaicRect& r : rects) requireValidBlock(r.block);  // before any pixel is touched
   const auto format = static_cast<AVPixelFormat>(frame.format);
   const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(format);
   const bool nv12 = format == AV_PIX_FMT_NV12;
@@ -97,25 +147,30 @@ void applyMosaic(AVFrame& frame, const std::vector<PixelRect>& rects, const Mosa
   if (!nv12 && !planar) {
     throw VcError(std::string("mosaic: unsupported pixel format ") + (desc ? desc->name : "unknown"));
   }
+  requireBlocksFitChroma(rects, *desc);  // still before any pixel is touched
   if (!av_frame_is_writable(&frame)) {
     throw VcError("mosaic: frame buffers are shared; make the frame writable first");
   }
   const int sw = desc->log2_chroma_w;
   const int sh = desc->log2_chroma_h;
-  for (const PixelRect& raw : rects) {
-    const PixelRect r = clipped(raw, frame.width, frame.height);
+  // Largest blocks first: where masks overlap, the finer mosaic drawn last is what shows.
+  std::vector<MosaicRect> ordered = rects;
+  std::stable_sort(ordered.begin(), ordered.end(),
+                   [](const MosaicRect& a, const MosaicRect& b) { return a.block > b.block; });
+  for (const MosaicRect& m : ordered) {
+    const PixelRect r = clipped(m.rect, frame.width, frame.height);
     if (r.empty()) continue;
-    const int block = mosaicBlockSize(r, config);
-    pixelate(frame.data[0], frame.linesize[0], r, block, block, 1, 0);
-    const PixelRect c{r.x1 >> sw, r.y1 >> sh, ceilShift(r.x2, sw), ceilShift(r.y2, sh)};
-    const int bw = std::max(1, ceilShift(block, sw));
-    const int bh = std::max(1, ceilShift(block, sh));
+    const PixelRect area = snapped(r, m.block, frame.width, frame.height);
+    pixelateGrid(frame.data[0], frame.linesize[0], area, m.block, m.block, 1, 0);
+    const PixelRect c{area.x1 >> sw, area.y1 >> sh, ceilShift(area.x2, sw), ceilShift(area.y2, sh)};
+    const int cw = m.block >> sw;
+    const int ch = m.block >> sh;
     if (nv12) {
-      pixelate(frame.data[1], frame.linesize[1], c, bw, bh, 2, 0);
-      pixelate(frame.data[1], frame.linesize[1], c, bw, bh, 2, 1);
+      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 2, 0);
+      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 2, 1);
     } else {
-      pixelate(frame.data[1], frame.linesize[1], c, bw, bh, 1, 0);
-      pixelate(frame.data[2], frame.linesize[2], c, bw, bh, 1, 0);
+      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 1, 0);
+      pixelateGrid(frame.data[2], frame.linesize[2], c, cw, ch, 1, 0);
     }
   }
 }

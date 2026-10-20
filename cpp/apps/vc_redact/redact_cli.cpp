@@ -1,6 +1,5 @@
 #include "vc_redact/redact_cli.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
@@ -88,10 +87,7 @@ RedactOptions parseRedactArgs(const std::vector<std::string>& args) {
   }
   try {
     if (config) o.config = readRedactConfig(*config);
-    if (detectFps) {
-      o.config.detectFps = *detectFps;
-      o.config.maxDetectFps = std::max(o.config.maxDetectFps, *detectFps);
-    }
+    if (detectFps) o.config.detectFps = *detectFps;
     validateRedactConfig(o.config, detectFps ? "--detect-fps" : config ? config->string() : "the default settings");
   } catch (const VcError& e) {
     throw UsageError(e.what());
@@ -111,8 +107,9 @@ Options:
   --face-model <dir>        also run the YuNet face model (model.onnx + model.json from vc_train yunet)
                             on every keyframe and mask what either detector finds
   --config <json>           parameters (see configs/redact.json; built-in defaults otherwise)
-  --detect-fps <n>          base keyframe detection rate, >= 5 (overrides the config; raises
-                            max_detect_fps when it is lower)
+  --detect-fps <n>          detections per second of video, 5 to 60 (overrides the config): a
+                            keyframe every round(video fps / n) frames, every frame once n reaches
+                            the video frame rate
   --detect-every-frame      detect on every frame (reference run for temporal coverage)
   --ep <provider>           coreml | cpu (default coreml, falls back to cpu)
   --hwaccel <mode>          decoder: none | auto | videotoolbox (default none)

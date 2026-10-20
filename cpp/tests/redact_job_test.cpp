@@ -54,6 +54,11 @@ RedactOptions baseOptions(const std::string& outName) {
   return o;
 }
 
+// 2 s, 320x240 @ 25 fps (50 frames): a frame rate the 60 fps detection rates do not divide.
+fs::path video25fps() {
+  return test::makeMedia("basic_25fps.mp4", "-f lavfi -i testsrc2=s=320x240:r=25:d=2 -c:v libx264 -pix_fmt yuv420p -g 25");
+}
+
 size_t lineCount(const fs::path& path) {
   std::ifstream in(path);
   size_t n = 0;
@@ -139,20 +144,28 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
   const auto out = decodeAll(s.video);
   ASSERT_EQ(out.size(), 60u);
   ASSERT_EQ(in.size(), 60u);
-  // The mask is the fake box grown by 15 % per side, (85, 88)-(215, 192), in 17 px blocks: the
-  // block [102, 119) x [105, 122) is flat in the output and noisy in the input, on every frame.
+  // The mask is the fake box grown by 15 % per side, (85, 88)-(215, 192); its long side asks for ceil(130 / 8) = 17 px
+  // blocks, the ladder's 24, on the frame's grid: the cell [96, 120) x [96, 120) is flat in the output and noisy in
+  // the input, on every frame.
   for (size_t i = 0; i < out.size(); ++i) {
-    EXPECT_LT(lumaStd(*out[i], 104, 107, 117, 120), 4.0) << "frame " << i;
-    EXPECT_GT(lumaStd(*in[i], 104, 107, 117, 120), 15.0) << "frame " << i;
+    EXPECT_LT(lumaStd(*out[i], 96, 96, 120, 120), 4.0) << "frame " << i;
+    EXPECT_GT(lumaStd(*in[i], 96, 96, 120, 120), 15.0) << "frame " << i;
     // Far from the mask the picture is kept: same brightness, still detailed.
     EXPECT_NEAR(lumaMean(*out[i], 400, 220, 560, 330), lumaMean(*in[i], 400, 220, 560, 330), 3.0) << "frame " << i;
     EXPECT_GT(lumaStd(*out[i], 400, 220, 560, 330), 10.0) << "frame " << i;
+  }
+
+  // Every mask records the block it was pixelated with; one static target keeps one block.
+  std::ifstream masksFile(dir / "masks.jsonl");
+  for (std::string line; std::getline(masksFile, line);) {
+    for (const auto& box : nlohmann::json::parse(line).at("boxes")) EXPECT_EQ(box.at("block").get<int>(), 24) << line;
   }
 }
 
 // A face and a plate moving 2.5 and 2 box widths per keyframe interval (200 ms = 6 frames), turning
 // round at frame 30 and coming back. The fake detections list every frame (the pipeline asks only
-// for the keyframes), so they are also the ground truth: the box is pixelated on every output frame.
+// for the keyframes), so they are also the ground truth: the box is pixelated on every output frame up to the
+// last keyframe.
 TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
   struct Target {
     const char* cls;
@@ -176,7 +189,6 @@ TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
 
   RedactOptions o = baseOptions("redact_fast_movers");
   o.input = test::checkerboardVideo();
-  o.config.maxDetectFps = o.config.detectFps;  // keyframes exactly every 200 ms, motion or not
   const fs::path fake = test::tmpDir() / "redact_fast_movers.jsonl";
   {
     std::ofstream out(fake);
@@ -201,29 +213,70 @@ TEST(RedactJob, MasksTargetsThatMoveSeveralBoxWidthsBetweenKeyframes) {
   for (int f = 0; f < 60; ++f) {
     for (const Target& t : targets) {
       const Rect r = rectAt(t, f);
-      const double before = roughness(*in[f], r.x1, r.y1, r.x2, r.y2);
-      const double after = roughness(*out[f], r.x1, r.y1, r.x2, r.y2);
-      EXPECT_GT(before, 0.45) << t.cls << " frame " << f;
-      EXPECT_LT(after, 0.1) << t.cls << " frame " << f;
+      EXPECT_GT(roughness(*in[f], r.x1, r.y1, r.x2, r.y2), 0.45) << t.cls << " frame " << f;
+      // After the last keyframe (54) a target is only held half a box side further (spec 2026-10-19 §3.3), so
+      // these targets, moving 2 to 2.5 widths per interval, leave their masks there.
+      if (f <= 54) EXPECT_LT(roughness(*out[f], r.x1, r.y1, r.x2, r.y2), 0.1) << t.cls << " frame " << f;
     }
     // Away from both paths the checkerboard survives the encoder, so a leak would show.
     EXPECT_GT(roughness(*out[f], 300, 150, 340, 200), 0.4) << "frame " << f;
   }
-  // Both targets are tracked: every frame between two keyframes (0, 6, ..., 54; the frames after the
-  // last one are extended) has an interpolated box of each class.
+  // Each target is one track: exactly one box of its class on every frame, detected on the keyframes (0, 6, ...,
+  // 54), interpolated between them and held after the last one.
   std::ifstream masks(s.outputDir / "masks.jsonl");
   for (std::string line; std::getline(masks, line);) {
     const nlohmann::json record = nlohmann::json::parse(line);
     const int frame = record.at("frame").get<int>();
-    if (frame % 6 == 0 || frame > 54) continue;
     for (const Target& t : targets) {
-      bool interpolated = false;
+      int boxes = 0;
+      std::string origin;
       for (const auto& box : record.at("boxes")) {
-        interpolated = interpolated || (box.at("cls") == t.cls && box.at("origin") == "interpolated");
+        if (box.at("cls") != t.cls) continue;
+        ++boxes;
+        origin = box.at("origin").get<std::string>();
       }
-      EXPECT_TRUE(interpolated) << t.cls << " frame " << frame;
+      EXPECT_EQ(boxes, 1) << t.cls << " frame " << frame;
+      const std::string expected = frame > 54 ? "held" : frame % 6 == 0 ? "detected" : "interpolated";
+      EXPECT_EQ(origin, expected) << t.cls << " frame " << frame;
     }
   }
+}
+
+// Low-score boxes (below face_confirm_score, 0.5 by default) are masked only once their track is matched at two
+// consecutive keyframes, and then from the first of them on; one seen once is not masked and is written to
+// detections.jsonl with "confirmed": false (spec 2026-10-19 §3.4). Keyframes every 6 frames (5 fps on 30 fps).
+TEST(RedactJob, MasksALowScoreFaceOnlyOnceItIsConfirmed) {
+  RedactOptions o = baseOptions("redact_confirm");
+  o.config.faceConfirmScore = 0.5f;  // the threshold this test is written for, whatever the calibrated default
+  const fs::path fake = test::tmpDir() / "redact_confirm.jsonl";
+  {
+    std::ofstream out(fake);
+    const auto face = [&](int frame, int x1) {
+      out << R"({"video":"noisy_audio.mp4","frame":)" << frame << R"(,"pts_ms":0,"cls":"face","x1":)" << x1
+          << R"(,"y1":100,"x2":)" << x1 + 80 << R"(,"y2":180,"score":0.3,"src":"fake"})" << '\n';
+    };
+    face(12, 100);  // seen once
+    face(24, 300);  // seen on two consecutive keyframes
+    face(30, 300);
+  }
+  o.fakeDetections = fake;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 10);
+  std::map<int, bool> confirmed;
+  std::ifstream detections(s.outputDir / "detections.jsonl");
+  for (std::string line; std::getline(detections, line);) {
+    const nlohmann::json d = nlohmann::json::parse(line);
+    confirmed[d.at("frame").get<int>()] = d.at("confirmed").get<bool>();
+  }
+  EXPECT_EQ(confirmed, (std::map<int, bool>{{12, false}, {24, true}, {30, true}}));
+  std::ifstream masks(s.outputDir / "masks.jsonl");
+  for (std::string line; std::getline(masks, line);) {
+    const nlohmann::json record = nlohmann::json::parse(line);
+    const int frame = record.at("frame").get<int>();
+    // from the first of the two keyframes (24) to the end of the hold after the second (35)
+    EXPECT_EQ(record.at("boxes").size(), frame >= 24 && frame < 36 ? 1u : 0u) << "frame " << frame;
+  }
+  EXPECT_EQ(s.maskedFrames, 12);
 }
 
 TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
@@ -232,6 +285,74 @@ TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.keyframes, 60);
   EXPECT_EQ(s.detections, 60);
+  EXPECT_EQ(s.keyframeStride, 1);
+  EXPECT_NEAR(s.detectFpsActual, 30.0, 1e-6);
+}
+
+// Keyframes come every round(video fps / detect_fps) frames by frame index: 10 on a 30 fps video is every third
+// frame, and stats.json says how often that really is (spec 2026-10-19 §2).
+TEST(RedactJob, KeyframesComeEveryStrideFramesOfTheVideoFrameRate) {
+  RedactOptions o = baseOptions("redact_stride");
+  o.config.detectFps = 10.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 20);
+  EXPECT_EQ(s.keyframeStride, 3);
+  EXPECT_NEAR(s.videoFps, 30.0, 1e-6);
+  EXPECT_NEAR(s.detectFpsActual, 10.0, 1e-6);
+  std::ifstream detections(s.outputDir / "detections.jsonl");
+  for (std::string line; std::getline(detections, line);) {
+    EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int>() % 3, 0) << line;
+  }
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("keyframe_stride").get<int>(), 3);
+  EXPECT_NEAR(stats.at("detect_fps_actual").get<double>(), 10.0, 1e-6);
+  EXPECT_NEAR(stats.at("video_fps").get<double>(), 30.0, 1e-6);
+}
+
+// The spec's example: 10 on a 25 fps video is every third frame, 8.3 detections a second.
+TEST(RedactJob, TenOnATwentyFiveFpsVideoDetectsEveryThirdFrame) {
+  RedactOptions o = baseOptions("redact_25fps");
+  o.input = video25fps();
+  o.config.detectFps = 10.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.frames, 50);
+  EXPECT_EQ(s.keyframes, 17);  // 0, 3, ..., 48
+  EXPECT_EQ(s.keyframeStride, 3);
+  EXPECT_NEAR(s.detectFpsActual, 25.0 / 3.0, 1e-6);
+  EXPECT_TRUE(redactWarnings(s).empty());
+}
+
+TEST(RedactJob, ARequestAboveTheVideoRateDetectsEveryFrameAndSaysSo) {
+  RedactOptions o = baseOptions("redact_above_rate");
+  o.input = video25fps();
+  o.config.detectFps = 30.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.keyframes, 50);
+  EXPECT_EQ(s.keyframeStride, 1);
+  const std::vector<std::string> warnings = redactWarnings(s);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0], "note: detect_fps 30 is above the video's 25.00 fps, so every frame is a keyframe");
+}
+
+// A frame rate above 1e6 fps in the header is a broken stream, not a video: the run is refused with a message that
+// names the file and the rate (detectSchedule's std::invalid_argument does not), before anything is created.
+TEST(RedactJob, AnImplausibleFrameRateIsRefusedNamingTheVideo) {
+  RedactOptions o = baseOptions("redact_huge_fps");
+  // 100 frames half a microsecond apart: avg_frame_rate 400000000/201, about 1.99 million fps.
+  o.input = test::makeMedia("huge_fps.mp4",
+                            "-f lavfi -i \"testsrc2=s=64x64:r=1000000:d=0.0001,setpts=PTS/2\" -fps_mode passthrough "
+                            "-c:v libx264 -pix_fmt yuv420p -video_track_timescale 4000000");
+  try {
+    runRedact(o);
+    ADD_FAILURE() << "accepted a 1.99 million fps video";
+  } catch (const VcError& e) {
+    const std::string what = e.what();
+    EXPECT_NE(what.find("huge_fps.mp4"), std::string::npos) << what;
+    EXPECT_NE(what.find("(0, 1e6]"), std::string::npos) << what;
+    EXPECT_NE(what.find("1.99005e+06"), std::string::npos) << what;
+  }
+  EXPECT_FALSE(fs::exists(o.outRoot));
 }
 
 TEST(RedactJob, FailureLeavesNoOutputFilesBehind) {
@@ -388,7 +509,14 @@ TEST(RedactJob, AFaceModelAddsItsBoxesAndMergesTheOnesBothDetectorsFind) {
   }
   EXPECT_EQ(maskedFrames, 60);
   std::ifstream statsFile(s.outputDir / "stats.json");
-  EXPECT_EQ(nlohmann::json::parse(statsFile).at("detector").get<std::string>(), "fake + yunet/CPU");
+  const nlohmann::json stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("detector").get<std::string>(), "fake + yunet/CPU");
+  // Both detectors' own busy times, one item per keyframe each; detect is the wall time of the two together.
+  EXPECT_EQ(s.detectStudent.items, s.keyframes);
+  EXPECT_EQ(s.detectFace.items, s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("detect_student").at("items").get<int64_t>(), s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("detect_face").at("items").get<int64_t>(), s.keyframes);
+  EXPECT_GT(s.detectFace.busySec, 0.0);
 }
 
 TEST(RedactJob, ChecksTheFaceModelBeforeCreatingAnything) {
@@ -447,8 +575,8 @@ TEST(RedactJob, ReportsAndDropsNonMediaStreams) {
   EXPECT_EQ(stats.at("dropped_streams").size(), 1u);
 }
 
-// 500 frames in 0.5 s: the sampler's 200 ms interval would leave 200 frames buffered, so
-// the 120-frame limit has to force keyframes.
+// 500 frames at 1000 fps: 5 fps is a 200-frame stride, which would leave 200 frames buffered, so the
+// 120-frame limit has to force keyframes (at 120 and 320).
 TEST(RedactJob, ForcesAKeyframeWhenTheBufferGrowsTooLong) {
   RedactOptions o = baseOptions("redact_buffer");
   o.input = test::makeMedia("fast_1000fps.mp4",
@@ -465,7 +593,7 @@ TEST(RedactJob, ForcesAKeyframeWhenTheBufferGrowsTooLong) {
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.frames, 500);
   EXPECT_EQ(s.maskedFrames, 500);
-  EXPECT_GE(s.keyframes, 5);  // frames 0, 120, 200, 320, 400; the sampler alone would pick 0, 200, 400
+  EXPECT_GE(s.keyframes, 5);  // frames 0, 120, 200, 320, 400; the stride alone would pick 0, 200, 400
   EXPECT_EQ(lineCount(s.outputDir / "masks.jsonl"), 500u);
 }
 
@@ -669,6 +797,12 @@ TEST(RedactJob, ReportsTheMainStageAndTheSetupTime) {
   for (const char* stage : {"decode", "detect", "track", "mosaic", "encode"}) {
     EXPECT_TRUE(stats.at("stages").contains(stage)) << stage;
   }
+  // Without a face model the student is the only detector: its busy time is detect's, the face model has none.
+  EXPECT_DOUBLE_EQ(s.detectStudent.busySec, s.detect.busySec);
+  EXPECT_EQ(s.detectStudent.items, s.detect.items);
+  EXPECT_EQ(s.detectFace.items, 0);
+  EXPECT_TRUE(stats.at("stages").contains("detect_student"));
+  EXPECT_TRUE(stats.at("stages").contains("detect_face"));
 }
 
 TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
@@ -679,16 +813,27 @@ TEST(RedactJob, TheSummaryShowsTheSetupAndTheParallelStages) {
   s.decode = StageStat{0.5, 600};
   s.main = StageStat{2.0, 600};
   s.detect = StageStat{1.5, 50};
+  s.detectStudent = StageStat{1.2, 50};
+  s.detectFace = StageStat{0.6, 50};
   s.track = StageStat{0.25, 600};
   s.mosaic = StageStat{0.25, 600};
   s.encode = StageStat{2.4, 600};
+  s.videoFps = 60000.0 / 1001.0;
+  s.keyframeStride = 6;
+  s.detectFpsActual = s.videoFps / 6;
   const std::string summary = redactSummary(s);
   EXPECT_NE(summary.find("setup:         0.75 s"), std::string::npos) << summary;
   EXPECT_NE(summary.find("stages (fps):  decode 1200.0, main 300.0 (detect 33.3, track 2400.0, mosaic 2400.0), "
                          "encode 250.0"),
             std::string::npos)
       << summary;
+  EXPECT_NE(summary.find("detect rate:   9.99 /s (every 6 frames of a 59.94 fps video)\n"), std::string::npos) << summary;
   EXPECT_NE(summary.find("elapsed:       3.00 s (200.0 fps)"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("detectors:     student 24.0 ms + face 12.0 ms per keyframe, run in parallel: 30.0 ms\n"),
+            std::string::npos)
+      << summary;
+  s.detectFace = StageStat{};
+  EXPECT_EQ(redactSummary(s).find("detectors:"), std::string::npos);  // one detector: no such line
 }
 
 TEST(RedactJob, QueueCapacityIsBoundedByBytesPerFrame) {

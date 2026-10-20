@@ -190,7 +190,7 @@ PYTHONPATH=py .venv/bin/python -m vc_train yunet --out data/models/yunet
 
 | # | 条件 | 谁判定 |
 |---|---|---|
-| P1 | 最终覆盖率（高置信参照，见下）：人脸、车牌各自 ≥ 99%，按所有留出段的目标数相加后的合并覆盖率判定（规格要的是每类一个最终召回；同时给 95% 区间；某一类一个必须遮住的目标都没有时不通过） | `vc_eval` |
+| P1 | 最终覆盖率（高置信参照，见下）：人脸、车牌各自 ≥ 99%（`--recall-target` 可按类改，本轮验收用人脸 95%、车牌 98%），按所有留出段的目标数相加后的合并覆盖率判定（规格要的是每类一个最终召回；同时给 95% 区间；某一类一个必须遮住的目标都没有时不通过） | `vc_eval` |
 | P2 | 热力图（6×4，高置信参照，同样按合并后的计数）中样本 ≥ 30 的格子覆盖率均 ≥ 97%；**没有格子够 30 个样本时显示 `n/a`：没有热力格达到 30 个目标，所以 P2 空洞满足（不阻止它成为候选），空间上的薄弱点只能靠用户的抽查（P4）把关** | `vc_eval` |
 | P3 | 输出完整性：可解码、帧数 ±1、分辨率与源视频一致、时长、音频保留、音画同步；**每一段**都要通过。源或输出的容器没给出时长、某个流没给出起始时间或宽高时，对应的那一项记为未通过并写明 unknown，不会当成 0 | `vc_eval` |
 | P4 | 抽查页与打码视频里没有明显露出的人脸或车牌 | 用户看 `index.html` 后确认 |
@@ -218,19 +218,22 @@ PYTHONPATH=py .venv/bin/python -m vc_eval run --stems <stemA>,<stemB> --model <�
 ```
 
 - `--face-model <目录>`（可选）：`vc_train yunet` 写出的人脸模型，原样传给每一次 `vc_redact`（逐帧参照和每个频率）作 `--face-model`；C++ / Python 一致性检查仍只比学生模型。`summary.json` 的 `face_model` 和 `summary.md` 开头一行写明用的是哪个（没有时为 `null` / “无”）。开跑前就检查这个目录（在 `--overwrite` 清空旧 `--out` 之前），不过就报错：缺 `model.onnx` 或 `model.json`、`model.onnx` 是空文件、`model.json` 不是 JSON 对象或不是合法 JSON、`output_format` 不是 `"yunet"`、`classes` 不是恰好 `["face"]`；`--out` 也不能与它重叠。
-- `--fps 5,10,15,30`（默认）：要扫描的检测频率，每个值必须是有限数且 ≥ 5，不能重复；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。`--redacted-root`（默认 `data/redacted`）是打码视频的输出目录：换一份 `--config` 时给它另一个目录，否则会覆盖前一份报告链接的视频。
+- `--recall-target face=0.95,plate=0.98`（可选）：P1 的每类召回目标，没写的类别仍是 0.99；`summary.md` 开头一行写明，样本量提醒按各类自己的目标写；`coverage` 子命令也接受同一参数。格式不对（未知类别、缺 `=`、重复、不在 (0, 1]）退出码 2。
+- `--fps 5,10,15,30`（默认）：要扫描的检测频率，每个值必须是 5 到 60 之间的有限数，不能重复；`--vc-redact`、`--vc-detect`、`--config` 默认是 `build/cpp-release/vc_redact`、`build/cpp-release/vc_detect`、`configs/redact.json`。`--redacted-root`（默认 `data/redacted`）是打码视频的输出目录：换一份 `--config` 时给它另一个目录，否则会覆盖前一份报告链接的视频。
+- 参照误检排除：`data/labels/<stem>/excluded_refs.csv`（列 `frame,cls,x1,y1,x2,y2,reason`，UTF-8，带不带 Excel 的 BOM 都行，人工核查后填写，不进 git）里的每一行，把同帧、同类、IoU ≥ 0.5 的参照框从所有覆盖率里去掉（等于这些框从没标过），这些框也不再当作参照（打在上面的码计入误打面积）。一行可以排除多个参照框；一个参照框被几行同时重叠时，原因取 IoU 最大的一行，这几行都算配上了。`summary.md` 的“排除的参照误检”一节按段和合计写：文件几行、排除几个参照框、其中几个原本已被遮住，按类别和层级（高置信的个数就是 P1 分母少掉的数目，另有低置信、尽力）分开数，再按原因数；没配上任何参照框的行单独提醒。文件格式不对（不是 UTF-8、缺列、坏数、坐标不是有限数、类别不是 face / plate、空框、空原因）开跑前就报错，消息带行号。`vc_eval coverage` 在用了这个文件时多打一行排除个数和没配上的行数。`summary.json` 的 `runs[].coverage.excluded` 是同样的计数，`runs[].excluded_list` 逐个列出被排除的参照框（帧号、类别、坐标、层级、是否原本已被遮住、原因），`runs[].miss_list` 列出每个没遮住的高置信参照框（帧号、类别、坐标、覆盖比例），核查后要排除的照抄坐标进这个文件。
 - 开跑前先检查输入，任何一项不过都直接退出（退出码 2），不会花几分钟跑完扫描才发现：每一段的 `frames.csv` 能读、标注与抽帧对得上、`processed.txt` 在、`merged.jsonl` 和 `flags.csv` 在且都不比 `processed.txt` 旧（与单项 `coverage` 同一套检查），所有段的帧尺寸一致（合并覆盖率要求）；然后先做 C++ / Python 一致性检查（两边读的是同一批帧重新存成 4:4:4、质量 100 的 JPEG，放在 `<out>/consistency/same_pixels/`：FFmpeg 和 OpenCV 对 4:2:0 色度的上采样不同，在原始帧上单这一项就让框差出 1 px 以上；缺 `vc_detect` 或模型坏了在这里就停；判定只看分数 ≥ 0.3 的配对：它们的最大角点差必须 < 1 px，至少要有一个这样的配对，没有分数 ≥ 0.3 却没配上的框；所有配对的最大差（含低分框）单独列出，只报告），再开始扫描。`vc_redact` 某次运行失败时，报错带上段名、检测频率、退出码和它 stderr 的最后 20 行。
 - 每段先以 `--detect-every-frame` 跑一次（逐帧检测，作时间覆盖率的参照；时间覆盖率只在那次运行的 `stats.json` 写着 `"detect_every_frame": true`、且稀疏运行的 `masks.jsonl` 恰好覆盖第 0 到 `frames-1` 帧时才计算，缺 `stats.json`、帧数对不上都直接报错），再每个频率跑一次，结果在 `data/redacted/dense/<stem>/` 和 `data/redacted/fps<频率>/<stem>/`，已有的会被覆盖。所以会多次运行 `vc_redact`，两段留出视频约需 10 分钟，期间占满 CPU。
 - 候选频率 = 合并覆盖率（所有留出段的目标数相加后判 P1 / P2）通过、且每一段的输出完整性（P3）都通过的最小频率。它只是**候选**：P4 要你看完 `index.html` 才算数。`summary.md` 写“候选检测频率：X fps（P1–P3 通过；P4 待你看完 index.html 确认）”，命令行打印 `run: candidate X fps (P1-P3 passed; P4: review index.html)`；没有就显示“无满足 P1–P3 的频率”（`run: no detection rate passed P1-P3`），抽查页改用最小的频率。
 - `summary.md` 里这几处是为了不让数字显得比实际证明的更多：
-  - 覆盖率表按检测频率分成几张，每张先列各段、再列一行“合计”，“通过”一栏只在“合计”行，各段行仅供参考；某一类通过了 P1，但 Wilson 区间下限仍低于 99% 时，合计行下面加一行提醒，如“人脸 n=24：即使全部遮住，95% 区间下限只有 86.2%，样本不足以证明 ≥ 99%”（没全遮住时写“实测 H/T”）；候选行也会带上这个提醒。
+  - 覆盖率表按检测频率分成几张，每张先列各段、再列一行“合计”，“通过”一栏只在“合计”行，各段行仅供参考；某一类通过了 P1，但 Wilson 区间下限仍低于该类的召回目标（默认 99%）时，合计行下面加一行提醒，如“人脸 n=24：即使全部遮住，95% 区间下限只有 86.2%，样本不足以证明 ≥ 99%”（没全遮住时写“实测 H/T”）；候选行也会带上这个提醒。
   - “参照分层”表按类给出合并后高置信 / 低置信两层必须遮住的目标各有多少、占多大比例（`summary.json` 的 `reference`），让你看到有多少参照被挡在 P1 / P2 之外；紧接着的“低置信参照”表同样先各段后合计，只报告。
   - 开头一行写明：覆盖率读的是 `masks.jsonl`（`vc_redact` 声明要打码的框），不是打码后视频的像素；马赛克有没有真的打上去，只由 C++ 单元测试和 P4 验证。
   - “细分”一节给候选频率（没有就是最小的频率）合并后的尺寸档表、时间补洞框、尽力遮挡和热力图的 命中/目标数 网格；`summary.json` 的每个覆盖率条目（`runs[].coverage`、`pooled[].coverage`）带完整的 4×6 热力图 `heatmap`（每类 4 行 × 6 列，每格同 `rate_json`）。
   - 速度表按 vc_redact 实际的三个并行线程（解码 / 主线程 / 编码）给出忙碌秒数和占该次总耗时的比例，最接近 100% 的是瓶颈；主线程里串行的检测 / 补框 / 打码给出占主线程的比例（“检测（关键帧）”只统计做过检测的关键帧）；另有准备时间（`setup_s`：第一帧进流水线之前，打开输入、加载模型和 CoreML 编译；编码器的打开算在编码里）和吞吐（帧数 / 总耗时）。旧版 stats.json 没有 `stages.main` 时用三项相加，缺任何一项就显示“—”。表后一行给出估计瓶颈：只合计有总耗时且三个线程计时齐全的运行，用合计忙碌秒数除以合计总耗时。
   - 一致性一行把分数 ≥ 0.3 的配对最大坐标差（判定只看它）和所有配对的最大坐标差（含低分框，只报告）分开写。
-  - `summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed`、`passed` 和 `misses`）；`runs[].misses` 是该段该频率下高置信 / 低置信 / 时间覆盖三种漏掉的个数。
-- 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、参照分层、低置信参照、细分、时间覆盖率、完整性、误打面积、速度（标题注明“本机”、段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。抽查页每一节的说明都按段写明“<段>：共 M 个，均匀抽取展示 N 个”（高置信漏掉、低置信漏掉、时间覆盖三节；M 也写进 `summary.json` 的 `spot_check`），所以你知道看到的是全部还是抽样。`--out` 和 `data/redacted` 都不能放在抽帧根目录 `data/frames/` 之下的任何位置（包括没有用 `--stems` 列出的段，那些目录会被 `vc_extract --overwrite` 整个删掉）；`--out` 也不能等于或包含 `data/frames`、`data/labels`、`data/videos`、`data/redacted`、模型目录、两个可执行文件和配置文件，也不能落在 `data/redacted/dense` 或 `data/redacted/fps<频率>` 里（`vc_redact` 写那里）。
+  - `summary.json` 的 `pooled` 列表每个频率一项（合并后的覆盖率，结构同 `runs[].coverage`，另有 `integrity_passed`、`passed` 和 `misses`）；`runs[].misses` 是该段该频率下高置信 / 低置信 / 时间覆盖三种漏掉的个数。`runs[]` 每项还带 `detect_fps_actual`（`vc_redact` 实际每秒检测的次数）和 `keyframe_stride`（关键帧间隔的帧数），都取自该次运行的 `stats.json`；旧版 `stats.json` 没有这两项时为 `null`。
+- 产物：`data/reports/<run>/summary.md`（覆盖率含合计行、参照分层、低置信参照、细分、时间覆盖率、完整性、误打面积、观感（全部帧、1/4 分辨率栅格：每帧屏上打码面积的均值 / 95 分位 / 99 分位 / 最大、帧间跳变占比、每帧框数中位数 / 95 分位、同轨多框帧数；各段一行，合计行把各段的帧放在一起算；另有一张框并集面积表；`summary.json` 的 `runs[].viewing` 和 `pooled[].viewing`，其中 `area` 是屏上面积、`box_area` 是框并集面积）、速度（标题注明“本机”、段的帧尺寸与源视频编码）、C++ / Python 一致性）、`summary.json`（同样的数字，供脚本读）、`index.html`（抽查页：打码视频链接、未遮住的参照目标（高置信）、低置信参照里没遮住的目标、逐帧检测有而稀疏打码漏掉的框、每段随机 30 帧；纯本地、不加载外部资源）。抽查页每一节的说明都按段写明“<段>：共 M 个，均匀抽取展示 N 个”（高置信漏掉、低置信漏掉、时间覆盖三节；M 也写进 `summary.json` 的 `spot_check`），所以你知道看到的是全部还是抽样。`--out` 和 `data/redacted` 都不能放在抽帧根目录 `data/frames/` 之下的任何位置（包括没有用 `--stems` 列出的段，那些目录会被 `vc_extract --overwrite` 整个删掉）；`--out` 也不能等于或包含 `data/frames`、`data/labels`、`data/videos`、`data/redacted`、模型目录、两个可执行文件和配置文件，也不能落在 `data/redacted/dense` 或 `data/redacted/fps<频率>` 里（`vc_redact` 写那里）。
+  - **屏上面积**是画面上真正被马赛克盖住的区域：有 `block` 的框先取整到像素、裁到画面内，再向外对齐到以画面左上角为起点的 `block` 网格（与 `cpp/src/mask/mosaic.cpp` 一致），然后取并集；没有 `block` 的旧输出按框本身算。帧间跳变也按屏上区域算。**框并集面积**只取框本身的并集、不对齐网格，用来和改用马赛克网格之前的旧基线比。栅格是 4×4 像素一格、碰到就算，所以区域向外取整，每边多算不到一格，面积是上界；分位数用 numpy 默认的线性插值。`masks.jsonl` 的坐标只保留 0.1 px，而 `vc_redact` 对齐的是未取整的坐标，所以刚好贴着网格线 0.05 px 以内的边可能落在线的另一侧。
 - `--out` 已存在且非空时直接拒绝（退出码 2）；加 `--overwrite` 才会在检查完所有输入之后先清空它（只清里面的内容，输入有问题时旧报告原样保留）。一次中途失败的运行会留下文件，重跑要加 `--overwrite`。
 - 退出码：0 有候选频率（P1–P3 通过，P4 还待你确认）；1 没有频率通过；2 输入或运行错误（stderr 打印 `vc_eval: <原因>`）。
 - 一次运行里每个视频文件只 `ffprobe -count_frames`（会解码整个文件）一次，结果按文件缓存；抽查页取帧得到的全分辨率打码帧放在 `img/<stem>/redacted/`，切完小图就删掉，页面只留小图。
@@ -250,12 +253,18 @@ PYTHONPATH=py .venv/bin/python -m vc_eval temporal --dense data/redacted/dense/<
 PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source data/videos/<stem>.mp4 --redacted data/redacted/fps5/<stem>/<stem>.redacted.mp4 [--json out.json]
 ```
 
-各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`temporal` 要求 `--dense` 指向的 `detections.jsonl` 旁边有该次运行的 `stats.json`，写着 `"detect_every_frame": true` 和总帧数，且 `--sparse` 恰好覆盖第 0 到 `frames-1` 帧。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。
+```bash
+PYTHONPATH=py .venv/bin/python -m vc_eval viewing --masks data/redacted/fps10/<stem>/masks.jsonl --width 1920 --height 1080 [--json out.json]
+```
+
+`--width` / `--height` 用视频的真实尺寸：`ffprobe` 对视频流报的编码宽、高，有旋转的视频也不要对调。`vc_redact` 不转画面，只把显示矩阵拷到输出，所以 `masks.jsonl` 的坐标按存储方向。
+
+各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`temporal` 要求 `--dense` 指向的 `detections.jsonl` 旁边有该次运行的 `stats.json`，写着 `"detect_every_frame": true` 和总帧数，且 `--sparse` 恰好覆盖第 0 到 `frames-1` 帧。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。`viewing` 在全部帧上算观感指标，不需要参照标注（没有标注的整段视频也能算），`masks.jsonl` 必须一帧一行、帧号从 0 连续；打印的 `area` 是屏上面积，行尾的 `box-union area` 是框并集面积。`vc_redact` 把框裁在画面内，所以有框超出 `--width` / `--height` 就说明给小了，直接报错；退出码 0，输入有问题时 2。
 
 ### vc_eval 的测试
 
 按文件运行，用假的 `vc_redact` / `vc_detect` 和 ffmpeg 现场生成的小视频，不跑真正的二进制：
 
 ```bash
-.venv/bin/pytest -q py/tests/test_eval_metrics.py py/tests/test_eval_coverage.py py/tests/test_eval_integrity.py py/tests/test_eval_consistency.py py/tests/test_eval_spotcheck.py py/tests/test_eval_run.py
+.venv/bin/pytest -q py/tests/test_eval_metrics.py py/tests/test_eval_coverage.py py/tests/test_eval_integrity.py py/tests/test_eval_viewing.py py/tests/test_eval_consistency.py py/tests/test_eval_spotcheck.py py/tests/test_eval_run.py
 ```

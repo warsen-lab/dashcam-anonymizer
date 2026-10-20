@@ -5,6 +5,7 @@ add_executable(vc_tests
   test_media.cpp
   box_test.cpp
   box_timeline_test.cpp
+  detect_rate_test.cpp
   bounded_queue_test.cpp
   detect_cli_test.cpp
   detect_images_test.cpp

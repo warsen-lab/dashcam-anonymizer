@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from vc_label.contracts import LABEL_CLASSES
 from vc_eval.metrics import CLASS_PASS, HEATMAP_MIN_TARGETS
+from vc_eval.viewing import FLICKER_FRACTION, RASTER_PX
 
 DASH = "—"
 CLS_NAME = {"face": "人脸", "plate": "车牌"}
@@ -51,18 +52,28 @@ def spot_fps(summary: dict) -> float:
     return chosen if chosen is not None else min(p["fps"] for p in summary["pooled"])
 
 
-def _thin_samples(coverage: dict) -> list[tuple[str, dict]]:
+def _target_text(target: float) -> str:
+    return f"{target * 100:g}%"
+
+
+def _targets(coverage: dict) -> dict[str, float]:
+    """P1's bar per class; summaries written before recall targets existed used CLASS_PASS for every class."""
+    return coverage.get("recall_targets") or dict.fromkeys(LABEL_CLASSES, CLASS_PASS)
+
+
+def _thin_samples(coverage: dict) -> list[tuple[str, dict, float]]:
     """Classes that pass P1 although their sample cannot prove it: the lower end of the 95 % interval is under the bar."""
+    targets = _targets(coverage)
     return [
-        (cls, coverage[cls])
+        (cls, coverage[cls], targets[cls])
         for cls in LABEL_CLASSES
-        if coverage[cls]["total"] and coverage[cls]["value"] >= CLASS_PASS and coverage[cls]["ci"][0] < CLASS_PASS
+        if coverage[cls]["total"] and coverage[cls]["value"] >= targets[cls] and coverage[cls]["ci"][0] < targets[cls]
     ]
 
 
-def _thin_sample_line(cls: str, rate: dict) -> str:
+def _thin_sample_line(cls: str, rate: dict, target: float) -> str:
     lead = "即使全部遮住" if rate["hits"] == rate["total"] else f"实测 {rate['hits']}/{rate['total']}"
-    return f"- {CLS_NAME[cls]} n={rate['total']}：{lead}，95% 区间下限只有 {rate['ci'][0]:.1%}，样本不足以证明 ≥ {CLASS_PASS:.0%}"
+    return f"- {CLS_NAME[cls]} n={rate['total']}：{lead}，95% 区间下限只有 {rate['ci'][0]:.1%}，样本不足以证明 ≥ {_target_text(target)}"
 
 
 def _candidate_line(summary: dict) -> str:
@@ -75,9 +86,15 @@ def _candidate_line(summary: dict) -> str:
         line += f"（没有热力格达到 {HEATMAP_MIN_TARGETS} 个目标，P2 空洞满足；空间上的薄弱点只能靠 P4 抽查把关）"
     thin = _thin_samples(coverage)
     if thin:
-        names = "、".join(CLS_NAME[cls] for cls, _ in thin)
-        line += f"；注意：{names}的目标数太少，样本量不足以证明 ≥ {CLASS_PASS:.0%}（见覆盖率表下的提醒）"
+        names = "、".join(CLS_NAME[cls] for cls, _, _ in thin)
+        line += f"；注意：{names}的目标数太少，样本量不足以证明达到召回目标（见覆盖率表下的提醒）"
     return line
+
+
+def _target_line(summary: dict) -> str:
+    targets = _targets(summary["pooled"][0]["coverage"]) if summary["pooled"] else dict.fromkeys(LABEL_CLASSES, CLASS_PASS)
+    shown = "，".join(f"{CLS_NAME[cls]} ≥ {_target_text(targets[cls])}" for cls in LABEL_CLASSES)
+    return f"- P1 召回目标：{shown}（`vc_eval run --recall-target` 设定，默认各 {_target_text(CLASS_PASS)}）"
 
 
 def _head_lines(summary: dict) -> list[str]:
@@ -88,6 +105,7 @@ def _head_lines(summary: dict) -> list[str]:
         f"- 模型：{summary['model']}；人脸模型：{summary.get('face_model') or '无'}；"
         f"检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
         _candidate_line(summary),
+        _target_line(summary),
         "- 本结果以老师融合标注为参照（代理验收），不是人工金标准验收。",
         "- 覆盖率读的是 `masks.jsonl`（`vc_redact` 声明要打码的框），不是打码后视频的像素：马赛克有没有真的打在画面上，"
         "不是这份报告测的，只由 C++ 单元测试和 P4（你看 index.html）验证。",
@@ -106,7 +124,7 @@ def _coverage_lines(summary: dict) -> list[str]:
             lines.append(f"| {r['stem']} | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | — |")
         c = _pooled_at(summary, fps)["coverage"]
         lines.append(f"| 合计 | {fps:g} | {_pct(c['face'])} | {_pct(c['plate'])} | {_weakest(c)} | {'是' if c['passed'] else '否'} |")
-        thin = [_thin_sample_line(cls, rate) for cls, rate in _thin_samples(c)]
+        thin = [_thin_sample_line(cls, rate, target) for cls, rate, target in _thin_samples(c)]
         if thin:
             lines += ["", *thin]
     lines += ["", "合计行是各段目标数相加后的覆盖率，P1 / P2 以它为准，“通过”一栏只在合计行；各段行仅供参考。"]
@@ -138,6 +156,44 @@ def _tier_lines(summary: dict) -> list[str]:
         "",
         "低置信的目标不进 P1 / P2：它们占的比例越大，P1 / P2 代表的参照就越少，这一部分是否遮住只能靠 index.html 的抽查来判断。",
     ]
+    return lines
+
+
+EXCLUSION_TIER_NAME = {"confident": "高置信（P1 分母少了）", "uncertain": "低置信", "best_effort": "尽力"}
+
+
+def _exclusion_line(label: str, e: dict) -> str:
+    tiers = "；".join(
+        f"{name}：" + "、".join(f"{CLS_NAME[cls]} {e['by_class'][cls][tier]}" for cls in LABEL_CLASSES)
+        for tier, name in EXCLUSION_TIER_NAME.items()
+    )
+    reasons = "，".join(f"{reason} {n}" for reason, n in e["reasons"].items()) or "无"
+    line = f"- {label}：文件 {e['rows']} 行，排除 {e['count']} 个参照框，其中 {e['covered']} 个原本已被遮住；{tiers}；原因 {reasons}"
+    if e["unmatched_rows"]:
+        line += f"；另有 {e['unmatched_rows']} 行没有配上任何参照框，请检查帧号、类别和坐标"
+    return line
+
+
+def _exclusion_lines(summary: dict) -> list[str]:
+    """Per segment and in all: the reference boxes excluded_refs.csv left out, by tier and reason, and how many were covered.
+
+    Exclusions do not depend on the detection rate, so the first rate's runs stand for all.
+    """
+    runs = summary["runs"]
+    fps = runs[0]["fps"] if runs else None
+    lines = [
+        "",
+        "## 排除的参照误检",
+        "",
+        "`data/labels/<段>/excluded_refs.csv` 列出人工核查过的老师误检：与其中一行同帧、同类、IoU ≥ 0.5 的参照框不计入任何覆盖率，"
+        "也不再当作参照，打在它们上面的码计入误打面积。一行可以排除不止一个参照框，同一个参照框被几行重叠时按 IoU 最大的一行记原因。",
+        "",
+        "“原本已被遮住”的是排除前已经被码盖住的参照框：它们拿掉后命中数和目标数一起少，P1 的分子和分母都变。",
+        "",
+    ]
+    lines += [_exclusion_line(r["stem"], r["coverage"]["excluded"]) for r in runs if r["fps"] == fps]
+    if runs:
+        lines.append(_exclusion_line("合计", _pooled_at(summary, fps)["coverage"]["excluded"]))
     return lines
 
 
@@ -229,6 +285,51 @@ def _integrity_lines(runs: list[dict]) -> list[str]:
     return lines + [f"| {r['stem']} | {r['fps']:g} | {r['stray']['max']:.2%} | {r['stray']['mean']:.2%} | {r['stray']['p95']:.2%} |" for r in runs]
 
 
+def _area_cells(a: dict) -> str:
+    return f"{a['mean']:.2%} | {a['p95']:.2%} | {a['p99']:.2%} | {a['max']:.2%}"
+
+
+def _viewing_cells(v: dict) -> str:
+    fl, b = v["flicker"], v["boxes"]
+    flicker = DASH if fl["share"] is None else f"{fl['share']:.1%}（{fl['over']}/{fl['pairs']}）"
+    multi = DASH if v["multi_box_frames"] is None else str(v["multi_box_frames"])
+    return f"{_area_cells(v['area'])} | {flicker} | {b['median']:g} | {b['p95']:g} | {multi}"
+
+
+def _viewing_lines(summary: dict) -> list[str]:
+    runs = summary["runs"]
+    fps_values = sorted({r["fps"] for r in runs})
+    lines = [
+        "",
+        "## 观感（全部帧，只报告）",
+        "",
+        f"按 1/{RASTER_PX} 分辨率栅格（{RASTER_PX}×{RASTER_PX} 像素一格，碰到就算，所以区域向外取整，每边最多多算不到一格）逐帧计算。"
+        "**屏上面积**是画面上真正被马赛克盖住的部分：每个有 `block` 的框先按 `vc_redact` 的做法取整到像素、裁到画面内，"
+        "再向外对齐到以画面左上角为起点的 `block` 网格（右、下边缘到画面为止），然后取各框的并集占画面的比例；"
+        "没有 `block` 的旧输出按框本身算。分位数用线性插值（numpy 默认）。"
+        f"**帧间跳变**是相邻两帧的屏上打码区域异或超过画面 {FLICKER_FRACTION:.0%} 的帧对占比。"
+        "**同轨多框帧**是同一条轨迹在同一帧有不止一个框的帧数，应为 0（没有轨迹编号的旧输出记为 —）。合计行把各段的帧放在一起算。",
+        "",
+        "| 段 | fps | 屏上面积均值 | 屏上面积 95 分位 | 屏上面积 99 分位 | 屏上面积最大 | 帧间跳变 | 每帧框数中位数 | 每帧框数 95 分位 | 同轨多框帧 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for fps in fps_values:
+        lines += [f"| {r['stem']} | {fps:g} | {_viewing_cells(r['viewing'])} |" for r in runs if r["fps"] == fps]
+        lines.append(f"| 合计 | {fps:g} | {_viewing_cells(_pooled_at(summary, fps)['viewing'])} |")
+    lines += [
+        "",
+        "**框并集面积**只取各个打码框本身的并集，不对齐马赛克网格，和改用网格之前的旧基线可比；"
+        "同一次运行里它不会比屏上面积大。",
+        "",
+        "| 段 | fps | 框并集面积均值 | 框并集面积 95 分位 | 框并集面积 99 分位 | 框并集面积最大 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for fps in fps_values:
+        lines += [f"| {r['stem']} | {fps:g} | {_area_cells(r['viewing']['box_area'])} |" for r in runs if r["fps"] == fps]
+        lines.append(f"| 合计 | {fps:g} | {_area_cells(_pooled_at(summary, fps)['viewing']['box_area'])} |")
+    return lines
+
+
 def _busy(stages: dict, stage: str) -> float | None:
     """Busy seconds of a stage; stats.json without a main entry (older vc_redact) adds up the main thread's stages."""
     if stage == "main" and "main" not in stages:
@@ -308,10 +409,12 @@ def summary_md(summary: dict) -> str:
         *_head_lines(summary),
         *_coverage_lines(summary),
         *_tier_lines(summary),
+        *_exclusion_lines(summary),
         *_uncertain_lines(summary),
         *_detail_lines(summary),
         *_temporal_lines(runs),
         *_integrity_lines(runs),
+        *_viewing_lines(summary),
         *_speed_lines(summary),
         *_consistency_lines(summary["consistency"]),
     ]

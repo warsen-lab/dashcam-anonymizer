@@ -322,6 +322,8 @@ def _break_labels(labels, kind):
     elif kind == "labels for other frames":
         with (labels / "processed.txt").open("a") as f:
             f.write("99\n")  # a frame number frames.csv does not have
+    elif kind == "bad excluded refs":
+        (labels / "excluded_refs.csv").write_text("frame,cls,x1,y1,x2,y2,reason\n0,sign,1,1,2,2,x\n", encoding="utf-8")
     else:
         raise AssertionError(kind)
 
@@ -335,6 +337,7 @@ def _break_labels(labels, kind):
         ("missing flags", r"flags\.csv does not exist; run vc_label fuse"),
         ("missing processed", "processed.txt does not exist"),
         ("labels for other frames", "does not match"),
+        ("bad excluded refs", r"excluded_refs\.csv line 2: class 'sign'"),
     ],
 )
 def test_bad_label_inputs_of_any_segment_are_refused_before_any_run(tmp_path, kind, message):
@@ -500,6 +503,43 @@ def test_no_sample_size_warning_for_a_class_that_fails_or_has_no_targets(tmp_pat
     assert "样本量不足以证明" not in md.split("- 候选检测频率")[1].splitlines()[0]
 
 
+def test_recall_targets_set_the_p1_bar_per_class(tmp_path, monkeypatch):
+    summary = _grid_run(tmp_path, monkeypatch, missed_faces=5, recall_targets={"face": 0.95, "plate": 0.98})
+    pooled = [p for p in summary["pooled"] if p["fps"] == 5][0]
+    assert (pooled["coverage"]["face"]["hits"], pooled["coverage"]["face"]["total"]) == (195, 200)
+    assert pooled["coverage"]["recall_targets"] == {"face": 0.95, "plate": 0.98}
+    assert pooled["passed"] is True and summary["chosen_fps"] == 5  # 97.5 % clears 95 %; the default 99 % would not
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- P1 召回目标：人脸 ≥ 95%，车牌 ≥ 98%" in md
+    lo = f"{wilson_interval(195, 200)[0]:.1%}"
+    assert f"- 人脸 n=200：实测 195/200，95% 区间下限只有 {lo}，样本不足以证明 ≥ 95%" in md
+
+
+def test_the_default_recall_target_is_named_in_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["runs"][0]["coverage"]["recall_targets"] == {"face": 0.99, "plate": 0.99}
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert "- P1 召回目标：人脸 ≥ 99%，车牌 ≥ 99%" in md
+
+
+def test_a_run_entry_records_the_detection_rate_vc_redact_actually_used(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], stats_extra={"detect_fps_actual": 10.0, "keyframe_stride": 6}))
+    assert [(r["fps"], r["detect_fps_actual"], r["keyframe_stride"]) for r in summary["runs"]] == [(5, 10.0, 6), (10, 10.0, 6)]
+    on_disk = json.loads((tmp_path / "report" / "summary.json").read_text())
+    assert on_disk["runs"][0]["detect_fps_actual"] == 10.0 and on_disk["runs"][0]["keyframe_stride"] == 6
+
+
+def test_a_run_entry_of_an_old_stats_json_has_no_detection_rate(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))  # a stats.json without detect_fps_actual and keyframe_stride
+    assert all(r["detect_fps_actual"] is None and r["keyframe_stride"] is None for r in summary["runs"])
+
+
 def test_the_candidate_line_and_the_cli_do_not_claim_more_than_p1_to_p3(tmp_path, monkeypatch, capsys):
     _setup(tmp_path)
     _python_dets(monkeypatch)
@@ -618,6 +658,43 @@ def test_summary_md_details_the_smallest_rate_when_none_passes(tmp_path, monkeyp
     _grid_run(tmp_path, monkeypatch, missed_faces=3)  # P1 fails at every rate
     md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
     assert md.split("## 细分")[1].splitlines()[0].startswith("（最小的 5 fps，没有频率通过 P1–P3")
+
+
+def test_the_viewing_metrics_of_every_run_go_into_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    viewing = summary["runs"][0]["viewing"]
+    # MASK and PLATE_MASK on every frame of the 160 x 120 picture: 99 + 144 of the 1200 raster cells
+    assert viewing["area"] == {
+        "mean": pytest.approx(0.2025), "p95": pytest.approx(0.2025), "p99": pytest.approx(0.2025), "max": pytest.approx(0.2025),
+    }
+    assert viewing["flicker"] == {"pairs": N - 1, "over": 0, "share": 0.0}
+    assert viewing["boxes"] == {"median": 2.0, "p95": 2.0}
+    assert viewing["multi_box_frames"] is None  # the fake masks carry no track ids
+    assert summary["pooled"][0]["viewing"]["frames"] == N
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    section = md.split("## 观感")[1].split("\n## ")[0]
+    assert "| seg | 5 | 20.25% | 20.25% | 20.25% | 20.25% | 0.0%（0/29） | 2 | 2 | — |" in section
+    assert "| 合计 | 10 | 20.25% |" in section
+    assert "1/4" in section and "1%" in section
+
+
+def test_the_summary_keeps_the_area_on_screen_apart_from_the_area_of_the_boxes(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    # with a block the mosaic pixelates the box snapped to the block grid: x 32..80, y 16..80 and x 80..160, y 64..112
+    masks = (dict(MASK, block=16), dict(PLATE_MASK, block=16))
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=masks))
+    for viewing in (summary["runs"][0]["viewing"], summary["pooled"][0]["viewing"]):
+        assert viewing["area"]["mean"] == pytest.approx((192 + 240) / 1200)
+        assert viewing["box_area"] == {
+            "mean": pytest.approx(0.2025), "p95": pytest.approx(0.2025), "p99": pytest.approx(0.2025), "max": pytest.approx(0.2025),
+        }
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 观感")[1].split("\n## ")[0]
+    assert "| seg | 5 | 36.00% | 36.00% | 36.00% | 36.00% | 0.0%（0/29） | 2 | 2 | — |" in section
+    assert "| seg | 5 | 20.25% | 20.25% | 20.25% | 20.25% |" in section.split("框并集", 1)[1]
+    assert "对齐" in section and "旧基线" in section
 
 
 SPEED_HEADER = "| 段 | fps | 准备 | 解码 | 主线程 | 编码 | 检测（关键帧） | 补框 | 打码 | 总耗时 | 吞吐 |"
@@ -885,14 +962,17 @@ def test_report_and_redacted_dirs_anywhere_under_the_frames_root_are_refused(tmp
     [
         ({"stems": []}, "no stems"),
         ({"fps_values": []}, "no detection rates"),
-        ({"fps_values": [5, 0]}, "at least 5"),
-        ({"fps_values": [5, -1]}, "at least 5"),
-        ({"fps_values": [5, 4.9]}, "at least 5"),
-        ({"fps_values": [5, float("nan")]}, "at least 5"),
-        ({"fps_values": [5, float("inf")]}, "at least 5"),
+        ({"fps_values": [5, 0]}, "from 5 to 60"),
+        ({"fps_values": [5, -1]}, "from 5 to 60"),
+        ({"fps_values": [5, 4.9]}, "from 5 to 60"),
+        ({"fps_values": [5, float("nan")]}, "from 5 to 60"),
+        ({"fps_values": [5, float("inf")]}, "from 5 to 60"),
+        ({"fps_values": [5, 61]}, "from 5 to 60"),
         ({"fps_values": [5, 5.0]}, "twice"),
         ({"stems": [STEM, STEM]}, "twice"),
         ({"stems": ["missing"]}, "missing.mp4"),
+        ({"recall_targets": {"car": 0.9}}, "recall targets"),
+        ({"recall_targets": {"face": 1.5}}, "recall targets"),
     ],
 )
 def test_bad_configuration_is_refused_before_any_run(tmp_path, kw, message):
@@ -976,6 +1056,9 @@ def test_cli_coverage_and_errors(tmp_path, capsys):
     assert json.loads((tmp_path / "c.json").read_text())["face"]["total"] == 5
     assert main(["coverage", "--frames", str(tmp_path / "nope"), "--labels", str(tmp_path), "--masks", str(masks)]) == 2
     assert "vc_eval:" in capsys.readouterr().err
+    args = ["coverage", "--frames", str(tmp_path / "frames" / STEM), "--labels", str(tmp_path / "labels" / STEM), "--masks", str(masks)]
+    assert main([*args, "--recall-target", "plate=x"]) == 2
+    assert "--recall-target" in capsys.readouterr().err
 
 
 def test_cli_coverage_passes_with_covering_masks(tmp_path, capsys):
@@ -988,6 +1071,21 @@ def test_cli_coverage_passes_with_covering_masks(tmp_path, capsys):
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "face 5/5" in out and "plate 5/5" in out and "PASS" in out
+    assert "excluded refs" not in out  # no excluded_refs.csv, nothing to say
+
+
+def test_cli_coverage_says_how_many_references_the_excluded_refs_file_left_out(tmp_path, capsys):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    _write_excluded(tmp_path, _light_rows())
+    masks = tmp_path / "masks.jsonl"
+    with masks.open("w") as f:
+        for fr in range(N):
+            f.write(json.dumps({"video": f"{STEM}.mp4", "frame": fr, "boxes": [MASK, PLATE_MASK]}) + "\n")
+    args = ["coverage", "--frames", str(tmp_path / "frames" / STEM), "--labels", str(tmp_path / "labels" / STEM), "--masks", str(masks)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "plate 5/5" in out and "excluded refs: 5 excluded (0 had been covered), 1 unmatched rows" in out
 
 
 def test_cli_coverage_reports_the_low_confidence_tier_without_judging_it(tmp_path, capsys):
@@ -1046,12 +1144,18 @@ def test_cli_run_parses_arguments_and_maps_exit_codes(tmp_path, monkeypatch, cap
     assert cfg.overwrite is False
     assert cfg.vc_redact == Path("build/cpp-release/vc_redact") and cfg.config == Path("configs/redact.json")
     assert cfg.redacted_root == Path("data/redacted")
+    assert cfg.recall_targets == {"face": 0.99, "plate": 0.99}
     printed = capsys.readouterr().out
     assert "10 fps" in printed and str(out / "index.html") in printed
 
     assert main([*argv, "--overwrite"]) == 0 and seen[-1].overwrite is True
     # a second config gets its own videos, or its run would overwrite the ones the first report links to
     assert main([*argv, "--redacted-root", str(tmp_path / "tuned")]) == 0 and seen[-1].redacted_root == tmp_path / "tuned"
+    assert main([*argv, "--recall-target", "face=0.95,plate=0.98"]) == 0
+    assert seen[-1].recall_targets == {"face": 0.95, "plate": 0.98}
+    capsys.readouterr()
+    assert main([*argv, "--recall-target", "face=2"]) == 2
+    assert "--recall-target" in capsys.readouterr().err
     capsys.readouterr()
 
     outcome["chosen_fps"] = None
@@ -1202,3 +1306,82 @@ def test_cli_run_passes_the_face_model(tmp_path, monkeypatch):
     assert main(argv) == 0 and seen[-1].face_model is None
     assert main([*argv, "--face-model", str(tmp_path / "yunet")]) == 0
     assert seen[-1].face_model == tmp_path / "yunet"
+
+
+LIGHT_ROW = [0, "plate", 10, 90, 40, 110, "停着的公交尾灯"]  # the `light` box of the tests below, at frame 0 (a row per labelled frame: _light_rows)
+NO_EXCLUSIONS = {"confident": 0, "uncertain": 0, "best_effort": 0}
+
+
+def _write_excluded(root, rows, stem=STEM):
+    with (root / "labels" / stem / "excluded_refs.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "cls", "x1", "y1", "x2", "y2", "reason"])
+        w.writerows(rows)
+
+
+def _light_rows():
+    """A row for the teachers' light in each of the 5 labelled frames, and one for frame 3, which is not labelled."""
+    return [[fr, *LIGHT_ROW[1:]] for fr in range(0, N, 6)] + [[3, *LIGHT_ROW[1:]]]
+
+
+def test_excluded_refs_are_left_out_of_p1_and_listed_per_segment_in_the_summary(tmp_path, monkeypatch):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")  # away from MASK and PLATE_MASK: never masked
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    _write_excluded(tmp_path, _light_rows())
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    coverage = summary["runs"][0]["coverage"]
+    assert (coverage["plate"]["hits"], coverage["plate"]["total"]) == (5, 5)  # with the light it would be 5 / 10
+    assert coverage["excluded"] == {
+        "rows": 6, "count": 5, "covered": 0, "reasons": {"停着的公交尾灯": 5}, "unmatched_rows": 1,
+        "by_class": {"face": NO_EXCLUSIONS, "plate": {**NO_EXCLUSIONS, "confident": 5}},
+    }
+    assert summary["pooled"][0]["coverage"]["excluded"] == coverage["excluded"]
+    assert summary["chosen_fps"] == 5
+    listed = summary["runs"][0]["excluded_list"]
+    assert len(listed) == 5 and listed[0] == {
+        "frame": 0, "cls": "plate", "x1": 10.0, "y1": 90.0, "x2": 40.0, "y2": 110.0,
+        "tier": "confident", "covered": False, "reason": "停着的公交尾灯",
+    }
+    md = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    section = md.split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert (
+        "- seg：文件 6 行，排除 5 个参照框，其中 0 个原本已被遮住；高置信（P1 分母少了）：人脸 0、车牌 5；低置信：人脸 0、车牌 0；"
+        "尽力：人脸 0、车牌 0；原因 停着的公交尾灯 5；另有 1 行没有配上任何参照框，请检查帧号、类别和坐标"
+    ) in section
+    assert "- 合计：文件 6 行，排除 5 个参照框，其中 0 个原本已被遮住；高置信（P1 分母少了）：人脸 0、车牌 5" in section
+
+
+def test_excluded_refs_the_masks_covered_are_counted_as_covered_in_json_and_summary(tmp_path, monkeypatch):
+    light = Box("plate", 10, 90, 40, 110, src="teacher_owlv2")
+    light_mask = {"cls": "plate", "x1": 8, "y1": 88, "x2": 42, "y2": 112, "origin": "detected"}
+    _setup(tmp_path, teachers=(*TEACHERS, light))
+    _write_excluded(tmp_path, _light_rows()[:-1])  # every row matches
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=(MASK, PLATE_MASK, light_mask)))
+    excluded = summary["runs"][0]["coverage"]["excluded"]
+    assert (excluded["rows"], excluded["count"], excluded["covered"], excluded["unmatched_rows"]) == (5, 5, 5, 0)
+    assert all(e["covered"] for e in summary["runs"][0]["excluded_list"])
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert "- seg：文件 5 行，排除 5 个参照框，其中 5 个原本已被遮住；" in section and "没有配上" not in section
+
+
+def test_a_segment_without_excluded_refs_says_so(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([]))
+    assert summary["runs"][0]["coverage"]["excluded"] == {
+        "rows": 0, "count": 0, "covered": 0, "reasons": {}, "unmatched_rows": 0,
+        "by_class": {"face": NO_EXCLUSIONS, "plate": NO_EXCLUSIONS},
+    }
+    section = (tmp_path / "report" / "summary.md").read_text(encoding="utf-8").split("## 排除的参照误检")[1].split("\n## ")[0]
+    assert "- seg：文件 0 行，排除 0 个参照框" in section and "原因 无" in section
+
+
+def test_summary_json_lists_every_confident_miss_with_its_box(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    summary = run_all(_cfg(tmp_path), runner=_fake_runner([], masks=(MASK,)))  # the plate is never masked
+    misses = summary["runs"][0]["miss_list"]
+    assert [m["frame"] for m in misses] == [0, 6, 12, 18, 24]
+    assert misses[0] == {"frame": 0, "cls": "plate", "x1": 100.0, "y1": 80.0, "x2": 150.0, "y2": 100.0, "covered": 0.0}

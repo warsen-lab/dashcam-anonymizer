@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <thread>
@@ -24,9 +25,8 @@
 #include "io/av_ptr.h"
 #include "io/video_writer.h"
 #include "mask/mosaic.h"
-#include "sampler/frame_sampler.h"
-#include "sampler/luma_thumb.h"
 #include "track/box_timeline.h"
+#include "vc_redact/detect_rate.h"
 #include "vc_redact/records.h"
 
 namespace vc {
@@ -38,7 +38,7 @@ constexpr size_t kMaxQueueCapacity = 64;
 constexpr size_t kMinQueueCapacity = 4;
 constexpr uint64_t kQueueBudgetBytes = 256ull * 1024 * 1024;
 constexpr uint64_t kBytesPerPixel = 3;  // the largest layout the reader emits: 8-bit 4:4:4
-// A keyframe is forced after this many buffered frames, so stalled timestamps cannot grow the buffer.
+// A keyframe is forced after this many buffered frames, whatever the stride (for very high frame rates).
 constexpr size_t kMaxBufferedFrames = 120;
 constexpr const char* kMasksFile = "masks.jsonl";
 constexpr const char* kDetectionsFile = "detections.jsonl";
@@ -156,6 +156,20 @@ void checkOptions(const RedactOptions& o) {
   validateRedactConfig(o.config, "redact options");
 }
 
+// The keyframe schedule for the input's video stream (spec 2026-10-19 §2). streamFrameRate throws a VcError that
+// names the video; the std::invalid_argument of detectSchedule / everyFrameSchedule (a header frame rate outside
+// (0, 1e6] fps) would reach the user without the file or the rate, so it is rethrown as a VcError that names both.
+DetectSchedule keyframeSchedule(const RedactOptions& o, const AVStream& stream) {
+  const std::string video = o.input.string();
+  const double videoFps = streamFrameRate(stream.avg_frame_rate, stream.r_frame_rate, video);
+  try {
+    return o.detectEveryFrame ? everyFrameSchedule(videoFps) : detectSchedule(videoFps, o.config.detectFps);
+  } catch (const std::invalid_argument& e) {
+    throw VcError("cannot space the keyframes of " + video + ": " + e.what() +
+                  formatted(" (its video stream says %g fps)", videoFps));
+  }
+}
+
 std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int height) {
   std::unique_ptr<Detector> detector;
   if (o.fakeDetections) {
@@ -168,41 +182,37 @@ std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int he
   return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 
-// Keyframe selection, detection, BoxTimeline and mosaic: everything between decode and encode.
+// Keyframe choice, detection, BoxTimeline and mosaic: everything between decode and encode.
 class Processor {
  public:
-  Processor(const RedactOptions& options, Detector& detector, const VideoInfo& info, std::string video,
-            std::ostream& detections, std::ostream& masks, BoundedQueue<Item>& out, RedactStats& stats)
+  Processor(const RedactOptions& options, Detector& detector, const VideoInfo& info, const DetectSchedule& schedule,
+            std::string video, std::ostream& detections, std::ostream& masks, BoundedQueue<Item>& out,
+            RedactStats& stats)
       : options_(options),
         detector_(detector),
+        schedule_(schedule),
         video_(std::move(video)),
         detections_(detections),
         masks_(masks),
         out_(out),
         stats_(stats),
-        sampler_(SamplerConfig{options.config.detectFps, options.config.maxDetectFps,
-                               options.config.motionThreshold, std::nullopt, std::nullopt}),
-        timeline_(options.config.timeline, info.width, info.height),
-        thumbWidth_(std::min(kThumbWidth, info.width)),
-        thumbHeight_(std::min(kThumbHeight, info.height)) {}
+        timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
+        blocks_(options.config.mosaic) {}
 
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
-    const VideoFrame view = viewOf(item);
-    LumaThumb thumb = makeLumaThumb(view.luma(), thumbWidth_, thumbHeight_);
-    const double motion = previous_ ? meanAbsDiff(thumb, *previous_) : 0.0;
-    const double diffToKept = lastKept_ ? meanAbsDiff(thumb, *lastKept_) : 1.0;
-    const bool sampled =
-        options_.detectEveryFrame || sampler_.offer(item.ptsMs, motion, diffToKept) != SampleReason::None;
-    const bool key = sampled || buffer_.size() >= kMaxBufferedFrames;
-    if (key) lastKept_ = thumb;
-    previous_ = std::move(thumb);
+    // A keyframe every schedule_.stride frames by frame index (spec 2026-10-19 §2), the first frame always
+    // (BoxTimeline starts on a keyframe), and one whenever kMaxBufferedFrames frames are waiting.
+    const bool key = options_.detectEveryFrame || !sawKeyframe_ || onSchedule(schedule_, item.index) ||
+                     buffer_.size() >= kMaxBufferedFrames;
     stats_.track.busySec += secondsSince(started);
     if (!key) {
       buffer_.push_back(std::move(item));
       return;
     }
+    sawKeyframe_ = true;
 
+    const VideoFrame view = viewOf(item);
     const Clock::time_point detectStarted = Clock::now();
     const std::vector<SourcedBox> found = detector_.detectSourced(view);
     stats_.detect.busySec += secondsSince(detectStarted);
@@ -211,28 +221,49 @@ class Processor {
     stats_.detections += static_cast<int64_t>(found.size());
     std::vector<Box> boxes;
     boxes.reserve(found.size());
-    for (const SourcedBox& b : found) {
-      detections_ << detectionRecord(video_, item.index, item.ptsMs, b.box, detector_.classes(), b.src);
-      boxes.push_back(b.box);
-    }
+    for (const SourcedBox& b : found) boxes.push_back(b.box);
 
     const Clock::time_point trackStarted = Clock::now();
-    const std::vector<std::vector<MaskBox>> masks =
-        timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
+    const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
     stats_.track.busySec += secondsSince(trackStarted);
-    emit(masks);
+    // The previous keyframe's boxes are written now that the timeline has said which of them it masked.
+    writeDetections(step.confirmed);
+    pending_ = KeyframeDetections{item.index, item.ptsMs, found};
+    emit(step.masks);
     buffer_.push_back(std::move(item));
   }
 
   void onEnd() {
     const Clock::time_point started = Clock::now();
-    const std::vector<std::vector<MaskBox>> masks = timeline_.finish(times());
+    const TimelineOutput step = timeline_.finish(times());
     stats_.track.busySec += secondsSince(started);
-    emit(masks);
+    writeDetections(step.confirmed);
+    emit(step.masks);
     if (!out_.push(Item{EndItem{}})) throw PipelineAborted{};
   }
 
  private:
+  // A keyframe's detections, written once the next keyframe (or the end) says which were masked.
+  struct KeyframeDetections {
+    int64_t frame = 0;
+    double ptsMs = 0;
+    std::vector<SourcedBox> boxes{};
+  };
+
+  // Writes the pending keyframe's detections.jsonl lines with their confirmation flags.
+  void writeDetections(const std::vector<bool>& confirmed) {
+    if (!pending_) return;
+    if (confirmed.size() != pending_->boxes.size()) {
+      throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+    }
+    for (size_t i = 0; i < confirmed.size(); ++i) {
+      const SourcedBox& b = pending_->boxes[i];
+      detections_ << detectionRecord(video_, pending_->frame, pending_->ptsMs, b.box, detector_.classes(), b.src,
+                                     static_cast<bool>(confirmed[i]));
+    }
+    pending_.reset();
+  }
+
   static VideoFrame viewOf(const VideoItem& item) {
     VideoFrame v;
     v.index = item.index;
@@ -248,26 +279,31 @@ class Processor {
     return t;
   }
 
-  // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order.
+  // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order. A mask's block comes
+  // from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4).
   void emit(const std::vector<std::vector<MaskBox>>& masks) {
     if (masks.size() != buffer_.size()) throw VcError("internal error: masks do not match the buffered frames");
     for (size_t k = 0; k < buffer_.size(); ++k) {
       VideoItem& frame = buffer_[k];
-      masks_ << maskRecord(video_, frame.index, masks[k], detector_.classes());
-      if (!masks[k].empty()) {
-        const Clock::time_point started = Clock::now();
-        checkAv(av_frame_make_writable(frame.frame.get()), "make frame writable");
-        std::vector<PixelRect> rects;
-        rects.reserve(masks[k].size());
-        for (const MaskBox& m : masks[k]) {
-          rects.push_back(coveringRect(m.x1, m.y1, m.x2, m.y2, frame.frame->width, frame.frame->height));
-        }
-        applyMosaic(*frame.frame, rects, options_.config.mosaic);
-        stats_.mosaic.busySec += secondsSince(started);
-        ++stats_.maskedFrames;
-        stats_.maskBoxes += static_cast<int64_t>(masks[k].size());
+      const Clock::time_point started = Clock::now();
+      std::vector<MaskBox> boxes = masks[k];
+      std::vector<MosaicRect> rects;
+      rects.reserve(boxes.size());
+      for (MaskBox& m : boxes) {
+        const PixelRect rect = coveringRect(m.x1, m.y1, m.x2, m.y2, frame.frame->width, frame.frame->height);
+        m.block = blocks_.blockFor(m.track, rect);
+        rects.push_back(MosaicRect{rect, m.block});
       }
+      blocks_.endFrame();
+      if (!boxes.empty()) {
+        checkAv(av_frame_make_writable(frame.frame.get()), "make frame writable");
+        applyMosaic(*frame.frame, rects);
+        ++stats_.maskedFrames;
+        stats_.maskBoxes += static_cast<int64_t>(boxes.size());
+      }
+      stats_.mosaic.busySec += secondsSince(started);
       ++stats_.mosaic.items;
+      masks_ << maskRecord(video_, frame.index, boxes, detector_.classes());
       if (!out_.push(Item{std::move(frame)})) throw PipelineAborted{};
     }
     buffer_.clear();
@@ -275,18 +311,17 @@ class Processor {
 
   const RedactOptions& options_;
   Detector& detector_;
+  DetectSchedule schedule_;
   std::string video_;
   std::ostream& detections_;
   std::ostream& masks_;
   BoundedQueue<Item>& out_;
   RedactStats& stats_;
-  FrameSampler sampler_;
   BoxTimeline timeline_;
-  int thumbWidth_;
-  int thumbHeight_;
-  std::optional<LumaThumb> previous_;
-  std::optional<LumaThumb> lastKept_;
+  TrackBlocks blocks_;
+  bool sawKeyframe_ = false;
   std::vector<VideoItem> buffer_;
+  std::optional<KeyframeDetections> pending_;
 };
 
 void decodeStage(VideoReader& reader, BoundedQueue<Item>& out, StageStat& decode) {
@@ -392,7 +427,7 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
 // `audio`: the reader's audio streams, snapshotted on the main thread. `started`: the start of the
 // run, for stats.setupSec.
 void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector,
-                 const std::vector<AudioStreamInfo>& audio, const fs::path& partial, Clock::time_point started,
+                 const DetectSchedule& schedule, const std::vector<AudioStreamInfo>& audio, const fs::path& partial, Clock::time_point started,
                  RedactStats& stats) {
   const fs::path dir = partial.parent_path();
   std::ofstream detections(dir / kDetectionsFile);
@@ -426,8 +461,8 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   // audio streams' codec parameters and time bases) because the decode thread owns the reader.
   const VideoInfo info = reader.info();
   const WriterConfig config = writerConfig(reader, partial, options.preferHardwareEncoder);
-  Processor processor(options, detector, info, options.input.filename().string(), detections, masks, processed,
-                      stats);
+  Processor processor(options, detector, info, schedule, options.input.filename().string(), detections, masks,
+                      processed, stats);
   StageStat decodeStat;
   EncodeResult encodeResult;
   bool finished = false;
@@ -494,12 +529,17 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["audio_packets"] = s.audioPackets;
   j["dropped_streams"] = s.droppedStreams;
   j["detect_every_frame"] = o.detectEveryFrame;
+  j["video_fps"] = s.videoFps;
+  j["keyframe_stride"] = s.keyframeStride;
+  j["detect_fps_actual"] = s.detectFpsActual;
   j["config"] = redactConfigToJson(o.config);
   // decode, main and encode run in parallel; main is detect + track + mosaic, one after another.
   j["stages"]["decode"] = stageJson(s.decode);
   j["stages"]["main"] = stageJson(s.main);
   j["stages"]["encode"] = stageJson(s.encode);
   j["stages"]["detect"] = stageJson(s.detect);
+  j["stages"]["detect_student"] = stageJson(s.detectStudent);
+  j["stages"]["detect_face"] = stageJson(s.detectFace);
   j["stages"]["track"] = stageJson(s.track);
   j["stages"]["mosaic"] = stageJson(s.mosaic);
   j["setup_s"] = s.setupSec;
@@ -520,6 +560,10 @@ size_t pipelineQueueCapacity(int width, int height) {
 
 std::vector<std::string> redactWarnings(const RedactStats& stats) {
   std::vector<std::string> warnings;
+  if (stats.detectFpsAboveVideoRate) {
+    warnings.push_back(formatted("note: detect_fps %g is above the video's %.2f fps, so every frame is a keyframe",
+                                 stats.detectFpsRequested, stats.videoFps));
+  }
   if (stats.decodeErrors > 0) {
     warnings.push_back("warning: the decoder rejected " + std::to_string(stats.decodeErrors) +
                        " corrupt packet(s) or frame(s) and skipped them, so the output lacks those frames "
@@ -535,6 +579,8 @@ std::string redactSummary(const RedactStats& s) {
                    static_cast<long long>(s.frames), static_cast<long long>(s.keyframes),
                    static_cast<long long>(s.detections), static_cast<long long>(s.maskedFrames),
                    static_cast<long long>(s.maskBoxes));
+  out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,
+                   static_cast<long long>(s.keyframeStride), s.videoFps);
   out += "detector:      " + s.detector + "\n";
   out += "encoder:       " + s.encoder + "\n";
   out += formatted("audio:         %zu stream(s), %lld packets copied; dropped streams: ", s.audioStreams,
@@ -544,6 +590,13 @@ std::string redactSummary(const RedactStats& s) {
                    s.setupSec);
   out += formatted("stages (fps):  decode %.1f, main %.1f (detect %.1f, track %.1f, mosaic %.1f), encode %.1f\n",
                    s.decode.fps(), s.main.fps(), s.detect.fps(), s.track.fps(), s.mosaic.fps(), s.encode.fps());
+  if (s.detectFace.items > 0) {
+    const auto perKeyframeMs = [](const StageStat& stage) {
+      return stage.items > 0 ? 1000.0 * stage.busySec / static_cast<double>(stage.items) : 0.0;
+    };
+    out += formatted("detectors:     student %.1f ms + face %.1f ms per keyframe, run in parallel: %.1f ms\n",
+                     perKeyframeMs(s.detectStudent), perKeyframeMs(s.detectFace), perKeyframeMs(s.detect));
+  }
   out += formatted("decode errors: %lld\n", static_cast<long long>(s.decodeErrors));
   out += formatted("elapsed:       %.2f s (%.1f fps)\n", s.elapsedSec, fps);
   return out;
@@ -562,6 +615,14 @@ RedactStats runRedact(const RedactOptions& options) {
   // now, before the previous output is removed, not on the encode thread.
   const std::vector<AudioStreamInfo> audio = snapshotAudioStreams(reader.audioStreams());
   requireMp4Audio(audio);
+  // The keyframe spacing comes from the video's own frame rate (spec 2026-10-19 §2); a stream without one
+  // is refused here, before the model is loaded.
+  const DetectSchedule schedule = keyframeSchedule(options, *reader.videoStream());
+  stats.videoFps = schedule.videoFps;
+  stats.keyframeStride = schedule.stride;
+  stats.detectFpsActual = schedule.actualFps;
+  stats.detectFpsRequested = options.detectEveryFrame ? 0.0 : options.config.detectFps;
+  stats.detectFpsAboveVideoRate = schedule.aboveVideoRate;
   const std::unique_ptr<Detector> detector = makeDetector(options, reader.info().width, reader.info().height);
 
   // The directories this run is about to create (outRoot and parents that do not exist yet), deepest
@@ -582,7 +643,7 @@ RedactStats runRedact(const RedactOptions& options) {
   try {
     fs::remove_all(stats.outputDir);
     fs::create_directories(stats.outputDir);
-    runPipeline(options, reader, *detector, audio, partial, started, stats);
+    runPipeline(options, reader, *detector, schedule, audio, partial, started, stats);
     fs::rename(partial, stats.video);
     stats.frames = stats.decode.items;
     stats.track.items = stats.frames;
@@ -591,6 +652,12 @@ RedactStats runRedact(const RedactOptions& options) {
     stats.droppedStreams = reader.droppedStreams();
     stats.audioStreams = reader.audioStreams().size();
     stats.detector = detector->description();
+    if (const auto* merged = dynamic_cast<const MergedDetector*>(detector.get())) {
+      stats.detectStudent = StageStat{merged->firstBusySec(), stats.detect.items};
+      stats.detectFace = StageStat{merged->secondBusySec(), stats.detect.items};
+    } else {
+      stats.detectStudent = stats.detect;
+    }
     stats.elapsedSec = secondsSince(started);
     writeStats(stats.outputDir / kStatsFile, stats, options);
     return stats;

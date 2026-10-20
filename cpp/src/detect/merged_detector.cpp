@@ -1,7 +1,10 @@
 #include "detect/merged_detector.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <exception>
+#include <future>
 #include <optional>
 #include <string>
 #include <utility>
@@ -25,6 +28,20 @@ Box unionOf(const Box& a, const Box& b) {
   u.y2 = std::max(a.y2, b.y2);
   u.score = std::max(a.score, b.score);
   return u;
+}
+
+// A detector's boxes and how long it took to find them.
+struct Timed {
+  std::vector<SourcedBox> boxes{};
+  double sec = 0;
+};
+
+Timed timedDetect(Detector& detector, const VideoFrame& frame) {
+  const auto started = std::chrono::steady_clock::now();
+  Timed out;
+  out.boxes = detector.detectSourced(frame);
+  out.sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  return out;
 }
 
 }  // namespace
@@ -78,15 +95,35 @@ MergedDetector::MergedDetector(std::unique_ptr<Detector> first, std::unique_ptr<
 }
 
 std::vector<SourcedBox> MergedDetector::detectSourced(const VideoFrame& frame) {
-  const std::vector<SourcedBox> a = first_->detectSourced(frame);
-  std::vector<SourcedBox> b = second_->detectSourced(frame);
-  for (SourcedBox& s : b) {
+  // The second detector starts on a thread of its own, then the first runs here. The future is always
+  // waited for, also when the first detector throws, so nothing is still reading the frame afterwards.
+  std::future<Timed> pending =
+      std::async(std::launch::async, [this, &frame] { return timedDetect(*second_, frame); });
+  Timed a;
+  std::exception_ptr firstError;
+  try {
+    a = timedDetect(*first_, frame);
+  } catch (...) {
+    firstError = std::current_exception();
+  }
+  Timed b;
+  std::exception_ptr secondError;
+  try {
+    b = pending.get();
+  } catch (...) {
+    secondError = std::current_exception();
+  }
+  if (firstError) std::rethrow_exception(firstError);
+  if (secondError) std::rethrow_exception(secondError);
+  firstBusySec_ += a.sec;
+  secondBusySec_ += b.sec;
+  for (SourcedBox& s : b.boxes) {
     if (s.box.cls < 0 || static_cast<size_t>(s.box.cls) >= secondClassMap_.size()) {
       throw VcError("the " + second_->source() + " detector returned class index " + std::to_string(s.box.cls));
     }
     s.box.cls = secondClassMap_[static_cast<size_t>(s.box.cls)];
   }
-  return mergeDetections(a, b, iouThreshold_);
+  return mergeDetections(a.boxes, b.boxes, iouThreshold_);
 }
 
 std::vector<Box> MergedDetector::detect(const VideoFrame& frame) {
