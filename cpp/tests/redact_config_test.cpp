@@ -24,7 +24,8 @@ const std::set<std::string> kAllKeys = {
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
-    "plate_confirm_score", "large_face_area_fraction", "large_face_min_score"};
+    "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
+    "hold_lost_ghosts"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -47,6 +48,7 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, d.plateConfirmScore);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, d.largeFaceAreaFraction);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, d.largeFaceMinScore);
+  EXPECT_EQ(c.timeline.holdLostGhosts, d.timeline.holdLostGhosts);
 }
 
 void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{}); }
@@ -73,6 +75,7 @@ RedactConfig nonDefaultConfig() {
   c.plateConfirmScore = 0.0625f;
   c.largeFaceAreaFraction = 0.25;
   c.largeFaceMinScore = 0.75f;
+  c.timeline.holdLostGhosts = true;
   return c;
 }
 
@@ -100,6 +103,7 @@ TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.2f);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, 0.05);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, 0.6f);
+  EXPECT_FALSE(c.timeline.holdLostGhosts);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
 }
@@ -216,6 +220,22 @@ TEST(RedactConfig, RefusesBadLargeFaceSettingsNamingTheKey) {
   c = RedactConfig{};
   c.largeFaceMinScore = std::numeric_limits<float>::infinity();
   EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+}
+
+// hold_lost_ghosts (spec 2026-10-19 §3.7) is a JSON boolean, off by default, and reaches the timeline config.
+TEST(RedactConfig, ReadsHoldLostGhostsAsABoolean) {
+  EXPECT_FALSE(RedactConfig{}.timeline.holdLostGhosts);
+  EXPECT_TRUE(parseRedactConfig(R"({"hold_lost_ghosts": true})", "t").timeline.holdLostGhosts);
+  EXPECT_FALSE(parseRedactConfig(R"({"hold_lost_ghosts": false})", "t").timeline.holdLostGhosts);
+  for (const char* text : {R"({"hold_lost_ghosts": 1})", R"({"hold_lost_ghosts": 0})",
+                           R"({"hold_lost_ghosts": "true"})", R"({"hold_lost_ghosts": null})"}) {
+    SCOPED_TRACE(text);
+    expectRejected(text);
+  }
+  RedactConfig c;
+  c.timeline.holdLostGhosts = true;
+  EXPECT_TRUE(timelineFor(c, {"face", "plate"}).holdLostGhosts);
+  EXPECT_FALSE(timelineFor(RedactConfig{}, {"face", "plate"}).holdLostGhosts);
 }
 
 TEST(RedactConfig, RejectsBadInput) {
@@ -369,11 +389,13 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 18u);
+  EXPECT_EQ(j.size(), 19u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
   EXPECT_DOUBLE_EQ(j.at("large_face_area_fraction").get<double>(), 0.05);
+  ASSERT_TRUE(j.at("hold_lost_ghosts").is_boolean());
+  EXPECT_FALSE(j.at("hold_lost_ghosts").get<bool>());
   std::set<std::string> keys;
   for (const auto& item : j.items()) keys.insert(item.key());
   EXPECT_EQ(keys, kAllKeys);
@@ -389,6 +411,7 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   EXPECT_EQ(j.at("plate_confirm_score").dump(), "0.2");
   EXPECT_EQ(j.at("large_face_area_fraction").dump(), "0.05");
   EXPECT_EQ(j.at("large_face_min_score").dump(), "0.6");
+  EXPECT_EQ(j.at("hold_lost_ghosts").dump(), "false");
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {

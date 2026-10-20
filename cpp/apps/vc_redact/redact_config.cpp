@@ -14,13 +14,14 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 18> kKeys = {
+constexpr std::array<std::string_view, 19> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
-    "plate_confirm_score", "large_face_area_fraction", "large_face_min_score"};
+    "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
+    "hold_lost_ghosts"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -69,6 +70,14 @@ float floatSetting(const nlohmann::json& j, const char* key, float fallback, con
   const double v = numberSetting(j, key, static_cast<double>(fallback), origin);
   constexpr double kMax = std::numeric_limits<float>::max();
   return static_cast<float>(std::isfinite(v) ? std::clamp(v, -kMax, kMax) : v);
+}
+
+// The setting as a bool: `key` must be a JSON boolean (not 0 / 1, not a string); absent: `fallback`.
+bool boolSetting(const nlohmann::json& j, const char* key, bool fallback, const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end()) return fallback;
+  if (!it->is_boolean()) throw VcError(origin + ": " + key + " must be true or false");
+  return it->get<bool>();
 }
 
 }  // namespace
@@ -157,6 +166,7 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   }
   c.largeFaceAreaFraction = numberSetting(j, "large_face_area_fraction", c.largeFaceAreaFraction, origin);
   c.largeFaceMinScore = floatSetting(j, "large_face_min_score", c.largeFaceMinScore, origin);
+  c.timeline.holdLostGhosts = boolSetting(j, "hold_lost_ghosts", c.timeline.holdLostGhosts, origin);
   c.mosaic.minBlockPx = mosaicSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, origin);
   c.mosaic.blocksPerLongSide = mosaicSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, origin);
   validateRedactConfig(c, origin);
@@ -191,6 +201,7 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["plate_confirm_score"] = jsonFloat(c.plateConfirmScore);
   j["large_face_area_fraction"] = c.largeFaceAreaFraction;
   j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
+  j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
   return j;
 }
 

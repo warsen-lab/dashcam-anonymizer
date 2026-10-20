@@ -280,6 +280,11 @@ void BoxTimeline::hold(std::vector<std::vector<MaskBox>>& masks, const std::vect
   }
 }
 
+void BoxTimeline::holdGhost(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames,
+                            const Track& track) {
+  for (size_t k = 0; k < frames.size(); ++k) emit(masks[k], track, track.box, Offset{}, MaskOrigin::Held);
+}
+
 TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const Keyframe& next) {
   requireFinite(next);
   if (!keyTime_) {
@@ -331,8 +336,10 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
       }
     } else if (!track.ghost && masked) {
       hold(out.masks, frames, prevTime, track, steps);
+    } else if (track.ghost && config_.holdLostGhosts) {
+      holdGhost(out.masks, frames, track);  // lost for the second keyframe in a row: held, then it ends (spec §3.7)
     }
-    // An unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
+    // Otherwise an unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
   }
 
   // The boxes of `next` in order (a matched one continues its track, confirmed), then the ghosts of the
@@ -389,7 +396,11 @@ TimelineOutput BoxTimeline::finish(const std::vector<FrameTime>& frames) {
   const double span = frames.empty() ? 0.0 : static_cast<double>(frames.back().index - prevTime.index + 1);
   for (const Track& track : tracks_) {
     if (track.keyBox >= 0) out.confirmed[static_cast<size_t>(track.keyBox)] = track.confirmed;
-    if (!track.ghost && track.confirmed) hold(out.masks, frames, prevTime, track, span);
+    if (!track.ghost && track.confirmed) {
+      hold(out.masks, frames, prevTime, track, span);
+    } else if (track.ghost && config_.holdLostGhosts) {
+      holdGhost(out.masks, frames, track);
+    }
   }
   keyTime_.reset();
   tracks_.clear();

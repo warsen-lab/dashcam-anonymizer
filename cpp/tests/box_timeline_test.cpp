@@ -46,6 +46,13 @@ TimelineConfig confirming() {
   return c;
 }
 
+// exact() with hold_lost_ghosts (spec 2026-10-19 §3.7) as given.
+TimelineConfig ghostHolding(bool on) {
+  TimelineConfig c = exact();
+  c.holdLostGhosts = on;
+  return c;
+}
+
 Box face(float x1, float y1, float x2, float y2) { return Box{kFace, x1, y1, x2, y2, 0.9f}; }
 
 Box weakFace(float x1, float y1, float x2, float y2) { return Box{kFace, x1, y1, x2, y2, 0.3f}; }
@@ -820,27 +827,34 @@ TEST(BoxTimeline, ALooseMatchNeedsCloseEnoughBoxesOfASimilarSize) {
 }
 
 // The scene that used to stack masks: a plate missed at keyframe 36 while a look-alike turns up 100 px away (and
-// stays), two plates crossing, and a face appearing late. Every track masks a frame at most once, and every mask
-// is detected, interpolated or held (no `extended` any more).
-TEST(BoxTimeline, EveryTrackHasAtMostOneMaskPerFrame) {
+// stays), two plates crossing, a face appearing late, and a face that disappears after keyframe 12 (so it is
+// missed at 24 and again at 36). Returns the masks of frames 0 to 7 * kStep - 1 under `cfg`.
+std::vector<std::vector<MaskBox>> runCrowdedScene(const TimelineConfig& cfg) {
   const Mover plate{kPlate, 400, 500, 48, 16, 3, 0};
   const Mover right{kPlate, 100, 700, 48, 16, 8, 0};
   const Mover left{kPlate, 900, 708, 48, 16, -8, 0};
   const float lookAlikeX = plate.at(3 * kStep).x1 + 100;
   const Box lookAlike{kPlate, lookAlikeX, 520, lookAlikeX + 48, 536, 0.9f};
-  BoxTimeline timeline(TimelineConfig{}, 1920, 1080);
+  const Box vanishing = face(50, 50, 70, 74);
+  BoxTimeline timeline(cfg, 1920, 1080);
   std::vector<std::vector<MaskBox>> masks;
-  timeline.advance({}, key(0, {plate.at(0), right.at(0), left.at(0)}));
+  timeline.advance({}, key(0, {plate.at(0), right.at(0), left.at(0), vanishing}));
   for (int64_t k = 1; k <= 6; ++k) {
     std::vector<Box> boxes{right.at(k * kStep), left.at(k * kStep)};
     if (k != 3) boxes.push_back(plate.at(k * kStep));
     if (k >= 3) boxes.push_back(lookAlike);
     if (k >= 4) boxes.push_back(face(1000, 200, 1020, 224));
+    if (k <= 1) boxes.push_back(vanishing);
     for (auto& m : timeline.advance(frames((k - 1) * kStep, k * kStep), key(k * kStep, boxes)).masks) {
       masks.push_back(std::move(m));
     }
   }
   for (auto& m : timeline.finish(frames(6 * kStep, 7 * kStep)).masks) masks.push_back(std::move(m));
+  return masks;
+}
+
+// Every track masks a frame at most once, and every mask is detected, interpolated or held (no `extended` any more).
+void expectOneMaskPerTrackWithKnownOrigins(const std::vector<std::vector<MaskBox>>& masks) {
   ASSERT_EQ(masks.size(), static_cast<size_t>(7 * kStep));
   expectOneMaskPerTrack(masks);
   for (const auto& frame : masks) {
@@ -849,6 +863,30 @@ TEST(BoxTimeline, EveryTrackHasAtMostOneMaskPerFrame) {
       EXPECT_TRUE(origin == "detected" || origin == "interpolated" || origin == "held") << origin;
       EXPECT_GE(m.track, 1);
     }
+  }
+}
+
+TEST(BoxTimeline, EveryTrackHasAtMostOneMaskPerFrame) {
+  expectOneMaskPerTrackWithKnownOrigins(runCrowdedScene(TimelineConfig{}));
+}
+
+// ... also when lost ghosts are held (spec 2026-10-19 §3.7): the disappearing face is then masked over its ghost
+// interval (frames 24 to 35) as well, by the one track it has had since frame 0.
+TEST(BoxTimeline, EveryTrackHasAtMostOneMaskPerFrameWhenLostGhostsAreHeld) {
+  TimelineConfig c;
+  c.holdLostGhosts = true;
+  const auto masks = runCrowdedScene(c);
+  expectOneMaskPerTrackWithKnownOrigins(masks);
+  const auto facesOf = [&](size_t frame) {
+    return std::count_if(masks[frame].begin(), masks[frame].end(), [](const MaskBox& m) { return m.cls == kFace; });
+  };
+  for (size_t f = 0; f < 3 * kStep; ++f) EXPECT_EQ(facesOf(f), 1) << "frame " << f;  // detected, held, ghost held
+  for (size_t f = 3 * kStep; f < 4 * kStep; ++f) EXPECT_EQ(facesOf(f), 0) << "frame " << f;  // the track ended
+  // Without the switch the face has no mask after its hold.
+  const auto off = runCrowdedScene(TimelineConfig{});
+  for (size_t f = 2 * kStep; f < 3 * kStep; ++f) {
+    EXPECT_EQ(std::count_if(off[f].begin(), off[f].end(), [](const MaskBox& m) { return m.cls == kFace; }), 0)
+        << "frame " << f;
   }
 }
 
@@ -1107,6 +1145,154 @@ TEST(BoxTimeline, RejectsAnInvalidConfirmScore) {
   }
   EXPECT_TRUE(TimelineConfig{}.confirmScore.empty());  // by default nothing needs confirming
 }
+
+// ---- hold_lost_ghosts (spec 2026-10-19 §3.7). Keyframes every 6 frames here: 0, 6, 12, ... ----
+
+// Same masks, field by field (MaskBox has no operator==).
+void expectSameMasks(const std::vector<std::vector<MaskBox>>& a, const std::vector<std::vector<MaskBox>>& b) {
+  ASSERT_EQ(a.size(), b.size());
+  for (size_t f = 0; f < a.size(); ++f) {
+    SCOPED_TRACE("frame offset " + std::to_string(f));
+    ASSERT_EQ(a[f].size(), b[f].size());
+    for (size_t i = 0; i < a[f].size(); ++i) {
+      EXPECT_EQ(a[f][i].cls, b[f][i].cls);
+      EXPECT_EQ(a[f][i].track, b[f][i].track);
+      EXPECT_EQ(a[f][i].origin, b[f][i].origin);
+      EXPECT_EQ(a[f][i].x1, b[f][i].x1);
+      EXPECT_EQ(a[f][i].y1, b[f][i].y1);
+      EXPECT_EQ(a[f][i].x2, b[f][i].x2);
+      EXPECT_EQ(a[f][i].y2, b[f][i].y2);
+    }
+  }
+}
+
+// By default a track detected at 0 and missed at 6 and 12 is masked over frames 0 to 5 (held at its box) and not
+// after: its ghost's interval, frames 6 to 11, is unmasked. This pins what the switch changes.
+TEST(BoxTimeline, ATrackMissedTwiceHasNoMaskOnItsGhostIntervalByDefault) {
+  BoxTimeline timeline(ghostHolding(false), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  const auto held = timeline.advance(frames(0, 6), key(6, {})).masks;
+  for (const auto& m : held) ASSERT_EQ(m.size(), 1u);
+  const auto ghost = timeline.advance(frames(6, 12), key(12, {})).masks;
+  ASSERT_EQ(ghost.size(), 6u);
+  for (const auto& m : ghost) EXPECT_TRUE(m.empty());
+  for (const auto& m : timeline.advance(frames(12, 18), key(18, {})).masks) EXPECT_TRUE(m.empty());
+}
+
+// With hold_lost_ghosts the ghost's interval carries one mask per frame at the ghost's box, origin held, from its
+// first frame (6) on; the track then ends: nothing from the frame of the second miss (12) on.
+TEST(BoxTimeline, AHeldGhostMasksItsWholeIntervalAtTheBoxItWasHeldTo) {
+  BoxTimeline timeline(ghostHolding(true), 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  const auto held = timeline.advance(frames(0, 6), key(6, {})).masks;
+  for (const auto& m : held) ASSERT_EQ(m.size(), 1u);
+  const auto ghost = timeline.advance(frames(6, 12), key(12, {})).masks;
+  ASSERT_EQ(ghost.size(), 6u);
+  for (size_t k = 0; k < ghost.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(6 + k));
+    ASSERT_EQ(ghost[k].size(), 1u);
+    EXPECT_EQ(ghost[k][0].track, held[0][0].track);
+    expectBox(ghost[k][0], 100, 100, 120, 120, MaskOrigin::Held);  // the first frame, 6, is held too
+  }
+  expectOneMaskPerTrack(ghost);
+  for (const auto& m : timeline.advance(frames(12, 18), key(18, {})).masks) EXPECT_TRUE(m.empty());
+  for (const auto& m : timeline.finish(frames(18, 24)).masks) EXPECT_TRUE(m.empty());
+}
+
+// The ghost stays where its hold ended: it does not move on along the velocity, and its mask does not shrink below
+// the hold's (a held mask keeps its smoothed size) although its own motion margin is 0.
+// 1 px per frame, detected at 0 and 6, missed at 12 and 18. The hold over 6 to 11 has a margin of 0.5 * 6 = 3 px per
+// side along x (width 26), the ghost box is x 112 to 132, so its masks are x 109 to 135 on frames 12 to 17.
+TEST(BoxTimeline, AHeldGhostDoesNotMoveAndKeepsTheSizeOfTheHold) {
+  TimelineConfig c = ghostHolding(true);
+  c.motionExpandFraction = 0.5;
+  c.shrinkPerFrame = 0.1;
+  BoxTimeline timeline(c, 1000, 1000);
+  timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+  timeline.advance(frames(0, 6), key(6, {face(106, 100, 126, 120)}));
+  const auto hold = timeline.advance(frames(6, 12), key(12, {})).masks;
+  ASSERT_EQ(hold[5].size(), 1u);
+  const float lastHoldWidth = hold[5][0].x2 - hold[5][0].x1;
+  EXPECT_NEAR(lastHoldWidth, 26.0f, 1e-3);
+  const auto ghost = timeline.advance(frames(12, 18), key(18, {})).masks;
+  ASSERT_EQ(ghost.size(), 6u);
+  for (size_t k = 0; k < ghost.size(); ++k) {
+    SCOPED_TRACE("frame " + std::to_string(12 + k));
+    ASSERT_EQ(ghost[k].size(), 1u);
+    EXPECT_GE(ghost[k][0].x2 - ghost[k][0].x1, lastHoldWidth - 1e-3f);
+    expectBox(ghost[k][0], 109, 100, 135, 120, MaskOrigin::Held);
+    EXPECT_EQ(ghost[k][0].x1, ghost[0][0].x1);  // all six identical
+    EXPECT_EQ(ghost[k][0].x2, ghost[0][0].x2);
+    EXPECT_EQ(ghost[k][0].y1, ghost[0][0].y1);
+    EXPECT_EQ(ghost[k][0].y2, ghost[0][0].y2);
+  }
+  for (const auto& m : timeline.advance(frames(18, 24), key(24, {})).masks) EXPECT_TRUE(m.empty());
+}
+
+// A ghost found again at the next keyframe is interpolated from where it was held to the new box, whatever the
+// switch: the output is the same with it on and off, over the whole run including the tail.
+TEST(BoxTimeline, AGhostMatchedAtTheNextKeyframeBehavesTheSameWhateverTheSwitch) {
+  const auto run = [](bool hold) {
+    BoxTimeline timeline(ghostHolding(hold), 1000, 1000);
+    std::vector<std::vector<MaskBox>> all;
+    const auto add = [&all](const TimelineOutput& out) {
+      for (const auto& m : out.masks) all.push_back(m);
+    };
+    timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+    add(timeline.advance(frames(0, 6), key(6, {face(106, 100, 126, 120)})));
+    add(timeline.advance(frames(6, 12), key(12, {})));                          // missed: held, a ghost at 112
+    add(timeline.advance(frames(12, 18), key(18, {face(120, 100, 140, 120)})));  // found again: interpolated
+    add(timeline.advance(frames(18, 24), key(24, {face(126, 100, 146, 120)})));
+    add(timeline.finish(frames(24, 30)));
+    return all;
+  };
+  const auto off = run(false);
+  ASSERT_EQ(off.size(), 30u);
+  EXPECT_EQ(off[12][0].origin, MaskOrigin::Held);          // the ghost's first frame, from its held position
+  EXPECT_EQ(off[15][0].origin, MaskOrigin::Interpolated);
+  expectSameMasks(run(true), off);
+}
+
+// The tail after the last keyframe: a ghost left in the timeline is held there at its box with the switch, and not
+// masked without it.
+TEST(BoxTimeline, FinishHoldsAGhostOnlyWhenTheSwitchIsOn) {
+  for (const bool hold : {false, true}) {
+    SCOPED_TRACE(hold ? "hold_lost_ghosts" : "default");
+    BoxTimeline timeline(ghostHolding(hold), 1000, 1000);
+    timeline.advance({}, key(0, {face(100, 100, 120, 120)}));
+    timeline.advance(frames(0, 6), key(6, {face(106, 100, 126, 120)}));
+    timeline.advance(frames(6, 12), key(12, {}));  // ghost at x 112 to 132
+    const auto tail = timeline.finish(frames(12, 18)).masks;
+    ASSERT_EQ(tail.size(), 6u);
+    for (const auto& m : tail) {
+      if (!hold) {
+        EXPECT_TRUE(m.empty());
+        continue;
+      }
+      ASSERT_EQ(m.size(), 1u);
+      expectBox(m[0], 112, 100, 132, 120, MaskOrigin::Held);  // its first frame, 12, included
+    }
+  }
+}
+
+// An unconfirmed low-score track seen once never becomes a ghost, so the switch changes nothing for it.
+TEST(BoxTimeline, HoldLostGhostsDoesNotMaskAnUnconfirmedTrack) {
+  TimelineConfig c = confirming();
+  c.holdLostGhosts = true;
+  BoxTimeline timeline(c, 1000, 1000);
+  timeline.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  const TimelineOutput first = timeline.advance(frames(0, 6), key(6, {}));
+  for (const auto& m : first.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(first.confirmed, std::vector<bool>{false});
+  for (const auto& m : timeline.advance(frames(6, 12), key(12, {})).masks) EXPECT_TRUE(m.empty());
+  for (const auto& m : timeline.finish(frames(12, 18)).masks) EXPECT_TRUE(m.empty());
+
+  BoxTimeline ending(c, 1000, 1000);
+  ending.advance({}, key(0, {weakFace(100, 100, 120, 120)}));
+  for (const auto& m : ending.finish(frames(0, 6)).masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, HoldLostGhostsIsOffByDefault) { EXPECT_FALSE(TimelineConfig{}.holdLostGhosts); }
 
 }  // namespace
 }  // namespace vc
