@@ -118,6 +118,10 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `large_face_area_fraction` | 0.05 | 人脸框（外扩之前）面积超过画面的这个比例，才适用下一行的更高分数要求，范围 (0, 1]。调小则更小的人脸框也要过 `large_face_min_score`，调大则只管更大的框（取 1 等于不管） |
 | `large_face_min_score` | 0.6 | 面积超过上一行比例的人脸框，分数低于它的直接丢弃（YuNet 会把路面、楼群认成占画面很大的人脸，分数多在 0.3–0.6；丢了几个见 `stats.json` 的 `large_faces_dropped`）。调高丢得多、大块误打少，但贴近镜头的低分真人脸会漏；调低保留得多；0 关闭这条规则 |
 | `hold_lost_ghosts` | false | 同一个目标连续两个关键帧都漏检时，第二个间隔是否仍在它最后停留的位置打码（JSON 布尔，不能写 0 / 1）。`true` 把没有框的空档从两个检测间隔缩到一个，代价是消失的目标（包括误检）多留一个间隔的码；`false` 时那个间隔不打码 |
+| `output_bitrate_factor_hevc` | 1.5 | 输出一律 H.264：H.264 原片沿用原码率，HEVC 等其他编码的原片按原码率乘这个系数（同样的画质 H.264 要更高的码率），范围 [1, 4]；读不到原码率时按 8 Mb/s 乘系数。调大画质好、文件大 |
+| `nvenc_preset` | `p4` | NVENC 编码预设（Linux + NVIDIA），`p1` 最快、`p7` 画质最好；只在用 `h264_nvenc` 编码时起作用 |
+| `trt_fp16` | true | TensorRT 用 FP16（Linux + NVIDIA，GPU 计划里接上；JSON 布尔） |
+| `ort_intra_threads` | 0 | onnxruntime 每个会话的 CPU 线程数，0 由 onnxruntime 自己定；同时跑多个 `vc_redact`（`VC_JOBS`）时调小，免得互相抢 CPU。macOS 上也生效，范围 [0, 1024] |
 
 用法：`--config my.json`。省略的键取默认值，写错的键直接报错。
 

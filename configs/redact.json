@@ -17,5 +17,9 @@
   "plate_confirm_score": 0.2,
   "large_face_area_fraction": 0.05,
   "large_face_min_score": 0.6,
-  "hold_lost_ghosts": false
+  "hold_lost_ghosts": false,
+  "output_bitrate_factor_hevc": 1.5,
+  "nvenc_preset": "p4",
+  "trt_fp16": true,
+  "ort_intra_threads": 0
 }

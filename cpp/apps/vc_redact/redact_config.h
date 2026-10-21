@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -37,14 +39,28 @@ struct RedactConfig {
   // positives on road and buildings. largeFaceMinScore 0 switches the rule off.
   double largeFaceAreaFraction = 0.05;
   float largeFaceMinScore = 0.6f;
+  // Linux deployment (spec 2026-10-20 §3, §5). The output is always H.264: a source in another codec (HEVC, say) is
+  // encoded at its own bitrate times outputBitrateFactorHevc, in [1, 4]; an H.264 source keeps its bitrate.
+  double outputBitrateFactorHevc = 1.5;
+  // h264_nvenc's preset, "p1" (fastest) to "p7" (best); only used when NVENC encodes.
+  std::string nvencPreset = "p4";
+  // The TensorRT execution provider in FP16 (used once TensorRT runs: stage 1c of the Linux plan).
+  bool trtFp16 = true;
+  // onnxruntime's intra-op CPU threads per session, in [0, 1024]: 0 keeps onnxruntime's default, more sets it
+  // (smaller when several vc_redact processes share a machine). Applies on every platform.
+  int ortIntraThreads = 0;
 };
+
+// The values nvenc_preset takes.
+inline constexpr std::array<std::string_view, 7> kNvencPresets = {"p1", "p2", "p3", "p4", "p5", "p6", "p7"};
 
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096]; every other value must be a finite number except hold_lost_ghosts, which must be a JSON boolean.
+// [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans,
+// nvenc_preset one of the strings "p1" to "p7"; every other value must be a finite number.
 // face_score_threshold, face_confirm_score, plate_confirm_score and large_face_min_score are in [0, 1],
-// face_nms_iou and large_face_area_fraction in (0, 1].
+// face_nms_iou and large_face_area_fraction in (0, 1], output_bitrate_factor_hevc in [1, 4].
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);

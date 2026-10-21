@@ -25,7 +25,8 @@ const std::set<std::string> kAllKeys = {
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
-    "hold_lost_ghosts"};
+    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "nvenc_preset",
+    "trt_fp16",            "ort_intra_threads"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -49,6 +50,10 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, d.largeFaceAreaFraction);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, d.largeFaceMinScore);
   EXPECT_EQ(c.timeline.holdLostGhosts, d.timeline.holdLostGhosts);
+  EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, d.outputBitrateFactorHevc);
+  EXPECT_EQ(c.nvencPreset, d.nvencPreset);
+  EXPECT_EQ(c.trtFp16, d.trtFp16);
+  EXPECT_EQ(c.ortIntraThreads, d.ortIntraThreads);
 }
 
 void expectDefaults(const RedactConfig& c) { expectSameConfig(c, RedactConfig{}); }
@@ -76,6 +81,10 @@ RedactConfig nonDefaultConfig() {
   c.largeFaceAreaFraction = 0.25;
   c.largeFaceMinScore = 0.75f;
   c.timeline.holdLostGhosts = true;
+  c.outputBitrateFactorHevc = 2.25;
+  c.nvencPreset = "p1";
+  c.trtFp16 = false;
+  c.ortIntraThreads = 3;
   return c;
 }
 
@@ -276,6 +285,18 @@ TEST(RedactConfig, RejectsBadInput) {
       // The large-face rule: numbers that overflow while parsing, and the range edges.
       R"({"large_face_area_fraction": 1e400})",     R"({"large_face_min_score": 1e400})",
       R"({"large_face_area_fraction": 1.0000001})", R"({"large_face_min_score": 1.0000001})",
+      // The Linux settings (spec 2026-10-20): a bitrate factor in [1, 4], a preset p1-p7, a boolean, a thread count.
+      R"({"output_bitrate_factor_hevc": 0.99})",    R"({"output_bitrate_factor_hevc": 4.01})",
+      R"({"output_bitrate_factor_hevc": "1.5"})",   R"({"output_bitrate_factor_hevc": 1e400})",
+      R"({"output_bitrate_factor_hevc": null})",
+      R"({"nvenc_preset": "p0"})",                  R"({"nvenc_preset": "p8"})",
+      R"({"nvenc_preset": "P4"})",                  R"({"nvenc_preset": "fast"})",
+      R"({"nvenc_preset": 4})",                     R"({"nvenc_preset": null})",
+      R"({"trt_fp16": 1})",                         R"({"trt_fp16": "true"})",
+      R"({"trt_fp16": null})",
+      R"({"ort_intra_threads": -1})",               R"({"ort_intra_threads": 1025})",
+      R"({"ort_intra_threads": 2.5})",              R"({"ort_intra_threads": "4"})",
+      R"({"ort_intra_threads": 4294967297})",       R"({"ort_intra_threads": null})",
   };
   for (const std::string& text : bad) expectRejected(text);
 }
@@ -339,6 +360,7 @@ TEST(RedactConfig, ValidateRefusesEveryNonFiniteDoubleField) {
       {"plate_confirm_score", [](RedactConfig& c, double v) { c.plateConfirmScore = static_cast<float>(v); }},
       {"large_face_area_fraction", [](RedactConfig& c, double v) { c.largeFaceAreaFraction = v; }},
       {"large_face_min_score", [](RedactConfig& c, double v) { c.largeFaceMinScore = static_cast<float>(v); }},
+      {"output_bitrate_factor_hevc", [](RedactConfig& c, double v) { c.outputBitrateFactorHevc = v; }},
   };
   const std::vector<double> nonFinite = {std::numeric_limits<double>::quiet_NaN(),
                                          std::numeric_limits<double>::infinity(),
@@ -389,7 +411,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 19u);
+  EXPECT_EQ(j.size(), 23u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -412,6 +434,68 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
   EXPECT_EQ(j.at("large_face_area_fraction").dump(), "0.05");
   EXPECT_EQ(j.at("large_face_min_score").dump(), "0.6");
   EXPECT_EQ(j.at("hold_lost_ghosts").dump(), "false");
+}
+
+// spec 2026-10-20 §3, §5: an HEVC source's H.264 gets 1.5 times its bitrate, NVENC runs preset p4, TensorRT in FP16,
+// and onnxruntime keeps its own thread count.
+TEST(RedactConfig, LinuxSettingsDefaults) {
+  const RedactConfig c;
+  EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, 1.5);
+  EXPECT_EQ(c.nvencPreset, "p4");
+  EXPECT_TRUE(c.trtFp16);
+  EXPECT_EQ(c.ortIntraThreads, 0);
+  const nlohmann::ordered_json j = redactConfigToJson(c);
+  EXPECT_EQ(j.at("output_bitrate_factor_hevc").dump(), "1.5");
+  EXPECT_EQ(j.at("nvenc_preset").dump(), "\"p4\"");
+  EXPECT_EQ(j.at("trt_fp16").dump(), "true");
+  EXPECT_EQ(j.at("ort_intra_threads").dump(), "0");
+}
+
+TEST(RedactConfig, ReadsTheLinuxSettings) {
+  const RedactConfig c = parseRedactConfig(
+      R"({"output_bitrate_factor_hevc": 2, "nvenc_preset": "p7", "trt_fp16": false, "ort_intra_threads": 2})", "t");
+  EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, 2.0);
+  EXPECT_EQ(c.nvencPreset, "p7");
+  EXPECT_FALSE(c.trtFp16);
+  EXPECT_EQ(c.ortIntraThreads, 2);
+  for (const char* preset : {"p1", "p2", "p3", "p4", "p5", "p6", "p7"}) {
+    EXPECT_EQ(parseRedactConfig(std::string(R"({"nvenc_preset": ")") + preset + "\"}", "t").nvencPreset, preset);
+  }
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"output_bitrate_factor_hevc": 1})", "t").outputBitrateFactorHevc, 1.0);
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"output_bitrate_factor_hevc": 4})", "t").outputBitrateFactorHevc, 4.0);
+  EXPECT_EQ(parseRedactConfig(R"({"ort_intra_threads": 1024})", "t").ortIntraThreads, 1024);
+}
+
+// The messages name the key and the allowed values.
+TEST(RedactConfig, LinuxSettingMessagesGiveTheRule) {
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {R"({"output_bitrate_factor_hevc": 5})", "cfg: output_bitrate_factor_hevc must be in [1, 4]"},
+      {R"({"nvenc_preset": "p9"})", "cfg: nvenc_preset must be one of p1 ... p7, got 'p9'"},
+      {R"({"nvenc_preset": 4})", "cfg: nvenc_preset must be a string"},
+      {R"({"trt_fp16": 1})", "cfg: trt_fp16 must be true or false"},
+      {R"({"ort_intra_threads": -1})", "cfg: ort_intra_threads must be an integer in [0, 1024]"},
+      {R"({"mosaic_min_block_px": 0})", "cfg: mosaic_min_block_px must be an integer in [1, 4096]"},
+  };
+  for (const auto& [text, message] : cases) {
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted " << text;
+    } catch (const VcError& e) {
+      EXPECT_EQ(std::string(e.what()), message);
+    }
+  }
+}
+
+TEST(RedactConfig, ValidateChecksTheLinuxSettings) {
+  RedactConfig c;
+  c.nvencPreset = "p0";
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+  c = RedactConfig{};
+  c.ortIntraThreads = 1025;
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+  c = RedactConfig{};
+  c.outputBitrateFactorHevc = 0.5;
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
 }
 
 TEST(RedactConfig, DumpParsesBackToTheSameConfig) {
