@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -35,10 +36,13 @@ WriterConfig configFor(const VideoReader& reader, const fs::path& output, bool p
   return config;
 }
 
-// Decodes `input` and writes every frame (and the audio) through a VideoWriter. Returns the encoder.
-std::string reencode(const fs::path& input, const fs::path& output, bool preferHardware) {
+// Decodes `input` and writes every frame (and the audio) through a VideoWriter, its configuration changed by
+// `tweak`. Returns the encoder.
+std::string reencode(const fs::path& input, const fs::path& output, bool preferHardware,
+                     const std::function<void(WriterConfig&)>& tweak = {}) {
   VideoReader reader(input.string(), HwAccel::None);
   WriterConfig config = configFor(reader, output, preferHardware);
+  if (tweak) tweak(config);
   std::unique_ptr<VideoWriter> writer;
   std::vector<av::PacketPtr> early;
   reader.setAudioSink([&](const AVPacket& packet) {
@@ -120,6 +124,23 @@ TEST(VideoWriter, PrefersVideoToolboxWhenAvailable) {
   const std::string encoder = reencode(test::basicVideo(), out, true);
   EXPECT_TRUE(encoder == "h264_videotoolbox" || encoder == "libx264") << encoder;
   EXPECT_EQ(framePts(out).size(), 60u);
+}
+
+// Constant quality ignores the bit rate: asked for 50 kb/s, a bit-rate encode stays small, a constant-quality one
+// spends what the picture needs, several times more. Both encoders the writer can pick.
+TEST(VideoWriter, ConstantQualityIgnoresTheBitRate) {
+  for (const bool hardware : {false, true}) {
+    const fs::path rated = test::tmpDir() / (hardware ? "writer_rate_hw.mp4" : "writer_rate_sw.mp4");
+    const fs::path quality = test::tmpDir() / (hardware ? "writer_quality_hw.mp4" : "writer_quality_sw.mp4");
+    const std::string a = reencode(test::basicVideo(), rated, hardware, [](WriterConfig& c) { c.bitRate = 50'000; });
+    const std::string b = reencode(test::basicVideo(), quality, hardware, [](WriterConfig& c) {
+      c.bitRate = 50'000;
+      c.constantQuality = true;
+    });
+    EXPECT_EQ(a, b);
+    EXPECT_GT(fs::file_size(quality), 3 * fs::file_size(rated)) << b;
+    EXPECT_EQ(framePts(quality).size(), 60u) << b;
+  }
 }
 
 // VideoToolbox's H.264 encoder takes at most 4096 px per side: the writer falls back to libx264 and

@@ -57,7 +57,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 | 文件 | 内容 |
 |---|---|
-| `<视频名>.redacted.mp4` | 打码后的视频。编码跟随原片（HEVC → HEVC，其他 → H.264），码率取原片的，音频原样复制，旋转、色彩信息照搬 |
+| `<视频名>.redacted.mp4` | 打码后的视频。编码跟随原片（HEVC → HEVC，其他 → H.264），按恒定画质编码（接近原片清晰度），音频原样复制，旋转、色彩信息照搬 |
 | `masks.jsonl` | 每帧打了哪些框（一帧一行）：坐标、轨迹编号 track、来源 origin、马赛克块大小 block、是否向外对齐网格 snap（车牌为 false） |
 | `detections.jsonl` | 关键帧上检测到的框，含来源（student / yunet）；confirmed 为 false 的是只出现一次的低分框，没有打码 |
 | `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器 |
@@ -98,7 +98,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
   64 分钟全片 10 档：219 fps（229,606 帧 1048 秒）。4K 没测过，请把 `stats.json` 发给我。
 - **内存：** 处理线程最多缓冲 120 帧，4K 约 1.5 GB，32 GB 内存没问题。
-- **画质和大小：** 输出码率等于原片码率，4K HEVC 输出仍是 HEVC。
+- **画质和大小：** 按恒定画质编码，清晰度接近原片，文件通常比原片大（1080p 行车记录约 4 倍）；4K HEVC 输出仍是 HEVC。
 
 ## 4. 调参（`configs/redact.json`）
 

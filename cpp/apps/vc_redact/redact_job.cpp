@@ -471,6 +471,7 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
   c.frameRate = stream->avg_frame_rate;
   c.sourceCodec = reader.info().codecName;
   c.bitRate = stream->codecpar->bit_rate;
+  c.constantQuality = true;  // at the source's bit rate a re-encode comes out visibly soft
   c.preferHardware = preferHardware;
   copyPresentation(*stream, c);  // aspect ratio, colour tags and rotation stay as in the input
   return c;

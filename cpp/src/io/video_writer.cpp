@@ -9,10 +9,33 @@
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
 
+extern "C" {
+#include <libavutil/avutil.h>
+#include <libavutil/opt.h>
+}
+
 namespace vc {
 namespace {
 
 constexpr int64_t kDefaultBitRate = 8'000'000;
+// Constant-quality settings, both close to the source when re-encoding a 1080p dashcam video (SSIM Y 0.985 /
+// 0.986 against it; at the source's own bit rate VideoToolbox gives 0.92, visibly soft).
+constexpr int kVideoToolboxQuality = 65;  // ffmpeg's -q:v scale, 1-100
+constexpr double kSoftwareCrf = 18;
+
+// Sets `ctx` (for encoder `name`) to constant quality or to config.bitRate.
+void setRateControl(AVCodecContext* ctx, const std::string& name, const WriterConfig& config) {
+  if (!config.constantQuality) {
+    ctx->bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
+    return;
+  }
+  if (name.find("videotoolbox") != std::string::npos) {
+    ctx->flags |= AV_CODEC_FLAG_QSCALE;
+    ctx->global_quality = kVideoToolboxQuality * FF_QP2LAMBDA;
+  } else {
+    checkAv(av_opt_set_double(ctx->priv_data, "crf", kSoftwareCrf, 0), "set crf of " + name);
+  }
+}
 
 struct OutputDeleter {
   void operator()(AVFormatContext* p) const {
@@ -135,7 +158,7 @@ struct VideoWriter::Impl {
       ctx->pix_fmt = encoderFormat(ctx.get(), codec, config.pixelFormat);
       ctx->time_base = config.timeBase;
       ctx->framerate = rate;
-      ctx->bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
+      setRateControl(ctx.get(), name, config);
       if (config.sampleAspectRatio.num > 0 && config.sampleAspectRatio.den > 0) {
         ctx->sample_aspect_ratio = config.sampleAspectRatio;
       }

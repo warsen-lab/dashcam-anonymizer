@@ -30,7 +30,9 @@ struct WriterConfig {
   AVRational timeBase{1, 1000};                    // of the frames' pts
   AVRational frameRate{0, 1};                      // 0/1 when unknown (the encoder assumes 30 fps)
   std::string sourceCodec = "h264";                // "hevc" stays HEVC, anything else becomes H.264
-  int64_t bitRate = 0;                             // <= 0: 8 Mb/s
+  int64_t bitRate = 0;                             // <= 0: 8 Mb/s; unused with constantQuality
+  bool constantQuality = false;                    // constant quality instead of bitRate (VideoToolbox q 65,
+                                                   // libx264 / libx265 crf 18); a file as large as it takes
   bool preferHardware = true;                      // VideoToolbox first, then libx264 / libx265
 
   // Presentation metadata of the source video, written to the encoder and the MP4 so that the
