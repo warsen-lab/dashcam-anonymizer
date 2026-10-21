@@ -12,7 +12,13 @@ set(VC_THIRD_PARTY_DIR "$ENV{HOME}/.cache/video-compliance/third_party"
     CACHE PATH "Directory holding the unpacked third-party packages")
 set(VC_NLOHMANN_JSON_INCLUDE "${VC_THIRD_PARTY_DIR}/nlohmann_json-3.12.0/include"
     CACHE PATH "Directory containing nlohmann/json.hpp")
-set(VC_ONNXRUNTIME_ROOT "${VC_THIRD_PARTY_DIR}/onnxruntime-osx-arm64-1.30.0"
+# The package for the platform: macOS arm64 (CoreML EP), Linux x64 GPU (CUDA and TensorRT EPs, CPU as well).
+if(APPLE)
+  set(_vc_onnxruntime_package "onnxruntime-osx-arm64-1.30.0")
+else()
+  set(_vc_onnxruntime_package "onnxruntime-linux-x64-gpu-1.30.0")
+endif()
+set(VC_ONNXRUNTIME_ROOT "${VC_THIRD_PARTY_DIR}/${_vc_onnxruntime_package}"
     CACHE PATH "Unpacked ONNX Runtime package (include/, lib/)")
 
 if(NOT EXISTS "${VC_NLOHMANN_JSON_INCLUDE}/nlohmann/json.hpp")
@@ -36,5 +42,6 @@ set_target_properties(vc_onnxruntime PROPERTIES
   IMPORTED_LOCATION "${VC_ONNXRUNTIME_LIBRARY}"
   INTERFACE_INCLUDE_DIRECTORIES "${VC_ONNXRUNTIME_ROOT}/include"
   INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${VC_ONNXRUNTIME_ROOT}/include")
-# libonnxruntime's install name is @rpath/libonnxruntime.1.dylib.
+# libonnxruntime's install name is @rpath/libonnxruntime.1.dylib (on Linux the binaries find libonnxruntime.so.1
+# through the same RPATH entry).
 list(APPEND CMAKE_BUILD_RPATH "${VC_ONNXRUNTIME_ROOT}/lib")

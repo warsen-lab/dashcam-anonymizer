@@ -15,7 +15,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-add_compile_options(-Wall -Wextra -Wpedantic)
+# The GPU code paths (spec 2026-10-20): CUDA kernels for NVIDIA cards. OFF (the default, macOS and every local
+# test) compiles and links no CUDA at all; the GPU code is behind #ifdef VC_WITH_CUDA.
+option(VC_WITH_CUDA "Build the CUDA code paths for NVIDIA GPUs (needs the CUDA 12 toolkit)" OFF)
+if(VC_WITH_CUDA)
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(NOT CMAKE_CUDA_COMPILER)
+    message(FATAL_ERROR "VC_WITH_CUDA=ON needs the CUDA toolkit (nvcc), which CMake did not find: install CUDA 12 "
+                        "(scripts/setup_linux.sh) or configure with -DVC_WITH_CUDA=OFF")
+  endif()
+  # 86: A10 / RTX 3090, 89: L4 / L40S / RTX 4090 (spec 2026-10-20 §2).
+  set(CMAKE_CUDA_ARCHITECTURES "86;89" CACHE STRING "CUDA architectures to compile the kernels for")
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 20)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  add_compile_definitions(VC_WITH_CUDA=1)
+  message(STATUS "VC_WITH_CUDA: ON (CUDA architectures ${CMAKE_CUDA_ARCHITECTURES})")
+endif()
+
+# C++ only: nvcc takes host-compiler warnings through -Xcompiler, which the CUDA sources set themselves.
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
 
 find_package(FFmpeg REQUIRED)
 include(ThirdParty)

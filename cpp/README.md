@@ -13,7 +13,7 @@
 - CMake ≥ 3.24，支持 C++20 的编译器
 - FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux `libavformat-dev libavcodec-dev libswscale-dev libavutil-dev`。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
 - GoogleTest：macOS `brew install googletest`；Linux `libgtest-dev`
-- onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
+- onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP；在 Linux 上 CMake 默认找 x64 GPU 包 `onnxruntime-linux-x64-gpu-1.30.0`，含 CUDA 与 TensorRT EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
 
   ```bash
   (
@@ -42,6 +42,8 @@ cmake --build build/cpp -j 4
 
 不指定 `CMAKE_BUILD_TYPE` 时，单配置生成器（Makefile、Ninja）默认按 Release 构建。
 
+`-DVC_WITH_CUDA=ON` 打开 NVIDIA GPU 的代码路径（设计见 `docs/superpowers/specs/2026-10-20-linux-nvidia-deployment-design.md`）：启用 CUDA 语言，`CMAKE_CUDA_ARCHITECTURES` 默认 `86;89`（A10 / RTX 3090，L4 / L40S / RTX 4090），并定义宏 `VC_WITH_CUDA`；找不到 nvcc 时配置阶段直接报错。默认 `OFF`：不编译、不链接任何 CUDA，macOS 和本机测试都用它。目前 `ON` 只多出 CUDA 语言和这个宏，核函数在 GPU 计划里实现。
+
 产物：`build/cpp/vc_extract`、`build/cpp/vc_redact`、`build/cpp/vc_detect` 和测试程序 `build/cpp/tests/vc_tests`。
 
 ## 测试
@@ -49,7 +51,7 @@ cmake --build build/cpp -j 4
 测试视频由本机 `ffmpeg` 现场生成到 `build/cpp/tests/tmp/`，不需要联网。本机请按模块过滤运行：
 
 ```bash
-./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*'
+./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*:BuildConfig.*'
 ./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
 ./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*'
