@@ -1,4 +1,9 @@
-"""The verifier (spec 2026-10-21 §4): a small CNN scoring vc_redact's dumped crops, trained on judged candidates."""
+"""The verifier (spec 2026-10-21 §4): a small network scoring vc_redact's dumped crops, trained on judged candidates.
+
+Two architectures: "small_cnn" (from scratch, about 0.3M parameters) and "mobilenet_v3_small" (ImageNet weights from the
+shared cache, about 1M parameters without its classifier; the 2026-10-21 run showed the small CNN overfits the few
+thousand crops). Either takes the crops as they are dumped (RGB / 255); the MobileNet upsamples and normalises inside,
+so vc_redact feeds both the same way."""
 
 from __future__ import annotations
 
@@ -15,6 +20,9 @@ from vc_hardneg.candidates import read_candidates
 from vc_hardneg.judgments import read_judgments, resolve
 
 VERIFIER_CLASSES = ("face", "plate")
+ARCHS = ("small_cnn", "mobilenet_v3_small")
+MOBILENET_WEIGHTS = "mobilenet_v3_small-047dcff4.pth"  # torchvision's ImageNet weights, in $TORCH_HOME/hub/checkpoints
+MOBILENET_SIDE = 128  # the MobileNet sees the crop upsampled to this
 PAD_VALUE = 114
 CROP_FACTOR = 2.5
 MIN_CROP_PX = 32
@@ -24,22 +32,30 @@ MIN_CROP_PX = 32
 class Sample:
     id: str
     stem: str
-    cls_index: int  # into VERIFIER_CLASSES
+    cls_index: int  # into the classes it was loaded for
     label: int  # 1 real, 0 not
     dump_dir: str
     dump_index: int
 
 
-def load_samples(candidates: Path, judgments: Path) -> list[Sample]:
-    """Candidates whose final verdict is yes or no (unsure ones are left out), in candidates-file order."""
+def load_samples(candidates: Path, judgments: Path, classes: tuple[str, ...] = VERIFIER_CLASSES) -> list[Sample]:
+    """Candidates of `classes` whose final verdict is yes or no (unsure ones are left out), in candidates-file order."""
     final = resolve(read_judgments(judgments))
     out = []
     for c in read_candidates(candidates):
         j = final.get(c.id)
-        if j is None or j.verdict == "unsure" or c.cls not in VERIFIER_CLASSES:
+        if j is None or j.verdict == "unsure" or c.cls not in classes:
             continue
-        out.append(Sample(c.id, c.stem, VERIFIER_CLASSES.index(c.cls), int(j.verdict == "yes"), c.dump_dir, c.dump_index))
+        out.append(Sample(c.id, c.stem, classes.index(c.cls), int(j.verdict == "yes"), c.dump_dir, c.dump_index))
     return out
+
+
+def mobilenet_weights() -> Path:
+    """Where the cached MobileNetV3-Small ImageNet weights are (vc_label.paths.offline_model_env sets TORCH_HOME)."""
+    from vc_label.paths import offline_model_env
+
+    offline_model_env()
+    return Path(os.environ["TORCH_HOME"]) / "hub" / "checkpoints" / MOBILENET_WEIGHTS
 
 
 def load_crops(samples: list[Sample]) -> np.ndarray:
@@ -61,8 +77,34 @@ def _torch():
     return torch, nn
 
 
-def VerifierNet(n_classes: int = 2):  # noqa: N802 (a class factory: torch is imported lazily)
+def VerifierNet(n_classes: int = 2, arch: str = "small_cnn", pretrained: Path | None = None):  # noqa: N802
+    """The network for `arch` (a factory: torch is imported lazily). For "mobilenet_v3_small", `pretrained` is the
+    ImageNet weights file (FileNotFoundError when missing; nothing is ever downloaded) or None for random weights."""
     torch, nn = _torch()
+    if arch not in ARCHS:
+        raise ValueError(f"arch must be one of {ARCHS}, got {arch!r}")
+    if arch == "mobilenet_v3_small":
+        import torchvision
+
+        if pretrained is not None and not Path(pretrained).is_file():
+            raise FileNotFoundError(f"{pretrained} does not exist; the MobileNet weights are never downloaded here")
+        base = torchvision.models.mobilenet_v3_small()
+        if pretrained is not None:
+            base.load_state_dict(torch.load(pretrained, map_location="cpu", weights_only=True))
+
+        class _Mobile(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.features = base.features
+                self.head = nn.Linear(576, n_classes)
+                self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+                self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+            def forward(self, x):
+                x = nn.functional.interpolate(x, size=(MOBILENET_SIDE, MOBILENET_SIDE), mode="bilinear", align_corners=False)
+                return self.head(self.features((x - self.mean) / self.std).mean(dim=(2, 3)))
+
+        return _Mobile()
 
     class _Net(nn.Module):
         def __init__(self) -> None:
@@ -101,7 +143,8 @@ def _augment(torch, x):
 
 
 def train_verifier(samples: list[Sample], crops: np.ndarray, val_stems: list[str], epochs: int = 30, batch: int = 256,
-                   lr: float = 1e-3, device: str = "mps", seed: int = 0) -> TrainResult:
+                   lr: float = 1e-3, device: str = "mps", seed: int = 0, classes: tuple[str, ...] = VERIFIER_CLASSES,
+                   arch: str = "small_cnn", pretrained: Path | None = None) -> TrainResult:
     torch, nn = _torch()
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -112,12 +155,12 @@ def train_verifier(samples: list[Sample], crops: np.ndarray, val_stems: list[str
     y = torch.tensor([s.label for s in samples], dtype=torch.float32)
     k = torch.tensor([s.cls_index for s in samples])
     tr = np.flatnonzero(~val)
-    model = VerifierNet(len(VERIFIER_CLASSES)).to(device)
+    model = VerifierNet(len(classes), arch, pretrained).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=epochs * ((len(tr) + batch - 1) // batch))
     # balance yes / no within each class: each sample weighs 1 / (count of its (class, label))
     groups = k[tr] * 2 + y[tr].long()
-    weight = 1.0 / torch.bincount(groups, minlength=4).float().clamp(min=1)[groups]
+    weight = 1.0 / torch.bincount(groups, minlength=2 * len(classes)).float().clamp(min=1)[groups]
     loss_fn = nn.BCEWithLogitsLoss(reduction="none")
     for _ in range(epochs):
         model.train()
@@ -139,17 +182,20 @@ def train_verifier(samples: list[Sample], crops: np.ndarray, val_stems: list[str
     return TrainResult(model, probs, y[vi].numpy().astype(int), k[vi].numpy(), len(tr))
 
 
-def pass_thresholds(probs: np.ndarray, labels: np.ndarray, cls_index: np.ndarray, keep: float = 0.995) -> dict[str, float]:
+def pass_thresholds(probs: np.ndarray, labels: np.ndarray, cls_index: np.ndarray, keep: float = 0.995,
+                    classes: tuple[str, ...] = VERIFIER_CLASSES) -> dict[str, float]:
     """Per class the largest threshold that still passes `keep` of its real crops (0 when it has none)."""
     out = {}
-    for i, name in enumerate(VERIFIER_CLASSES):
+    for i, name in enumerate(classes):
         real = np.sort(probs[(cls_index == i) & (labels == 1)])
         out[name] = 0.0 if len(real) == 0 else float(real[int(np.floor((1 - keep) * len(real)))])
     return out
 
 
-def export_verifier(model, out_dir: Path, size: int, batch: int, meta: dict) -> Path:
-    """model.onnx ([batch, 3, size, size] -> [batch, 2]) + model.json into out_dir (absent or empty), all at once."""
+def export_verifier(model, out_dir: Path, size: int, batch: int, meta: dict,
+                    classes: tuple[str, ...] = VERIFIER_CLASSES) -> Path:
+    """model.onnx ([batch, 3, size, size] -> [batch, len(classes)]) + model.json into out_dir (absent or empty), all at
+    once. meta["arch"] defaults to "small_cnn"."""
     torch, _ = _torch()
     from vc_train.ort_cpu import cpu_session
 
@@ -171,10 +217,11 @@ def export_verifier(model, out_dir: Path, size: int, batch: int, meta: dict) -> 
         if diff > 1e-4:
             raise ValueError(f"onnxruntime and torch disagree by {diff}")
         info = {
-            "name": meta.get("name", out_dir.name), "kind": "verifier", "classes": list(VERIFIER_CLASSES),
+            "name": meta.get("name", out_dir.name), "kind": "verifier", "classes": list(classes),
+            "arch": meta.get("arch", "small_cnn" if not hasattr(model, "std") else "mobilenet_v3_small"),
             "input": {"size": size, "batch": batch, "color": "RGB", "scale": 1 / 255, "pad_value": PAD_VALUE},
             "crop": {"factor": CROP_FACTOR, "min_px": MIN_CROP_PX},
-            **{k: v for k, v in meta.items() if k != "name"},
+            **{k: v for k, v in meta.items() if k not in ("name", "arch")},
         }
         (staging / "model.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if out_dir.exists():

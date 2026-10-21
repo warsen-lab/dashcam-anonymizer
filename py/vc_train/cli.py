@@ -65,6 +65,10 @@ def _parser() -> argparse.ArgumentParser:
     v.add_argument("--keep", type=float, default=0.995,
                    help="share of the real validation crops each class's pass threshold lets through")
     v.add_argument("--onnx-batch", type=int, default=16, help="the exported model's fixed batch")
+    v.add_argument("--arch", choices=("small_cnn", "mobilenet_v3_small"), default="small_cnn",
+                   help="mobilenet_v3_small starts from the cached ImageNet weights (never downloaded)")
+    v.add_argument("--class", dest="classes", action="append", choices=("face", "plate"),
+                   help="train these classes only; repeat (default both); vc_redact verifies only the model's classes")
     return p
 
 
@@ -169,18 +173,25 @@ def _yunet(args) -> int:
 def _verifier(args) -> int:
     import hashlib
 
-    from vc_train.verifier import VERIFIER_CLASSES, export_verifier, load_crops, load_samples, pass_thresholds, train_verifier
+    from vc_train.verifier import (
+        VERIFIER_CLASSES, export_verifier, load_crops, load_samples, mobilenet_weights, pass_thresholds, train_verifier,
+    )
 
     if not 0 < args.keep <= 1:
         raise ValueError(f"--keep must be in (0, 1], got {args.keep}")
     if args.out.exists() and (not args.out.is_dir() or any(args.out.iterdir())):
         raise ValueError(f"{args.out} is not empty; choose a new --out")  # before training, not after
-    samples = load_samples(args.candidates, args.judgments)
+    classes = tuple(c for c in VERIFIER_CLASSES if c in (args.classes or VERIFIER_CLASSES))
+    pretrained = mobilenet_weights() if args.arch == "mobilenet_v3_small" else None
+    if pretrained is not None and not pretrained.is_file():
+        raise FileNotFoundError(f"{pretrained} does not exist; put torchvision's {pretrained.name} there first")
+    samples = load_samples(args.candidates, args.judgments, classes)
     crops = load_crops(samples)
-    r = train_verifier(samples, crops, args.val_stem, args.epochs, args.batch, args.lr, args.device, args.seed)
-    thresholds = pass_thresholds(r.val_probs, r.val_labels, r.val_cls, args.keep)
+    r = train_verifier(samples, crops, args.val_stem, args.epochs, args.batch, args.lr, args.device, args.seed,
+                       classes, args.arch, pretrained)
+    thresholds = pass_thresholds(r.val_probs, r.val_labels, r.val_cls, args.keep, classes)
     metrics = {}
-    for i, name in enumerate(VERIFIER_CLASSES):
+    for i, name in enumerate(classes):
         m = r.val_cls == i
         real, fake = m & (r.val_labels == 1), m & (r.val_labels == 0)
         metrics[name] = {
@@ -192,10 +203,11 @@ def _verifier(args) -> int:
     def sha(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    meta = {"name": args.out.name, "pass_threshold": thresholds, "metrics": metrics,
+    meta = {"name": args.out.name, "arch": args.arch, "pass_threshold": thresholds, "metrics": metrics,
             "train": {"samples": r.train_count, "val_stems": args.val_stem, "epochs": args.epochs, "keep": args.keep,
+                      "lr": args.lr, "batch": args.batch,
                       "candidates_sha256": sha(args.candidates), "judgments_sha256": sha(args.judgments)}}
-    onnx_path = export_verifier(r.model, args.out, crops.shape[1], args.onnx_batch, meta)
+    onnx_path = export_verifier(r.model, args.out, crops.shape[1], args.onnx_batch, meta, classes)
     print(f"verifier: {onnx_path}; pass thresholds {thresholds}")
     for name, m in metrics.items():
         print(f"  {name}: {m}")

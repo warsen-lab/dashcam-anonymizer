@@ -93,3 +93,39 @@ def test_the_cli_trains_exports_and_records_thresholds_and_metrics(tmp_path):
     assert (out / "model.onnx").is_file()
     assert main(["verifier", "--candidates", str(c), "--judgments", str(j), "--val-stem", "b", "--out", str(out),
                  "--device", "cpu", "--epochs", "1000"]) == 2  # out is not empty: refused before training
+
+
+def test_samples_can_be_limited_to_some_classes(tmp_path):
+    c, j = _toy(tmp_path)
+    plates = load_samples(c, j, classes=("plate",))
+    assert plates and all(s.cls_index == 0 for s in plates)
+    assert len(plates) == sum(1 for s in load_samples(c, j) if s.cls_index == VERIFIER_CLASSES.index("plate"))
+
+
+def test_a_mobilenet_verifier_for_plates_only_trains_and_exports(tmp_path):
+    torch = pytest.importorskip("torch")
+    c, j = _toy(tmp_path)
+    samples = load_samples(c, j, classes=("plate",))
+    result = train_verifier(samples, load_crops(samples), ["b"], epochs=1, batch=32, lr=1e-3, device="cpu", seed=0,
+                            classes=("plate",), arch="mobilenet_v3_small", pretrained=None)
+    assert result.val_probs.shape == (sum(s.stem == "b" for s in samples),)
+    out = tmp_path / "mb"
+    onnx_path = export_verifier(result.model, out, SIZE, 4, {"pass_threshold": {"plate": 0.5}}, classes=("plate",))
+    meta = json.loads((out / "model.json").read_text())
+    assert meta["classes"] == ["plate"] and meta["arch"] == "mobilenet_v3_small"
+    from vc_train.ort_cpu import cpu_session
+
+    x = np.random.default_rng(2).random((4, 3, SIZE, SIZE), dtype=np.float32)
+    ort_out = cpu_session(onnx_path).run(None, {"crops": x})[0]
+    with torch.no_grad():
+        torch_out = result.model.cpu().eval()(torch.from_numpy(x)).numpy()
+    assert ort_out.shape == (4, 1) and np.abs(ort_out - torch_out).max() < 1e-4
+
+
+def test_the_mobilenet_needs_its_cached_weights(tmp_path):
+    from vc_train.verifier import VerifierNet
+
+    with pytest.raises(FileNotFoundError):
+        VerifierNet(1, arch="mobilenet_v3_small", pretrained=tmp_path / "missing.pth")
+    with pytest.raises(ValueError):
+        VerifierNet(1, arch="resnet")
