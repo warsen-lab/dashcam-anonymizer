@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mask/mosaic_grid.h"  // PixelRect and the grid shared with the CUDA mosaic
+
 struct AVFrame;
 
 namespace vc {
@@ -12,16 +14,6 @@ namespace vc {
 struct MosaicConfig {
   int minBlockPx = 16;        // no block is asked for below this
   int blocksPerLongSide = 8;  // a mask asks for about this many blocks along its long side
-};
-
-// Half-open pixel rectangle [x1, x2) x [y1, y2).
-struct PixelRect {
-  int x1 = 0;
-  int y1 = 0;
-  int x2 = 0;
-  int y2 = 0;
-
-  bool empty() const { return x2 <= x1 || y2 <= y1; }
 };
 
 // Smallest pixel rectangle covering the box, clipped to the frame. Throws VcError when a
@@ -67,7 +59,8 @@ struct MosaicRect {
   bool snap = true;
 };
 
-// Pixelates each rect on the grid of its block size b anchored at the frame's top-left corner (spec §4):
+// Pixelates each rect on the grid of its block size b anchored at the frame's top-left corner (spec §4; the cells
+// come from grid::maskCells, mosaic_grid.h):
 // the rect's edges move out to multiples of b (x1 = floor(x1 / b) * b, x2 = ceil(x2 / b) * b), are
 // clipped to the frame, and every b x b cell inside becomes the rounded mean of its pixels; a cell the
 // frame's right or bottom edge cuts averages the pixels that are there. A rect with `snap` false keeps its

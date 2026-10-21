@@ -21,6 +21,7 @@ add_executable(vc_tests
   luma_thumb_test.cpp
   merged_detector_test.cpp
   model_info_test.cpp
+  mosaic_grid_test.cpp
   mosaic_test.cpp
   onnx_yolo_detector_test.cpp
   records_test.cpp

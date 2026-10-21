@@ -55,7 +55,7 @@ cmake --build build/cpp -j 4
 ./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
 ./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*:ExecutionProvider.*'
-./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:BoundedQueue.*:RedactConfig.*:Records.*'
+./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:MosaicGrid.*:BoundedQueue.*:RedactConfig.*:Records.*'
 ./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectCli.*:DetectImages.*:DetectRate.*'
 ```
 
@@ -133,7 +133,7 @@ cmake --build build/cpp -j 4
 要点：
 
 - **补框：一个目标一个框**（设计见 `docs/superpowers/specs/2026-10-19-stable-masks-and-speed-design.md` §3）：前后两个关键帧上的框分两轮配对（同类、一对一、代价小的先配）。第一轮按中心距离除以平均边长，不超过 `match_max_distance`；剩下的再配第二轮：x、y 方向的位移都除以两框所有边里最长的那条，都不超过 `match_max_distance_loose`（默认 6），且两框的宽、高各自相差不超过 3 倍，所以一个间隔里移动好几个框宽的车牌、人脸也能配上；但任一端分数低于本类确认门槛的配对（轨迹一端按它最后一次真实检测的分数算，幽灵按丢失前那次检测）只在第一轮配，不进第二轮（设计 §3.8）。配上的框连成一条轨迹，**每条轨迹每帧至多一个框**：两个关键帧之间按中心和宽高线性插值；下一个关键帧上没配上时，在原地保持，已有速度就按速度外推，但每个轴的位移不超过半个框宽 / 框高；这条轨迹再留一个关键帧（幽灵），在下一个关键帧配上了就从保持到的位置插值过去，没配上就结束，中间那一段不再打码。速度从轨迹最后一次真实检测量起。目标第一次被检出之前的帧不打码。每条轨迹的打码框大小还会平滑（平滑的是宽、高，不是各条边）：需要变大时立刻变大，需要变小时宽、高每帧最多缩小 `shrink_per_frame`（默认 0.2），且不小于当帧要盖的框；框始终以当帧要盖的框的中心为中心，所以快速移动的目标不会被拖出一条长尾；目标丢失、原地保持的那几帧不缩小。面积超过 `max_mask_area_ratio`（默认 4）倍时，宽、高按同一比例向要盖的框收缩到恰好 4 倍。分数低于确认门槛（`face_confirm_score` 默认 0.5、`plate_confirm_score` 默认 0.2，按类别判断，与来源无关，合并框按合并后的分数）的框，只有在相邻两个关键帧被配进同一条轨迹时才打码，确认后从它第一次出现的关键帧起打码（那一段本来就要等下一个关键帧才输出，不增加延迟）；高分框出现即打码，确认过的轨迹之后的低分框不再需要确认。`hold_lost_ghosts`（默认 `false`，设计 §3.7）打开时，幽灵在下一个关键帧也没配上，[k1, k2) 仍在幽灵的保持位置打码（`origin` 为 `held`，位置不再移动、不加运动外扩，大小延续保持段的大小，也不缩小），然后轨迹才结束；视频最后一个关键帧之后的尾段里，幽灵同样在保持位置打码，代价是消失的目标（包括误检）多留一个间隔的码。
-- **马赛克**（设计 §4）：网格固定在画面坐标上，不随打码框移动：打码区域的四边向外扩到块大小的整数倍，每块取块内均值，画面右、下边缘的不完整块取实际像素的均值；色度平面按子采样换算（4:2:0 为块大小的一半）。块大小按轨迹固定：轨迹开始时取档位 {16, 24, 32, 48, 64, 96, 128, 192, 256} 中第一个不小于 max(mosaic_min_block_px, ⌈长边 / mosaic_blocks_per_long_side⌉) 的值，之后只有这个计算值超过当前块大小的 1.5 倍才升档，不降档（超过 256 的一律用 256）。打码框互相重叠时按块大小从大到小打，细的盖在粗的上面。**车牌例外**：四边不向外扩，马赛克只画在打码框内，仍按同一张画面网格分块，被框边切开的块取框内那部分的均值（车牌又扁又小，向外对齐 16 px 网格会让屏上面积翻到约 2.3 倍）。
+- **马赛克**（设计 §4）：网格固定在画面坐标上，不随打码框移动：打码区域的四边向外扩到块大小的整数倍，每块取块内均值，画面右、下边缘的不完整块取实际像素的均值；色度平面按子采样换算（4:2:0 为块大小的一半）。块大小按轨迹固定：轨迹开始时取档位 {16, 24, 32, 48, 64, 96, 128, 192, 256} 中第一个不小于 max(mosaic_min_block_px, ⌈长边 / mosaic_blocks_per_long_side⌉) 的值，之后只有这个计算值超过当前块大小的 1.5 倍才升档，不降档（超过 256 的一律用 256）。打码框互相重叠时按块大小从大到小打，细的盖在粗的上面。**车牌例外**：四边不向外扩，马赛克只画在打码框内，仍按同一张画面网格分块，被框边切开的块取框内那部分的均值（车牌又扁又小，向外对齐 16 px 网格会让屏上面积翻到约 2.3 倍）。“框 → 要打哪些块、每块的像素范围”（含车牌那种被框边切开的块）写成 `cpp/src/mask/mosaic_grid.h` 里的纯函数（`grid::maskCells`、`grid::cellRect`、`grid::roundedMean`，标了 `VC_HOST_DEVICE`），GPU 计划里的 CUDA 马赛克用同一套，所以两边逐像素相同。
 - **已知的局限**（设计 §3.5 接受的代价）：
   - 目标在两个关键帧之间掉头（反向运动）时，那个间隔里是线性插值，掉头那一段可能盖不全。
   - 目标在某个关键帧漏检、而在漏检的间隔里停下或掉头时，原地保持（至多外推半个框边）的框可能盖不全。
