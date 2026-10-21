@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 # Copied from each successful run's stats.json as they are (None when the field is missing).
-STATS_FIELDS = ("detector", "encoder", "pipeline")
+STATS_FIELDS = ("detector", "encoder", "pipeline", "rate_control")
 
 
 def read_results(path: Path) -> list[tuple[int, int, str | None, str]]:

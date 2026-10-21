@@ -61,7 +61,10 @@ struct RedactStats {
   double detectFpsRequested = 0;
   bool detectFpsAboveVideoRate = false;
   std::string encoder;   // e.g. "h264_nvenc", "h264_videotoolbox", "libx264"; the output is always H.264
-  int64_t outputBitRate = 0;  // the encoder's target: h264OutputBitRate of the source (spec 2026-10-20 §3)
+  RateControl rateControl = RateControl::Quality;  // configs/redact.json rate_control
+  // The encoder's target with rate_control "bitrate": h264OutputBitRate of the source (spec 2026-10-20 §3); 0 (null
+  // in stats.json) with "quality".
+  int64_t outputBitRate = 0;
   // Set when the source is not 8-bit 4:2:0 and is converted (h264FormatNote); redactWarnings prints it.
   std::string formatNote{};
   // "cpu-frames": frames go through main memory between decode, detection, mosaic and encode (the GPU path of

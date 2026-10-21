@@ -25,8 +25,8 @@ const std::set<std::string> kAllKeys = {
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
-    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "nvenc_preset",
-    "trt_fp16",            "ort_intra_threads"};
+    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
+    "nvenc_preset",        "trt_fp16",            "ort_intra_threads"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -51,6 +51,7 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, d.largeFaceMinScore);
   EXPECT_EQ(c.timeline.holdLostGhosts, d.timeline.holdLostGhosts);
   EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, d.outputBitrateFactorHevc);
+  EXPECT_EQ(c.rateControl, d.rateControl);
   EXPECT_EQ(c.nvencPreset, d.nvencPreset);
   EXPECT_EQ(c.trtFp16, d.trtFp16);
   EXPECT_EQ(c.ortIntraThreads, d.ortIntraThreads);
@@ -82,6 +83,7 @@ RedactConfig nonDefaultConfig() {
   c.largeFaceMinScore = 0.75f;
   c.timeline.holdLostGhosts = true;
   c.outputBitrateFactorHevc = 2.25;
+  c.rateControl = RateControl::Bitrate;
   c.nvencPreset = "p1";
   c.trtFp16 = false;
   c.ortIntraThreads = 3;
@@ -289,6 +291,9 @@ TEST(RedactConfig, RejectsBadInput) {
       R"({"output_bitrate_factor_hevc": 0.99})",    R"({"output_bitrate_factor_hevc": 4.01})",
       R"({"output_bitrate_factor_hevc": "1.5"})",   R"({"output_bitrate_factor_hevc": 1e400})",
       R"({"output_bitrate_factor_hevc": null})",
+      R"({"rate_control": "crf"})",                 R"({"rate_control": "Quality"})",
+      R"({"rate_control": ""})",                    R"({"rate_control": 1})",
+      R"({"rate_control": null})",                  R"({"rate_control": true})",
       R"({"nvenc_preset": "p0"})",                  R"({"nvenc_preset": "p8"})",
       R"({"nvenc_preset": "P4"})",                  R"({"nvenc_preset": "fast"})",
       R"({"nvenc_preset": 4})",                     R"({"nvenc_preset": null})",
@@ -411,7 +416,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 23u);
+  EXPECT_EQ(j.size(), 24u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -441,11 +446,13 @@ TEST(RedactConfig, FloatSettingsAreWrittenWithSixDecimals) {
 TEST(RedactConfig, LinuxSettingsDefaults) {
   const RedactConfig c;
   EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, 1.5);
+  EXPECT_EQ(c.rateControl, RateControl::Quality);
   EXPECT_EQ(c.nvencPreset, "p4");
   EXPECT_TRUE(c.trtFp16);
   EXPECT_EQ(c.ortIntraThreads, 0);
   const nlohmann::ordered_json j = redactConfigToJson(c);
   EXPECT_EQ(j.at("output_bitrate_factor_hevc").dump(), "1.5");
+  EXPECT_EQ(j.at("rate_control").dump(), "\"quality\"");
   EXPECT_EQ(j.at("nvenc_preset").dump(), "\"p4\"");
   EXPECT_EQ(j.at("trt_fp16").dump(), "true");
   EXPECT_EQ(j.at("ort_intra_threads").dump(), "0");
@@ -470,6 +477,9 @@ TEST(RedactConfig, ReadsTheLinuxSettings) {
 TEST(RedactConfig, LinuxSettingMessagesGiveTheRule) {
   const std::vector<std::pair<std::string, std::string>> cases = {
       {R"({"output_bitrate_factor_hevc": 5})", "cfg: output_bitrate_factor_hevc must be in [1, 4]"},
+      {R"({"rate_control": "crf"})", "cfg: rate_control must be \"quality\" or \"bitrate\", got 'crf'"},
+      {R"({"rate_control": 1})", "cfg: rate_control must be a string"},
+      {R"({"rate_control": null})", "cfg: rate_control must be a string"},
       {R"({"nvenc_preset": "p9"})", "cfg: nvenc_preset must be one of p1 ... p7, got 'p9'"},
       {R"({"nvenc_preset": 4})", "cfg: nvenc_preset must be a string"},
       {R"({"trt_fp16": 1})", "cfg: trt_fp16 must be true or false"},
@@ -486,8 +496,20 @@ TEST(RedactConfig, LinuxSettingMessagesGiveTheRule) {
   }
 }
 
+TEST(RedactConfig, ReadsAndWritesTheRateControl) {
+  EXPECT_EQ(parseRedactConfig(R"({"rate_control": "quality"})", "t").rateControl, RateControl::Quality);
+  EXPECT_EQ(parseRedactConfig(R"({"rate_control": "bitrate"})", "t").rateControl, RateControl::Bitrate);
+  EXPECT_EQ(parseRedactConfig("{}", "t").rateControl, RateControl::Quality);
+  RedactConfig c;
+  c.rateControl = RateControl::Bitrate;
+  EXPECT_EQ(redactConfigToJson(c).at("rate_control").dump(), "\"bitrate\"");
+}
+
 TEST(RedactConfig, ValidateChecksTheLinuxSettings) {
   RedactConfig c;
+  c.rateControl = static_cast<RateControl>(7);
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+  c = RedactConfig{};
   c.nvencPreset = "p0";
   EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
   c = RedactConfig{};

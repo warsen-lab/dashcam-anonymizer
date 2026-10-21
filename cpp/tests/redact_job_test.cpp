@@ -960,11 +960,26 @@ nlohmann::json statsOf(const RedactStats& s) {
   return nlohmann::json::parse(statsFile);
 }
 
-// spec 2026-10-20 §3: a 10-bit HEVC source comes out as 8-bit 4:2:0 H.264 at 1.5 times its bitrate, masked like any
-// other, with a note on the conversion.
+// The default is constant quality: no target bit rate, and stats.json says so.
+TEST(RedactJob, EncodesAtConstantQualityByDefault) {
+  const RedactOptions o = baseOptions("redact_quality");
+  EXPECT_EQ(o.config.rateControl, RateControl::Quality);
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.rateControl, RateControl::Quality);
+  EXPECT_EQ(s.outputBitRate, 0);
+  const nlohmann::json stats = statsOf(s);
+  EXPECT_EQ(stats.at("rate_control").get<std::string>(), "quality");
+  EXPECT_TRUE(stats.at("output_bit_rate").is_null());
+  EXPECT_EQ(stats.at("config").at("rate_control").get<std::string>(), "quality");
+  EXPECT_EQ(test::videoPresentation(s.video).codec, AV_CODEC_ID_H264);
+}
+
+// spec 2026-10-20 §3 with rate_control "bitrate": a 10-bit HEVC source comes out as 8-bit 4:2:0 H.264 at 1.5 times its
+// bitrate, masked like any other, with a note on the conversion.
 TEST(RedactJob, AnHevcSourceComesOutAsH264AtTheFactorsBitrate) {
   RedactOptions o = baseOptions("redact_hevc");
   o.input = test::tenBitVideo();
+  o.config.rateControl = RateControl::Bitrate;
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.frames, 30);
   EXPECT_EQ(s.maskedFrames, 30);  // the fake face box is masked on every frame, as on an H.264 source
@@ -977,6 +992,7 @@ TEST(RedactJob, AnHevcSourceComesOutAsH264AtTheFactorsBitrate) {
   EXPECT_EQ(s.outputBitRate, std::llround(static_cast<double>(source) * 1.5));
   const nlohmann::json stats = statsOf(s);
   EXPECT_EQ(stats.at("output_bit_rate").get<int64_t>(), s.outputBitRate);
+  EXPECT_EQ(stats.at("rate_control").get<std::string>(), "bitrate");
   EXPECT_EQ(stats.at("encoder").get<std::string>(), "libx264");
   EXPECT_EQ(stats.at("pipeline").get<std::string>(), "cpu-frames");
   EXPECT_DOUBLE_EQ(stats.at("config").at("output_bitrate_factor_hevc").get<double>(), 1.5);
@@ -990,14 +1006,16 @@ TEST(RedactJob, AnHevcSourceComesOutAsH264AtTheFactorsBitrate) {
 TEST(RedactJob, TheBitrateFactorComesFromTheConfig) {
   RedactOptions o = baseOptions("redact_hevc_factor");
   o.input = test::tenBitVideo();
+  o.config.rateControl = RateControl::Bitrate;
   o.config.outputBitrateFactorHevc = 2.0;
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.outputBitRate, sourceBitRate(o.input) * 2);
 }
 
-// An H.264 source keeps its bitrate and needs no note.
+// An H.264 source keeps its bitrate (with rate_control "bitrate") and needs no note.
 TEST(RedactJob, AnH264SourceKeepsItsBitrate) {
-  const RedactOptions o = baseOptions("redact_h264_rate");
+  RedactOptions o = baseOptions("redact_h264_rate");
+  o.config.rateControl = RateControl::Bitrate;
   const RedactStats s = runRedact(o);
   EXPECT_EQ(s.outputBitRate, sourceBitRate(o.input));
   EXPECT_TRUE(s.formatNote.empty());

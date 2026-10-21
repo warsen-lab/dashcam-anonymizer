@@ -13,6 +13,7 @@
 #include "io/av_ptr.h"
 
 extern "C" {
+#include <libavutil/avutil.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
@@ -25,6 +26,15 @@ constexpr int kMacroblockPx = 16;
 // h264_videotoolbox's level option starts at 3.0 (1.3 is Baseline only) and ends at 5.2.
 constexpr int kVideoToolboxMinLevel = 30;
 constexpr int kVideoToolboxMaxLevel = 52;
+
+// Constant-quality settings (RateControl::Quality). VideoToolbox and libx264 are the values measured on a 1080p
+// dashcam video: SSIM Y 0.985 / 0.986 against the source, where re-encoding at the source's own bit rate gave
+// VideoToolbox 0.92, visibly soft.
+constexpr int kVideoToolboxQuality = 65;  // ffmpeg's -q:v scale, 1-100
+constexpr double kSoftwareCrf = 18;
+// h264_nvenc: variable bit rate steered by a constant quantizer (cq, 0-51, lower is better) with no bit rate. 19 is
+// PROVISIONAL, picked to land near libx264 crf 18; to be calibrated against SSIM on the target machine (GPU plan 1c).
+constexpr double kNvencCq = 19;
 
 // ITU-T H.264 Table A-1: level_idc, MaxMBPS (macroblocks per second), MaxFS (macroblocks per frame). Level 1b has
 // the limits of level 1 and is left out.
@@ -69,11 +79,24 @@ AVPixelFormat encoderFormat(const AVCodecContext* ctx, const AVCodec* codec, AVP
   return AV_PIX_FMT_NONE;
 }
 
-// Encoder-specific options; the reason it cannot be used, or an empty string. h264_videotoolbox picks levels below
-// what the frame rate needs (4.0 for 1080p at 59.94 fps, 5.1 for 4K60), so High profile and the level are set;
-// h264_nvenc gets the preset and the level; libx264 chooses a sufficient level by itself.
+// Encoder-specific options; the reason it cannot be used, or an empty string. The rate control comes first: config.bitRate
+// as the bit rate (RateControl::Bitrate), or constant quality, which leaves the bit rate unset (RateControl::Quality).
+// h264_videotoolbox picks levels below what the frame rate needs (4.0 for 1080p at 59.94 fps, 5.1 for 4K60), so High
+// profile and the level are set; h264_nvenc gets the preset and the level; libx264 chooses a sufficient level by itself.
 std::string setEncoderOptions(AVCodecContext& ctx, const std::string& name, const WriterConfig& config, int level) {
   const auto failed = [&](int ret, const char* what) { return std::string(what) + ": " + avErrorText(ret); };
+  if (config.rateControl == RateControl::Bitrate) {
+    ctx.bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
+  } else if (name == "h264_videotoolbox") {
+    ctx.flags |= AV_CODEC_FLAG_QSCALE;
+    ctx.global_quality = kVideoToolboxQuality * FF_QP2LAMBDA;
+  } else if (name == "h264_nvenc") {
+    ctx.bit_rate = 0;  // cq governs
+    if (const int ret = av_opt_set(ctx.priv_data, "rc", "vbr", 0); ret < 0) return failed(ret, "rc vbr");
+    if (const int ret = av_opt_set_double(ctx.priv_data, "cq", kNvencCq, 0); ret < 0) return failed(ret, "cq");
+  } else if (const int ret = av_opt_set_double(ctx.priv_data, "crf", kSoftwareCrf, 0); ret < 0) {
+    return failed(ret, "crf");
+  }
   if (name == "h264_videotoolbox") {
     if (const int ret = av_opt_set(ctx.priv_data, "profile", "high", 0); ret < 0) return failed(ret, "profile high");
     const int vtLevel =
@@ -229,7 +252,6 @@ struct VideoWriter::Impl {
       }
       ctx->time_base = config.timeBase;
       ctx->framerate = rate;
-      ctx->bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
       if (config.sampleAspectRatio.num > 0 && config.sampleAspectRatio.den > 0) {
         ctx->sample_aspect_ratio = config.sampleAspectRatio;
       }

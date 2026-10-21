@@ -53,7 +53,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
   - `VC_GPUS=0,1`：用哪几块 NVIDIA 卡（Linux），视频按顺序轮流分到各卡，每个 `vc_redact` 只看到自己那块（`CUDA_VISIBLE_DEVICES`）；不设时 `CUDA_VISIBLE_DEVICES` 保持原样；
   - `VC_PYTHON`：写 `batch.json` 用的 python3（默认 `python3`，只用标准库）；
   - `VC_SANDBOX=0`：不套沙箱。
-- 跑完后输出目录下有 `batch.json`（每次覆盖上一次的）：每个视频的 `exit_status`、`gpu`，成功的还有 `frames`、`elapsed_s`、`fps`、`detector`、`encoder`、`pipeline`（取自它的 `stats.json`，失败的为 null）；整批的 `wall_s`（墙钟秒数）、`frames`、`throughput_fps`（成功视频的总帧数 ÷ 整批墙钟时间）、`processes_at_once`。最后一行 `=== throughput: …` 打印同样的合计。
+- 跑完后输出目录下有 `batch.json`（每次覆盖上一次的）：每个视频的 `exit_status`、`gpu`，成功的还有 `frames`、`elapsed_s`、`fps`、`detector`、`encoder`、`pipeline`、`rate_control`（取自它的 `stats.json`，失败的为 null）；整批的 `wall_s`（墙钟秒数）、`frames`、`throughput_fps`（成功视频的总帧数 ÷ 整批墙钟时间）、`processes_at_once`。最后一行 `=== throughput: …` 打印同样的合计。
 - Ctrl-C（SIGINT）或 SIGTERM（`docker stop` 发的就是它）：立刻停掉所有在跑的 `vc_redact`（只开一路时也一样：脚本把它放在后台等，所以不必等当前视频跑完；它的输出照常实时打印到终端），打印一行 `=== interrupted: did not finish: …`，仍写出已知部分的 `batch.json`，退出码 130 / 143。信号到来前已经跑完的视频保留它真实的退出状态。
 - 中途被打断的视频，它的 `<视频名>/` 下会留着 `.partial` 文件；重跑这个视频要加 `VC_REDACT_ARGS=--overwrite`，否则会因输出目录已存在被拒绝。
 
@@ -63,10 +63,10 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 | 文件 | 内容 |
 |---|---|
-| `<视频名>.redacted.mp4` | 打码后的视频，一律 H.264（macOS 与 Linux 相同）：H.264 原片沿用原码率，HEVC 等其他编码按原码率乘 `output_bitrate_factor_hevc`（默认 1.5）；10 位、4:2:2 原片转成 8 位 4:2:0（运行结束 stderr 一行 note）。音频原样复制，旋转、色彩信息照搬 |
+| `<视频名>.redacted.mp4` | 打码后的视频，一律 H.264（macOS 与 Linux 相同），默认按恒定画质编码（接近原片清晰度，文件通常比原片大），`rate_control` 设为 `"bitrate"` 时按原片码率编码（HEVC 等其他编码乘 `output_bitrate_factor_hevc`，默认 1.5）；10 位、4:2:2 原片转成 8 位 4:2:0（运行结束 stderr 一行 note）。音频原样复制，旋转、色彩信息照搬 |
 | `masks.jsonl` | 每帧打了哪些框（一帧一行）：坐标、轨迹编号 track、来源 origin、马赛克块大小 block、是否向外对齐网格 snap（车牌为 false） |
 | `detections.jsonl` | 关键帧上检测到的框，含来源（student / yunet）；confirmed 为 false 的是只出现一次的低分框，没有打码 |
-| `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器、目标码率 `output_bit_rate`、流水线 `pipeline` |
+| `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器、`rate_control`、目标码率 `output_bit_rate`（恒定画质时为 `null`）、流水线 `pipeline` |
 
 - **原子写出：** 运行中只写 `.partial` 文件，成功才改名，失败不会留下看似完整、其实没打全的视频。
 - **退出码：** 0 成功；1 处理出错；2 参数错误；3 输出已存在（加 `--overwrite` 覆盖）。
@@ -104,7 +104,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
   64 分钟全片 10 档：219 fps（229,606 帧 1048 秒）。4K 没测过，请把 `stats.json` 发给我。
 - **内存：** 处理线程最多缓冲 120 帧，4K 约 1.5 GB，32 GB 内存没问题。
-- **画质和大小：** 输出一律 H.264：H.264 原片码率不变，4K HEVC 原片按 1.5 倍码率编成 H.264（`output_bitrate_factor_hevc`）；Level 按分辨率和帧率指定（4K60 为 5.2），`vc_eval integrity` 会检查。
+- **画质和大小：** 输出一律 H.264，默认按恒定画质编码（`rate_control` 为 `"quality"`），清晰度接近原片，文件通常比原片大：1080p 行车记录约为原片的 4 倍。原因是按原片码率重编，VideoToolbox 的输出明显发糊（对原片 SSIM Y 0.92，恒定画质 0.985）。磁盘紧张就把 `rate_control` 改成 `"bitrate"`：H.264 原片码率不变，4K HEVC 原片按 1.5 倍码率编成 H.264（`output_bitrate_factor_hevc`），文件小，画质差一些。Level 按分辨率和帧率指定（4K60 为 5.2），`vc_eval integrity` 会检查。
 
 ## 4. 调参（`configs/redact.json`）
 
@@ -124,7 +124,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `large_face_area_fraction` | 0.05 | 人脸框（外扩之前）面积超过画面的这个比例，才适用下一行的更高分数要求，范围 (0, 1]。调小则更小的人脸框也要过 `large_face_min_score`，调大则只管更大的框（取 1 等于不管） |
 | `large_face_min_score` | 0.6 | 面积超过上一行比例的人脸框，分数低于它的直接丢弃（YuNet 会把路面、楼群认成占画面很大的人脸，分数多在 0.3–0.6；丢了几个见 `stats.json` 的 `large_faces_dropped`）。调高丢得多、大块误打少，但贴近镜头的低分真人脸会漏；调低保留得多；0 关闭这条规则 |
 | `hold_lost_ghosts` | false | 同一个目标连续两个关键帧都漏检时，第二个间隔是否仍在它最后停留的位置打码（JSON 布尔，不能写 0 / 1）。`true` 把没有框的空档从两个检测间隔缩到一个，代价是消失的目标（包括误检）多留一个间隔的码；`false` 时那个间隔不打码 |
-| `output_bitrate_factor_hevc` | 1.5 | 输出一律 H.264：H.264 原片沿用原码率，HEVC 等其他编码的原片按原码率乘这个系数（同样的画质 H.264 要更高的码率），范围 [1, 4]；读不到原码率时按 8 Mb/s 乘系数。调大画质好、文件大 |
+| `rate_control` | `"quality"` | 输出一律 H.264。`"quality"`：恒定画质，文件大小由画面决定（VideoToolbox `q:v` 65、libx264 `crf` 18、NVENC `vbr` 加 `cq` 19，NVENC 的 19 是暂定值，等 GPU 计划 1c 在目标机上按 SSIM 标定），清晰度接近原片，1080p 行车记录的文件约为原片 4 倍。`"bitrate"`：按码率编码，码率见下一行，文件小、画质差一些。只能写这两个字符串 |
+| `output_bitrate_factor_hevc` | 1.5 | 只在 `rate_control` 为 `"bitrate"` 时起作用：H.264 原片沿用原码率，HEVC 等其他编码的原片按原码率乘这个系数（同样的画质 H.264 要更高的码率），范围 [1, 4]；读不到原码率时按 8 Mb/s 乘系数。调大画质好、文件大 |
 | `nvenc_preset` | `p4` | NVENC 编码预设（Linux + NVIDIA），`p1` 最快、`p7` 画质最好；只在用 `h264_nvenc` 编码时起作用 |
 | `trt_fp16` | true | TensorRT 用 FP16（Linux + NVIDIA，GPU 计划里接上；JSON 布尔） |
 | `ort_intra_threads` | 0 | onnxruntime 每个会话的 CPU 线程数，0 由 onnxruntime 自己定；同时跑多个 `vc_redact`（`VC_JOBS`）时调小，免得互相抢 CPU。macOS 上也生效，范围 [0, 1024] |
@@ -154,7 +155,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 **现在已有的（本机验证过的部分）：**
 
-- 输出一律 H.264（两个平台一致），HEVC 原片码率乘 `output_bitrate_factor_hevc`，Level 按分辨率和帧率指定；`vc_eval integrity` 检查 H.264 与 Level。
+- 输出一律 H.264（两个平台一致），默认恒定画质（`rate_control`），`"bitrate"` 下 HEVC 原片码率乘 `output_bitrate_factor_hevc`，Level 按分辨率和帧率指定；`vc_eval integrity` 检查 H.264 与 Level。
 - `--ep auto|tensorrt|cuda|coreml|cpu` 与 `--hwaccel cuda`；Linux 上默认 `--ep auto`（TensorRT → CUDA → CPU）和 `--hwaccel auto`（NVDEC，打不开退回软解）。**GPU 部分完成之前，TensorRT / CUDA 总是报不可用并退到 CPU**；NVDEC 与 NVENC 的代码已在，但还没在 NVIDIA 机器上跑过。
 - CMake 开关 `-DVC_WITH_CUDA=ON`（需要 CUDA 12 的 nvcc）。
 - `scripts/redact.sh` 的 `VC_JOBS`、`VC_GPUS` 与 `batch.json`（见 §2"批量"）。
@@ -184,6 +185,7 @@ docker run --gpus all -v <素材>:/in -v <输出>:/out -v <模型>:/models -v <�
 |---|---|---|
 | `VC_JOBS` | 每块卡 4 | 每块卡同时几个 `vc_redact`。消费级卡（RTX 4090）的驱动限制同时编码的会话数（约 8 路），每卡的 `VC_JOBS` 不要超过它 |
 | `detect_fps` | 10 | 同 §4 |
+| `rate_control` | `"quality"` | NVENC 的恒定画质 `cq` 19 是暂定值，GPU 计划 1c 在目标机上按 SSIM 标定后再定 |
 | `nvenc_preset` | `p4` | NVENC 预设，`p1` 最快 |
 | `trt_fp16` | true | TensorRT 用 FP16 |
 | `ort_intra_threads` | 0 | 多个进程时调小（例如 CPU 核数 ÷ 同时运行的进程数），避免会话互相抢 CPU |

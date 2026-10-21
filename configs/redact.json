@@ -19,6 +19,7 @@
   "large_face_min_score": 0.6,
   "hold_lost_ghosts": false,
   "output_bitrate_factor_hevc": 1.5,
+  "rate_control": "quality",
   "nvenc_preset": "p4",
   "trt_fp16": true,
   "ort_intra_threads": 0

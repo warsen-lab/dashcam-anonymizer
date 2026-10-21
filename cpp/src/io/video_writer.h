@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/platform.h"
+#include "io/rate_control.h"
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -32,7 +33,9 @@ struct WriterConfig {
                                                    // 4:2:0 is converted to it (H.264 encoders all take that)
   AVRational timeBase{1, 1000};                    // of the frames' pts
   AVRational frameRate{0, 1};                      // 0/1 when unknown (the encoder assumes 30 fps)
-  int64_t bitRate = 0;                             // <= 0: 8 Mb/s (h264OutputBitRate gives vc_redact's)
+  int64_t bitRate = 0;                             // rateControl Bitrate: <= 0 is 8 Mb/s (h264OutputBitRate gives
+                                                   // vc_redact's); unused with Quality
+  RateControl rateControl = RateControl::Bitrate;  // vc_redact sets it from configs/redact.json rate_control
   bool preferHardware = true;                      // h264EncoderCandidates
   std::string nvencPreset = "p4";                  // h264_nvenc's preset (configs/redact.json nvenc_preset)
 

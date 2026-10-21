@@ -52,7 +52,7 @@ trap - TERM INT
 rm -f "$state/running/$gpu.$stem"
 case "$stem" in bad*) echo "fake failure on $stem" >&2; exit 1 ;; esac
 mkdir -p "$out/$stem"
-printf '{"frames": 120, "elapsed_s": 2.0, "detector": "student/CPU", "encoder": "libx264", "pipeline": "cpu-frames"}\n' \
+printf '{"frames": 120, "elapsed_s": 2.0, "detector": "student/CPU", "encoder": "libx264", "pipeline": "cpu-frames", "rate_control": "quality"}\n' \
   > "$out/$stem/stats.json"
 """
 
@@ -154,6 +154,7 @@ def test_runs_every_video_in_turn_and_writes_batch_json(batch):
         assert v["exit_status"] == 0 and v["gpu"] is None
         assert v["frames"] == 120 and v["elapsed_s"] == 2.0 and v["fps"] == 60.0
         assert (v["detector"], v["encoder"], v["pipeline"]) == ("student/CPU", "libx264", "cpu-frames")
+        assert v["rate_control"] == "quality"
         assert v["output_dir"] == str(out / Path(v["video"]).stem)
     assert (b["jobs"], b["gpus"], b["processes_at_once"]) == (1, [], 1)
     assert (b["succeeded"], b["failed"], b["frames"]) == (3, 0, 360)

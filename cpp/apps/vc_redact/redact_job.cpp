@@ -462,7 +462,8 @@ void encodeStage(BoundedQueue<Item>& in, WriterConfig config, const std::vector<
 
 // Everything the encode thread needs to know about the input video, copied by value here on the
 // main thread, so that it never reads the demuxer's streams (the decode thread is using them). The output is
-// H.264 at the source's bitrate, times output_bitrate_factor_hevc for any other codec (spec 2026-10-20 §3).
+// H.264 (spec 2026-10-20 §3) at constant quality, or with rate_control "bitrate" at the source's bit rate, times
+// output_bitrate_factor_hevc for any other codec.
 WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, const RedactOptions& options) {
   const AVStream* stream = reader.videoStream();
   WriterConfig c;
@@ -472,7 +473,8 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, const
   c.timeBase = stream->time_base;
   c.frameRate = stream->avg_frame_rate;
   c.bitRate = h264OutputBitRate(stream->codecpar->codec_id == AV_CODEC_ID_H264, stream->codecpar->bit_rate,
-                                options.config.outputBitrateFactorHevc);
+                                options.config.outputBitrateFactorHevc);  // only used with rate_control "bitrate"
+  c.rateControl = options.config.rateControl;
   c.preferHardware = options.preferHardwareEncoder;
   c.nvencPreset = options.config.nvencPreset;
   copyPresentation(*stream, c);  // aspect ratio, colour tags and rotation stay as in the input
@@ -516,7 +518,8 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   // audio streams' codec parameters and time bases) because the decode thread owns the reader.
   const VideoInfo info = reader.info();
   const WriterConfig config = writerConfig(reader, partial, options);
-  stats.outputBitRate = config.bitRate;
+  stats.rateControl = config.rateControl;
+  stats.outputBitRate = config.rateControl == RateControl::Bitrate ? config.bitRate : 0;
   Processor processor(options, detector, info, schedule, options.input.filename().string(), detections, masks,
                       processed, stats);
   StageStat decodeStat;
@@ -582,7 +585,12 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["decode_errors"] = s.decodeErrors;
   j["detector"] = s.detector;
   j["encoder"] = s.encoder;
-  j["output_bit_rate"] = s.outputBitRate;
+  j["rate_control"] = s.rateControl == RateControl::Quality ? "quality" : "bitrate";
+  if (s.rateControl == RateControl::Bitrate) {
+    j["output_bit_rate"] = s.outputBitRate;
+  } else {
+    j["output_bit_rate"] = nullptr;  // constant quality: no target rate
+  }
   j["pipeline"] = s.pipeline;
   j["audio_streams"] = s.audioStreams;
   j["audio_packets"] = s.audioPackets;

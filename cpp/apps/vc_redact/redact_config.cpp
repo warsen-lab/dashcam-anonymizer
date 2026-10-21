@@ -14,15 +14,15 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 23> kKeys = {
+constexpr std::array<std::string_view, 24> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
-    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "nvenc_preset",
-    "trt_fp16",            "ort_intra_threads"};
+    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
+    "nvenc_preset",        "trt_fp16",            "ort_intra_threads"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -36,6 +36,14 @@ constexpr double kMaxBitrateFactor = 4.0;
 
 // Float settings are written with this many decimals: 0.15f must read 0.15, not 0.15000000596….
 constexpr double kJsonFloatScale = 1e6;
+
+constexpr std::string_view kQualityName = "quality";
+constexpr std::string_view kBitrateName = "bitrate";
+
+// "rate_control must be ..." for a value that is neither name; `got` is what it was.
+std::string rateControlRule(const std::string& origin, const std::string& got) {
+  return origin + ": rate_control must be \"quality\" or \"bitrate\", got '" + got + "'";
+}
 
 // A number as it reads in a message: 5, not 5.000000.
 std::string plainNumber(double v) {
@@ -96,6 +104,17 @@ std::string stringSetting(const nlohmann::json& j, const char* key, const std::s
   return it->get<std::string>();
 }
 
+// The rate_control setting: the string "quality" or "bitrate" (absent: `fallback`).
+RateControl rateControlSetting(const nlohmann::json& j, RateControl fallback, const std::string& origin) {
+  const auto it = j.find("rate_control");
+  if (it == j.end()) return fallback;
+  if (!it->is_string()) throw VcError(origin + ": rate_control must be a string");
+  const std::string name = it->get<std::string>();
+  if (name == kQualityName) return RateControl::Quality;
+  if (name == kBitrateName) return RateControl::Bitrate;
+  throw VcError(rateControlRule(origin, name));
+}
+
 }  // namespace
 
 void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
@@ -144,6 +163,9 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.face.topK >= 1, "the face model's top_k must be >= 1");
   require(c.outputBitrateFactorHevc >= kMinBitrateFactor && c.outputBitrateFactorHevc <= kMaxBitrateFactor,
           "output_bitrate_factor_hevc must be in [1, 4]");
+  require(c.rateControl == RateControl::Quality || c.rateControl == RateControl::Bitrate,
+          "rate_control must be \"quality\" or \"bitrate\", got '" + std::to_string(static_cast<int>(c.rateControl)) +
+              "'");
   require(std::find(kNvencPresets.begin(), kNvencPresets.end(), c.nvencPreset) != kNvencPresets.end(),
           "nvenc_preset must be one of p1 ... p7, got '" + c.nvencPreset + "'");
   require(c.ortIntraThreads >= 0 && c.ortIntraThreads <= kMaxOrtIntraThreads, "ort_intra_threads must be in [0, 1024]");
@@ -193,6 +215,7 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   c.mosaic.blocksPerLongSide =
       integerSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, 1, kMaxMosaicSetting, origin);
   c.outputBitrateFactorHevc = numberSetting(j, "output_bitrate_factor_hevc", c.outputBitrateFactorHevc, origin);
+  c.rateControl = rateControlSetting(j, c.rateControl, origin);
   c.nvencPreset = stringSetting(j, "nvenc_preset", c.nvencPreset, origin);
   c.trtFp16 = boolSetting(j, "trt_fp16", c.trtFp16, origin);
   c.ortIntraThreads = integerSetting(j, "ort_intra_threads", c.ortIntraThreads, 0, kMaxOrtIntraThreads, origin);
@@ -230,6 +253,7 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
   j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;
+  j["rate_control"] = std::string(c.rateControl == RateControl::Quality ? kQualityName : kBitrateName);
   j["nvenc_preset"] = c.nvencPreset;
   j["trt_fp16"] = c.trtFp16;
   j["ort_intra_threads"] = c.ortIntraThreads;
