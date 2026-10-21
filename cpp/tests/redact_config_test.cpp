@@ -26,7 +26,9 @@ const std::set<std::string> kAllKeys = {
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
-    "nvenc_preset",        "trt_fp16",            "ort_intra_threads"};
+    "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
+    "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
+    "verify_threshold_plate"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -49,6 +51,10 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, d.plateConfirmScore);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, d.largeFaceAreaFraction);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, d.largeFaceMinScore);
+  EXPECT_FLOAT_EQ(c.verifyPlateBelow, d.verifyPlateBelow);
+  EXPECT_FLOAT_EQ(c.verifyFaceUnlessBothAbove, d.verifyFaceUnlessBothAbove);
+  EXPECT_EQ(c.verifyThresholdFace, d.verifyThresholdFace);
+  EXPECT_EQ(c.verifyThresholdPlate, d.verifyThresholdPlate);
   EXPECT_EQ(c.timeline.holdLostGhosts, d.timeline.holdLostGhosts);
   EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, d.outputBitrateFactorHevc);
   EXPECT_EQ(c.rateControl, d.rateControl);
@@ -81,6 +87,10 @@ RedactConfig nonDefaultConfig() {
   c.plateConfirmScore = 0.0625f;
   c.largeFaceAreaFraction = 0.25;
   c.largeFaceMinScore = 0.75f;
+  c.verifyPlateBelow = 0.375f;
+  c.verifyFaceUnlessBothAbove = 0.625f;
+  c.verifyThresholdFace = 0.25f;
+  c.verifyThresholdPlate = 0.125f;
   c.timeline.holdLostGhosts = true;
   c.outputBitrateFactorHevc = 2.25;
   c.rateControl = RateControl::Bitrate;
@@ -416,7 +426,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 24u);
+  EXPECT_EQ(j.size(), 28u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);
@@ -524,6 +534,36 @@ TEST(RedactConfig, DumpParsesBackToTheSameConfig) {
   const RedactConfig c = nonDefaultConfig();
   const std::string text = redactConfigToJson(c).dump();
   expectSameConfig(parseRedactConfig(text, "round"), c);
+}
+
+TEST(RedactConfig, VerifySettingsDefaultToTheSpec) {
+  const RedactConfig c;
+  EXPECT_FLOAT_EQ(c.verifyPlateBelow, 0.5f);
+  EXPECT_FLOAT_EQ(c.verifyFaceUnlessBothAbove, 0.5f);
+  EXPECT_FALSE(c.verifyThresholdFace.has_value());
+  EXPECT_FALSE(c.verifyThresholdPlate.has_value());
+}
+
+TEST(RedactConfig, ReadsAndWritesTheVerifySettings) {
+  const RedactConfig c = parseRedactConfig(
+      R"({"verify_plate_below": 0.4, "verify_face_unless_both_above": 0.6, "verify_threshold_face": 0.25,
+          "verify_threshold_plate": null})",
+      "t");
+  EXPECT_FLOAT_EQ(c.verifyPlateBelow, 0.4f);
+  EXPECT_FLOAT_EQ(c.verifyFaceUnlessBothAbove, 0.6f);
+  ASSERT_TRUE(c.verifyThresholdFace.has_value());
+  EXPECT_FLOAT_EQ(*c.verifyThresholdFace, 0.25f);
+  EXPECT_FALSE(c.verifyThresholdPlate.has_value());
+  const auto j = redactConfigToJson(c);
+  EXPECT_DOUBLE_EQ(j.at("verify_threshold_face").get<double>(), 0.25);
+  EXPECT_TRUE(j.at("verify_threshold_plate").is_null());
+}
+
+TEST(RedactConfig, RefusesVerifySettingsOutOfRange) {
+  expectRejected(R"({"verify_plate_below": 1.5})");
+  expectRejected(R"({"verify_face_unless_both_above": -0.1})");
+  expectRejected(R"({"verify_threshold_face": 2})");
+  expectRejected(R"({"verify_threshold_plate": "0.5"})");
 }
 
 }  // namespace

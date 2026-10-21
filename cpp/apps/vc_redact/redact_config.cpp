@@ -14,7 +14,7 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 24> kKeys = {
+constexpr std::array<std::string_view, 28> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
@@ -22,7 +22,9 @@ constexpr std::array<std::string_view, 24> kKeys = {
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
-    "nvenc_preset",        "trt_fp16",            "ort_intra_threads"};
+    "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
+    "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
+    "verify_threshold_plate"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -95,6 +97,13 @@ bool boolSetting(const nlohmann::json& j, const char* key, bool fallback, const 
   return it->get<bool>();
 }
 
+// The setting as an optional float: absent or null: nullopt; otherwise it must be a number.
+std::optional<float> optionalFloatSetting(const nlohmann::json& j, const char* key, const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end() || it->is_null()) return std::nullopt;
+  return floatSetting(j, key, 0.0f, origin);
+}
+
 // The setting as a string: `key` must be a JSON string; absent: `fallback`.
 std::string stringSetting(const nlohmann::json& j, const char* key, const std::string& fallback,
                           const std::string& origin) {
@@ -160,6 +169,13 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.plateConfirmScore >= 0 && c.plateConfirmScore <= 1, "plate_confirm_score must be in [0, 1]");
   require(c.largeFaceAreaFraction > 0 && c.largeFaceAreaFraction <= 1, "large_face_area_fraction must be in (0, 1]");
   require(c.largeFaceMinScore >= 0 && c.largeFaceMinScore <= 1, "large_face_min_score must be in [0, 1]");
+  require(c.verifyPlateBelow >= 0 && c.verifyPlateBelow <= 1, "verify_plate_below must be in [0, 1]");
+  require(c.verifyFaceUnlessBothAbove >= 0 && c.verifyFaceUnlessBothAbove <= 1,
+          "verify_face_unless_both_above must be in [0, 1]");
+  require(!c.verifyThresholdFace || (*c.verifyThresholdFace >= 0 && *c.verifyThresholdFace <= 1),
+          "verify_threshold_face must be in [0, 1]");
+  require(!c.verifyThresholdPlate || (*c.verifyThresholdPlate >= 0 && *c.verifyThresholdPlate <= 1),
+          "verify_threshold_plate must be in [0, 1]");
   require(c.face.topK >= 1, "the face model's top_k must be >= 1");
   require(c.outputBitrateFactorHevc >= kMinBitrateFactor && c.outputBitrateFactorHevc <= kMaxBitrateFactor,
           "output_bitrate_factor_hevc must be in [1, 4]");
@@ -210,6 +226,10 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   }
   c.largeFaceAreaFraction = numberSetting(j, "large_face_area_fraction", c.largeFaceAreaFraction, origin);
   c.largeFaceMinScore = floatSetting(j, "large_face_min_score", c.largeFaceMinScore, origin);
+  c.verifyPlateBelow = floatSetting(j, "verify_plate_below", c.verifyPlateBelow, origin);
+  c.verifyFaceUnlessBothAbove = floatSetting(j, "verify_face_unless_both_above", c.verifyFaceUnlessBothAbove, origin);
+  c.verifyThresholdFace = optionalFloatSetting(j, "verify_threshold_face", origin);
+  c.verifyThresholdPlate = optionalFloatSetting(j, "verify_threshold_plate", origin);
   c.timeline.holdLostGhosts = boolSetting(j, "hold_lost_ghosts", c.timeline.holdLostGhosts, origin);
   c.mosaic.minBlockPx = integerSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, 1, kMaxMosaicSetting, origin);
   c.mosaic.blocksPerLongSide =
@@ -251,6 +271,12 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["plate_confirm_score"] = jsonFloat(c.plateConfirmScore);
   j["large_face_area_fraction"] = c.largeFaceAreaFraction;
   j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
+  j["verify_plate_below"] = jsonFloat(c.verifyPlateBelow);
+  j["verify_face_unless_both_above"] = jsonFloat(c.verifyFaceUnlessBothAbove);
+  j["verify_threshold_face"] =
+      c.verifyThresholdFace ? nlohmann::ordered_json(jsonFloat(*c.verifyThresholdFace)) : nlohmann::ordered_json(nullptr);
+  j["verify_threshold_plate"] =
+      c.verifyThresholdPlate ? nlohmann::ordered_json(jsonFloat(*c.verifyThresholdPlate)) : nlohmann::ordered_json(nullptr);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
   j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;
   j["rate_control"] = std::string(c.rateControl == RateControl::Quality ? kQualityName : kBitrateName);

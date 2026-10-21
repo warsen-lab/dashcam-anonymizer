@@ -2,6 +2,7 @@
 
 #include <array>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,6 +41,13 @@ struct RedactConfig {
   // positives on road and buildings. largeFaceMinScore 0 switches the rule off.
   double largeFaceAreaFraction = 0.05;
   float largeFaceMinScore = 0.6f;
+  // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
+  // detector found or that score below verifyFaceUnlessBothAbove go through the verifier model when one is given
+  // (vc_redact --verifier-model). The pass thresholds are the model's (model.json pass_threshold) unless set here.
+  float verifyPlateBelow = 0.5f;
+  float verifyFaceUnlessBothAbove = 0.5f;
+  std::optional<float> verifyThresholdFace;
+  std::optional<float> verifyThresholdPlate;
   // Linux deployment (spec 2026-10-20 §3, §5). The output is always H.264. rateControl "quality" (the default) encodes
   // at constant quality, a file as large as the picture needs; "bitrate" encodes at the source's bit rate, times
   // outputBitrateFactorHevc, in [1, 4], for a source in another codec (HEVC, say): an H.264 source keeps its bit rate.
