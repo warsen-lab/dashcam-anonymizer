@@ -54,7 +54,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
   - `VC_PYTHON`：写 `batch.json` 用的 python3（默认 `python3`，只用标准库）；
   - `VC_SANDBOX=0`：不套沙箱。
 - 跑完后输出目录下有 `batch.json`（每次覆盖上一次的）：每个视频的 `exit_status`、`gpu`，成功的还有 `frames`、`elapsed_s`、`fps`、`detector`、`encoder`、`pipeline`（取自它的 `stats.json`，失败的为 null）；整批的 `wall_s`（墙钟秒数）、`frames`、`throughput_fps`（成功视频的总帧数 ÷ 整批墙钟时间）、`processes_at_once`。最后一行 `=== throughput: …` 打印同样的合计。
-- Ctrl-C（SIGINT）或 SIGTERM：停掉所有在跑的 `vc_redact`，打印一行 `=== interrupted: did not finish: …`，仍写出已知部分的 `batch.json`，退出码 130 / 143。
+- Ctrl-C（SIGINT）或 SIGTERM（`docker stop` 发的就是它）：立刻停掉所有在跑的 `vc_redact`（只开一路时也一样：脚本把它放在后台等，所以不必等当前视频跑完；它的输出照常实时打印到终端），打印一行 `=== interrupted: did not finish: …`，仍写出已知部分的 `batch.json`，退出码 130 / 143。信号到来前已经跑完的视频保留它真实的退出状态。
+- 中途被打断的视频，它的 `<视频名>/` 下会留着 `.partial` 文件；重跑这个视频要加 `VC_REDACT_ARGS=--overwrite`，否则会因输出目录已存在被拒绝。
 
 ### 输出
 
@@ -166,7 +167,7 @@ scripts/setup_linux.sh --check-pins     # 不联网：列出固定的下载和�
 VC_ALLOW_DOWNLOAD=1 TENSORRT_VERSION=<apt 版本> scripts/setup_linux.sh
 ```
 
-它会联网下载（onnxruntime GPU 包、FFmpeg 8.1.2 源码、nv-codec-headers 12.2.72.0，Ubuntu 22.04 上还有 CMake 3.31.6，以及 apt 包），不设 `VC_ALLOW_DOWNLOAD=1` 直接拒绝；下载放在所有 checkout 共享的 `~/.cache/video-compliance/downloads/`，已有且校验通过就不再下载。装好后可执行文件在 `build/cpp-linux/vc_redact`，FFmpeg 在 `~/.cache/video-compliance/linux/ffmpeg-8.1.2/`（带 NVENC / NVDEC 和 libx264；libx264 是 GPL，整份 FFmpeg 随之是 GPL，与 YOLO 的 AGPL 一起记入"生产许可待定"）。
+它会联网下载（onnxruntime GPU 包、FFmpeg 8.1.2 源码、nv-codec-headers 12.2.72.0，Ubuntu 22.04 上还有 CMake 3.31.6，以及 apt 包），不设 `VC_ALLOW_DOWNLOAD=1` 直接拒绝；下载放在所有 checkout 共享的 `~/.cache/video-compliance/downloads/`，已有且校验通过就不再下载。装好后可执行文件在 `build/cpp-linux/vc_redact`，FFmpeg 在 `~/.cache/video-compliance/linux/ffmpeg-8.1.2/`（带 NVENC / NVDEC 和 libx264；libx264 是 GPL，整份 FFmpeg 随之是 GPL，与 YOLO 的 AGPL 一起记入"生产许可待定"，见设计 `docs/superpowers/specs/2026-10-20-linux-nvidia-deployment-design.md` §8）。
 
 **Docker（生产）：**
 
@@ -175,7 +176,7 @@ VC_ALLOW_DOWNLOAD=1 CUDA_DEVEL_DIGEST=sha256:<…> CUDA_RUNTIME_DIGEST=sha256:<�
 docker run --gpus all -v <素材>:/in -v <输出>:/out -v <模型>:/models -v <缓存>:/cache vc-redact /in /out
 ```
 
-模型目录挂到 `/models`（里面是 `r3/` 和 `yunet/`），`/cache` 放 TensorRT 引擎缓存（`trt-cache/<model.onnx 的 sha256>/<宽>x<高>/`）。`-e VC_JOBS=4 -e VC_GPUS=0,1` 照常传给 `redact.sh`。构建上下文排除 `data/`、`build/`（`.dockerignore`），视频和模型不会进镜像。
+模型目录挂到 `/models`（里面是 `r3/` 和 `yunet/`），`/cache` 放 TensorRT 引擎缓存（`trt-cache/<model.onnx 的 sha256>/<宽>x<高>/`）。`-e VC_JOBS=4 -e VC_GPUS=0,1` 照常传给 `redact.sh`。构建上下文排除 `data/`、`build/`（`.dockerignore`），视频和模型不会进镜像。镜像里设了 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`：没有 `video`，NVIDIA container toolkit 不会挂载 NVENC / NVDEC 的库，编码和解码会悄悄退回软件。改 C++ 源码只会重编 `vc_redact`，不会重新下载、重编 FFmpeg（下载还放在 BuildKit 缓存里，需要 BuildKit）。
 
 **调参（Linux）：**
 

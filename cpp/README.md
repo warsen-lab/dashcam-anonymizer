@@ -11,7 +11,7 @@
 ## 依赖
 
 - CMake ≥ 3.24，支持 C++20 的编译器
-- FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux `libavformat-dev libavcodec-dev libswscale-dev libavutil-dev`。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
+- FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux 不要用 apt 的 `libavformat-dev` 等（Ubuntu 22.04 / 24.04 带的是 FFmpeg 4.4 / 6.1，版本不够），用 `scripts/setup_linux.sh` 从源码编 FFmpeg 8（见 `docs/USAGE.md`）。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
 - GoogleTest：macOS `brew install googletest`；Linux `libgtest-dev`
 - onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP；在 Linux 上 CMake 默认找 x64 GPU 包 `onnxruntime-linux-x64-gpu-1.30.0`，含 CUDA 与 TensorRT EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
 
