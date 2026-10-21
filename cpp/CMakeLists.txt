@@ -44,6 +44,7 @@ add_library(vc_core STATIC
   src/common/vc_error.cpp
   src/detect/box.cpp
   src/detect/letterbox.cpp
+  src/detect/verifier_crop.cpp
   src/io/frame_file_name.cpp
   src/io/jpeg_writer.cpp
   src/io/video_reader.cpp
