@@ -327,6 +327,13 @@ VC_HARDNEG_ALLOW_LLM=1 PYTHONPATH=py .venv/bin/python -m vc_hardneg judge --llm 
 
 ### Task 3: 建数据集时清洗标签（`vc_train/cleaning.py` + `dataset.py`）
 
+> **执行时的调整（2026-10-21，用户选定）**：两次人工抽核（共 233 张）的结果——
+> - 车牌判"不是"的误判率 1/133（两张镀铬饰条框经用户确认不算车牌）；
+> - 人脸判"不是"的误判率 8/27，**人脸标签不清洗**；
+> - 低分车牌里约 25–35% 是真车牌，所以 A3（整档去掉）不做。
+>
+> 用户选定"形状规则 + 放量判定"：低分档里**高大于宽**的车牌框直接去掉（老师高分车牌里这种形状只占 1.1%，人工判为假标签的里面占 35%），其余低分车牌全部判定，去掉判"不是"的；判过"是"的永远保留。下面的接口因此改为：`LabelCleaning(no, yes, low_boxes, drop_tall_low_plates)`，只清洗车牌；命令行参数 `--drop-tall-low-plates` 取代 `--drop-unjudged-low`。
+
 **Files:**
 - Create: `py/vc_train/cleaning.py`, `py/tests/test_train_cleaning.py`
 - Modify: `py/vc_train/dataset.py`, `py/vc_train/cli.py`, `py/tests/test_train_dataset.py`

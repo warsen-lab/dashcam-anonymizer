@@ -24,6 +24,13 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--width", type=int, default=1920, help="model input width")
     d.add_argument("--height", type=int, default=1088, help="model input height")
     d.add_argument("--val-tail-ms", type=float, default=20000.0)
+    d.add_argument("--label-candidates", type=Path, default=None, help="vc_hardneg mine-labels candidates.jsonl")
+    d.add_argument("--label-judgments", type=Path, default=None, help="their judgments.jsonl: plates judged no are left out")
+    d.add_argument("--drop-tall-low-plates", action="store_true",
+                   help="also leave out the low-band plate labels taller than wide (lamps, body corners)")
+    d.add_argument("--hard-negatives", type=Path, default=None, help="vc_hardneg candidates.jsonl of student false positives")
+    d.add_argument("--hard-negative-judgments", type=Path, default=None, help="their judgments.jsonl")
+    d.add_argument("--hard-negative-share", type=float, default=0.10, help="extra samples, as a share of the others")
 
     t = sub.add_parser("train", help="fine-tune YOLOv8n offline")
     t.add_argument("--data", type=Path, required=True)
@@ -96,13 +103,34 @@ def _dataset(args) -> int:
         frames_dir = args.frames_root / stem
         ensure_outside(frames_dir, args.out)
         segments.append((frames_dir, args.labels_root / stem))
-    s = build_dataset(segments, args.out, args.width, args.height, args.val_tail_ms)
+    if (args.label_candidates is None) != (args.label_judgments is None):
+        raise ValueError("--label-candidates and --label-judgments go together")
+    if args.drop_tall_low_plates and args.label_candidates is None:
+        raise ValueError("--drop-tall-low-plates needs --label-candidates and --label-judgments")
+    if (args.hard_negatives is None) != (args.hard_negative_judgments is None):
+        raise ValueError("--hard-negatives and --hard-negative-judgments go together")
+    cleaning, hard = None, []
+    if args.label_candidates is not None:
+        from vc_train.cleaning import LabelCleaning
+
+        cleaning = LabelCleaning.load(args.label_candidates, args.label_judgments, args.labels_root, args.stem,
+                                      args.drop_tall_low_plates)
+    if args.hard_negatives is not None:
+        from vc_train.cleaning import load_hard_negatives
+
+        hard = load_hard_negatives(args.hard_negatives, args.hard_negative_judgments)
+    s = build_dataset(segments, args.out, args.width, args.height, args.val_tail_ms, cleaning=cleaning,
+                      hard_negatives=hard, hard_negative_share=args.hard_negative_share)
     print(
         f"dataset: {s.train_samples} train / {s.val_samples} val samples from "
         f"{s.train_frames} / {s.val_frames} frames, {s.boxes} boxes in {args.out}"
     )
     for segment in s.segments:
         print(f"  {segment.name}: {segment.train_frames} train / {segment.val_frames} val frames")
+    if cleaning is not None:
+        print(f"  label boxes left out by the cleaning: {s.labels_dropped}")
+    if args.hard_negatives is not None:
+        print(f"  hard-negative samples: {s.hard_negatives} (of {len(hard)} judged false positives)")
     return 0
 
 

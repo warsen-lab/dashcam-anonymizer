@@ -1,4 +1,5 @@
-"""YOLO dataset from teacher labels: native-scale crops plus one full frame per labelled frame (spec §4.2)."""
+"""YOLO dataset from teacher labels: native-scale crops plus one full frame per labelled frame (spec §4.2); optionally
+with the labels cleaned and extra crops around judged student false positives (spec 2026-10-21 §5)."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import cv2
 from vc_label.contracts import LABEL_CLASSES, Box, FrameRef, from_yolo_lines, read_frames_csv, to_yolo_lines
 from vc_label.pipeline import check_labels_match_frames, read_processed
 from vc_label.review import image_size
+from vc_train.cleaning import hard_negative_window
 from vc_train.geometry import check_input_size, letterbox_scale
 
 Window = tuple[int, int, int, int]  # x0, y0, w, h in frame pixels
@@ -37,6 +39,8 @@ class DatasetSummary:
     val_frames: int
     boxes: int
     segments: tuple[SegmentSummary, ...] = ()
+    labels_dropped: int = 0  # label boxes the cleaning left out
+    hard_negatives: int = 0  # extra samples around judged student false positives
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,7 @@ def _check_out_dir(out_dir: Path) -> None:
         raise ValueError(f"dataset dir {out_dir} is not empty; choose a new --out")
 
 
-def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]:
+def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float, cleaning=None) -> tuple[list[_Frame], int]:
     """Phase 1: reads and checks every segment, writes nothing.
 
     A segment that is missing its labels, or whose frames all fall into the validation tail, is an error: skipping
@@ -126,6 +130,7 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]
     if not segments:
         raise ValueError("no segments given; pass at least one segment")
     frames: list[_Frame] = []
+    dropped = 0
     owner: dict[str, int] = {}  # video stem -> index of the segment that writes its samples
     for index, (frames_dir, labels_dir) in enumerate(segments):
         refs = read_frames_csv(frames_dir)
@@ -150,6 +155,9 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]
                 raise ValueError(f"{label_file} is missing; run vc_label fuse for {labels_dir} first")
             width, height = image_size(ref.image)
             boxes = from_yolo_lines(label_file.read_text().splitlines(), width, height)
+            if cleaning is not None:
+                boxes, n = cleaning.clean(stem, ref.frame, boxes)
+                dropped += n
             split = "val" if ref.pts_ms >= val_from else "train"
             segment_frames.append(_Frame(index, stem, ref, width, height, boxes, split))
         if all(f.split == "val" for f in segment_frames):
@@ -159,7 +167,7 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float) -> list[_Frame]
                 f"which is not longer than val_tail_ms={val_tail_ms:.0f}. Label a longer segment or lower --val-tail-ms"
             )
         frames.extend(segment_frames)
-    return frames
+    return frames, dropped
 
 
 def _manifest_row(
@@ -202,8 +210,33 @@ def _write_frame(out_dir: Path, frame: _Frame, in_width: int, in_height: int, cr
     return rows
 
 
+def _write_hard_negatives(out_dir: Path, frames: list[_Frame], hard_negatives, count: int) -> list[dict]:
+    """The first `count` hard negatives that lie on a dataset frame, each as a native-scale crop centred on it with the
+    frame's (cleaned) labels inside it; the false positive itself has no label."""
+    by_frame = {(f.stem, f.ref.frame): f for f in frames}
+    taken = [h for h in hard_negatives if (h.stem, h.frame) in by_frame][:count]
+    rows: list[dict] = []
+    per_frame: dict[tuple[str, int], int] = {}
+    image, image_of = None, None
+    for hn in taken:
+        frame = by_frame[(hn.stem, hn.frame)]
+        if image_of != frame.ref.image:
+            image, image_of = cv2.imread(str(frame.ref.image)), frame.ref.image
+            if image is None:
+                raise ValueError(f"cannot read {frame.ref.image}")
+        x0, y0, w, h = hard_negative_window(hn.box, frame.width, frame.height)
+        k = per_frame.get((hn.stem, hn.frame), 0)
+        per_frame[(hn.stem, hn.frame)] = k + 1
+        name = f"{frame.stem}_{frame.ref.frame:06d}_hn{k}"
+        part_boxes = crop_boxes(frame.boxes, (x0, y0, w, h))
+        _write_sample(out_dir, frame.split, name, image[y0 : y0 + h, x0 : x0 + w], part_boxes)
+        rows.append(_manifest_row(name, frame, x0, y0, w, h, 1.0, len(part_boxes)))
+    return rows
+
+
 def _write_dataset(
-    out_dir: Path, segments: list[tuple[Path, Path]], frames: list[_Frame], in_width: int, in_height: int, crop: int
+    out_dir: Path, segments: list[tuple[Path, Path]], frames: list[_Frame], in_width: int, in_height: int, crop: int,
+    hard_negatives=(), hard_negative_share: float = 0.10,
 ) -> DatasetSummary:
     """Phase 2: writes the samples, the manifest and data.yaml."""
     for kind in ("images", "labels"):
@@ -212,6 +245,8 @@ def _write_dataset(
     rows: list[dict] = []
     for frame in frames:
         rows.extend(_write_frame(out_dir, frame, in_width, in_height, crop))
+    extra = _write_hard_negatives(out_dir, frames, hard_negatives, round(hard_negative_share * len(rows)))
+    rows.extend(extra)
     rows.sort(key=lambda r: (r["split"] != "train", r["sample"]))
     with (out_dir / MANIFEST).open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_MANIFEST_FIELDS)
@@ -224,6 +259,7 @@ def _write_dataset(
         train_frames=sum(f.split == "train" for f in frames),
         val_frames=sum(f.split == "val" for f in frames),
         boxes=sum(r["boxes"] for r in rows),
+        hard_negatives=len(extra),
         segments=tuple(
             SegmentSummary(
                 frames_dir.name,
@@ -254,19 +290,28 @@ def build_dataset(
     in_height: int,
     val_tail_ms: float = 20000.0,
     crop: int = 1280,
+    cleaning=None,
+    hard_negatives=(),
+    hard_negative_share: float = 0.10,
 ) -> DatasetSummary:
     """segments: (frames_dir, labels_dir) pairs; only frames in processed.txt are used.
 
     Every input is checked before anything is written: a segment without processed frames (labels not taught or fused
     yet) or without any frame older than the validation tail raises ValueError instead of being skipped. If writing fails, the output dir is removed
     (or emptied, when it existed empty), so the same --out can be used again after the fix.
+
+    `cleaning` (vc_train.cleaning.LabelCleaning) leaves label boxes out of every sample of their frame. `hard_negatives`
+    (vc_train.cleaning.HardNegative, in the order to take them) add up to hard_negative_share times the other samples.
     """
     check_input_size(in_width, in_height)
+    if not 0 <= hard_negative_share <= 1:
+        raise ValueError(f"hard_negative_share must be in [0, 1], got {hard_negative_share}")
     _check_out_dir(out_dir)
-    frames = _plan(segments, val_tail_ms)
+    frames, dropped = _plan(segments, val_tail_ms, cleaning)
     created = not out_dir.exists()
     try:
-        return _write_dataset(out_dir, segments, frames, in_width, in_height, crop)
+        summary = _write_dataset(out_dir, segments, frames, in_width, in_height, crop, hard_negatives, hard_negative_share)
+        return replace(summary, labels_dropped=dropped)
     except BaseException:
         _remove_partial_output(out_dir, created)
         raise

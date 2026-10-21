@@ -264,3 +264,57 @@ def test_a_crop_that_cv2_cannot_write_is_an_error_naming_the_file_and_leaves_no_
     with pytest.raises(ValueError, match="a_000000_c0.jpg"):
         build_dataset([seg], out, 1920, 1088)
     assert not out.exists()
+
+
+class _DropFirstPlate:
+    """A stand-in for vc_train.cleaning.LabelCleaning: leaves out the first plate of every frame."""
+
+    def __init__(self):
+        self.calls = []
+
+    def clean(self, stem, frame, boxes):
+        self.calls.append((stem, frame))
+        plates = [i for i, b in enumerate(boxes) if b.cls == "plate"]
+        if not plates:
+            return boxes, 0
+        return [b for i, b in enumerate(boxes) if i != plates[0]], 1
+
+
+def test_cleaning_leaves_label_boxes_out_of_every_sample_and_counts_them(tmp_path):
+    two = [Box("plate", 100, 100, 160, 120), Box("plate", 1700, 900, 1760, 920)]
+    seg = _segment(tmp_path, "a", [(0, 0.0), (10, 30000.0)], {0: two, 10: two})
+    cleaning = _DropFirstPlate()
+    s = build_dataset([seg], tmp_path / "ds", 1920, 1088, cleaning=cleaning)
+    assert s.labels_dropped == 2 and cleaning.calls == [("a", 0), ("a", 10)]
+    full = sorted((tmp_path / "ds" / "labels").rglob("*_full.txt"))
+    assert [len(p.read_text().splitlines()) for p in full] == [1, 1]
+    assert (tmp_path / "ds" / "labels" / "train" / "a_000000_c0.txt").read_text() == ""  # the left plate is gone
+
+
+def test_hard_negatives_add_centred_native_crops_with_the_labels_inside(tmp_path):
+    from vc_train.cleaning import HardNegative
+
+    seg = _segment(tmp_path, "a", [(0, 0.0), (10, 30000.0)], {0: [Box("plate", 950, 520, 1010, 540)]})
+    hn = [HardNegative("a", 0, Box("plate", 900, 500, 920, 510)),   # on a labelled frame: taken
+          HardNegative("a", 0, Box("plate", 10, 10, 30, 20)),       # second one on the same frame: hn1
+          HardNegative("b", 0, Box("plate", 10, 10, 30, 20))]       # another video: not in the dataset
+    s = build_dataset([seg], tmp_path / "ds", 1920, 1088, hard_negatives=hn, hard_negative_share=1.0)
+    assert s.hard_negatives == 2
+    train = tmp_path / "ds" / "images" / "train"
+    assert cv2.imread(str(train / "a_000000_hn0.jpg")).shape[:2] == (640, 640)
+    # the labelled plate (950..1010) lies inside the window around (910, 505), the second window (0..640) misses it
+    assert (tmp_path / "ds" / "labels" / "train" / "a_000000_hn0.txt").read_text().startswith("1 ")
+    assert (tmp_path / "ds" / "labels" / "train" / "a_000000_hn1.txt").read_text() == ""
+    with (tmp_path / "ds" / MANIFEST).open() as f:
+        assert sum(r["sample"].endswith("_hn0.jpg") for r in csv.DictReader(f)) == 1
+
+
+def test_the_hard_negative_share_caps_the_extra_samples(tmp_path):
+    from vc_train.cleaning import HardNegative
+
+    seg = _segment(tmp_path, "a", [(0, 0.0), (10, 30000.0)], {})
+    hn = [HardNegative("a", 0, Box("plate", 100 * k, 500, 100 * k + 20, 510)) for k in range(1, 10)]
+    s = build_dataset([seg], tmp_path / "ds", 1920, 1088, hard_negatives=hn, hard_negative_share=0.5)
+    assert s.hard_negatives == round(0.5 * 6)  # 6 ordinary samples (2 crops + full frame, 2 frames)
+    with pytest.raises(ValueError):
+        build_dataset([seg], tmp_path / "ds2", 1920, 1088, hard_negatives=hn, hard_negative_share=1.5)
