@@ -19,8 +19,7 @@ namespace vc {
 namespace {
 
 // Every cellW x cellH cell of the grid anchored at the plane's origin, inside `area`, is uniform and equals the
-// rounded mean of `before` over the cell's part inside `area`; everything outside `area` is unchanged. `area`'s
-// left and top edges lie on the grid.
+// rounded mean of `before` over the cell's part inside `area`; everything outside `area` is unchanged.
 void expectGrid(const AVFrame& after, const AVFrame& before, int plane, int step, int offset, PixelRect area,
                 int cellW, int cellH, int planeWidth, int planeHeight) {
   const auto px = [&](const AVFrame& f, int x, int y) {
@@ -33,10 +32,12 @@ void expectGrid(const AVFrame& after, const AVFrame& before, int plane, int step
         ASSERT_EQ(px(after, x, y), px(before, x, y)) << "plane " << plane << " outside at " << x << "," << y;
         continue;
       }
-      const int cx1 = x / cellW * cellW;
-      const int cy1 = y / cellH * cellH;
-      const int cx2 = std::min(cx1 + cellW, area.x2);
-      const int cy2 = std::min(cy1 + cellH, area.y2);
+      const int gx = x / cellW * cellW;
+      const int gy = y / cellH * cellH;
+      const int cx1 = std::max(gx, area.x1);
+      const int cy1 = std::max(gy, area.y1);
+      const int cx2 = std::min(gx + cellW, area.x2);
+      const int cy2 = std::min(gy + cellH, area.y2);
       uint64_t sum = 0;
       for (int yy = cy1; yy < cy2; ++yy) {
         for (int xx = cx1; xx < cx2; ++xx) sum += px(before, xx, yy);
@@ -220,6 +221,41 @@ TEST(Mosaic, PixelatesYuv422pAndYuv444pOnTheGrid) {
 // [40, 49) x [16, 32), cells 8 and 1 wide.
 TEST(Mosaic, CellsCutByTheFrameEdgeAverageWhatIsThere) {
   expectPlanarGridMosaic(AV_PIX_FMT_YUV420P, 97, 63, {80, 40, 97, 63}, 16, {80, 32, 97, 63}, {40, 16, 49, 32}, 8, 8, 9);
+}
+
+// A rect that is not snapped (vc_redact's plates) is pixelated only inside itself, on the same frame grid: the
+// cells its edges cut average their part inside the rect. Luma [10, 50) x [10, 40) in 16 px cells, chroma
+// [5, 25) x [5, 20) in 8 px cells.
+TEST(Mosaic, AnUnsnappedRectIsPixelatedOnlyInsideItselfOnTheFrameGrid) {
+  auto frame = test::makeNoiseFrame(96, 64, AV_PIX_FMT_YUV420P, 12);
+  const auto before = test::deepCopy(*frame);
+  applyMosaic(*frame, {MosaicRect{{10, 10, 50, 40}, 16, false}});
+  expectPlanarGrid(*frame, *before, {10, 10, 50, 40}, 16, {5, 5, 25, 20}, 8, 8);
+}
+
+TEST(Mosaic, AnUnsnappedNv12RectIsPixelatedOnlyInsideItself) {
+  auto frame = test::makeNoiseFrame(96, 64, AV_PIX_FMT_NV12, 13);
+  const auto before = test::deepCopy(*frame);
+  applyMosaic(*frame, {MosaicRect{{11, 9, 51, 41}, 16, false}});
+  // Odd luma edges: chroma covers every sample a luma pixel inside shares, [5, 26) x [4, 21).
+  expectGrid(*frame, *before, 0, 1, 0, {11, 9, 51, 41}, 16, 16, 96, 64);
+  expectGrid(*frame, *before, 1, 2, 0, {5, 4, 26, 21}, 8, 8, 48, 32);
+  expectGrid(*frame, *before, 1, 2, 1, {5, 4, 26, 21}, 8, 8, 48, 32);
+}
+
+// The whole cells of an unsnapped rect are the cells a snapped one gives there: the pattern stays on the frame grid.
+TEST(Mosaic, AnUnsnappedRectSharesItsWholeCellsWithTheSnappedOne) {
+  auto source = test::makeNoiseFrame(96, 64, AV_PIX_FMT_YUV420P, 14);
+  auto snapped = test::deepCopy(*source);
+  auto clipped = test::deepCopy(*source);
+  applyMosaic(*snapped, {MosaicRect{{10, 10, 50, 40}, 16}});
+  applyMosaic(*clipped, {MosaicRect{{10, 10, 50, 40}, 16, false}});
+  for (int y = 16; y < 32; ++y) {
+    for (int x = 16; x < 48; ++x) {
+      ASSERT_EQ(snapped->data[0][y * snapped->linesize[0] + x], clipped->data[0][y * clipped->linesize[0] + x])
+          << x << "," << y;
+    }
+  }
 }
 
 // Overlapping masks are pixelated largest block first, so the finer mosaic drawn last is what shows where they

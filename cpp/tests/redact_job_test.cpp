@@ -159,7 +159,33 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
   // Every mask records the block it was pixelated with; one static target keeps one block.
   std::ifstream masksFile(dir / "masks.jsonl");
   for (std::string line; std::getline(masksFile, line);) {
-    for (const auto& box : nlohmann::json::parse(line).at("boxes")) EXPECT_EQ(box.at("block").get<int>(), 24) << line;
+    for (const auto& box : nlohmann::json::parse(line).at("boxes")) {
+      EXPECT_EQ(box.at("block").get<int>(), 24) << line;
+      EXPECT_TRUE(box.at("snap").get<bool>()) << line;
+    }
+  }
+  // A face's mosaic snaps out to the grid: the rows [72, 88) above the mask are pixelated too.
+  for (size_t i = 0; i < out.size(); ++i) EXPECT_LT(lumaStd(*out[i], 96, 74, 120, 86), 4.0) << "frame " << i;
+}
+
+// A plate's mosaic stays inside its mask (spec 2026-10-19 §4, plates): the same box as above as a plate, mask
+// (85, 88)-(215, 192) in 24 px cells, leaves the rows [72, 88) that the face's mosaic snaps out to as they were.
+TEST(RedactJob, PixelatesAPlateOnlyInsideItsMask) {
+  RedactOptions o = baseOptions("redact_plate_clipped");
+  o.fakeDetections = fakeFile("redact_plate_clipped.jsonl", 60, "plate");
+  runRedact(o);
+  const fs::path dir = o.outRoot / kStem;
+  const auto in = decodeAll(o.input);
+  const auto out = decodeAll(dir / "noisy_audio.redacted.mp4");
+  ASSERT_EQ(out.size(), 60u);
+  for (size_t i = 0; i < out.size(); ++i) {
+    EXPECT_LT(lumaStd(*out[i], 96, 96, 120, 120), 4.0) << "frame " << i;
+    EXPECT_GT(lumaStd(*out[i], 96, 74, 200, 86), 10.0) << "frame " << i;  // outside the mask: still detailed
+    EXPECT_NEAR(lumaMean(*out[i], 96, 74, 200, 86), lumaMean(*in[i], 96, 74, 200, 86), 3.0) << "frame " << i;
+  }
+  std::ifstream masksFile(dir / "masks.jsonl");
+  for (std::string line; std::getline(masksFile, line);) {
+    for (const auto& box : nlohmann::json::parse(line).at("boxes")) EXPECT_FALSE(box.at("snap").get<bool>()) << line;
   }
 }
 

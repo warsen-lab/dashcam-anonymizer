@@ -182,6 +182,12 @@ std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int he
   return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 
+// The index of `name` in `classes`, -1 when it is not there.
+int classIndex(const std::vector<std::string>& classes, const std::string& name) {
+  const auto it = std::find(classes.begin(), classes.end(), name);
+  return it == classes.end() ? -1 : static_cast<int>(it - classes.begin());
+}
+
 // A keyframe's detections after the large-face rule, and how many it dropped.
 struct LargeFaceFilter {
   std::vector<SourcedBox> kept;
@@ -232,7 +238,8 @@ class Processor {
         width_(info.width),
         height_(info.height),
         timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
-        blocks_(options.config.mosaic) {}
+        blocks_(options.config.mosaic),
+        plateClass_(classIndex(detector.classes(), "plate")) {}
 
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
@@ -320,7 +327,8 @@ class Processor {
   }
 
   // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order. A mask's block comes
-  // from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4).
+  // from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4); a
+  // plate's mosaic stays inside its mask instead of snapping out to the grid.
   void emit(const std::vector<std::vector<MaskBox>>& masks) {
     if (masks.size() != buffer_.size()) throw VcError("internal error: masks do not match the buffered frames");
     for (size_t k = 0; k < buffer_.size(); ++k) {
@@ -332,7 +340,8 @@ class Processor {
       for (MaskBox& m : boxes) {
         const PixelRect rect = coveringRect(m.x1, m.y1, m.x2, m.y2, frame.frame->width, frame.frame->height);
         m.block = blocks_.blockFor(m.track, rect);
-        rects.push_back(MosaicRect{rect, m.block});
+        m.snap = m.cls != plateClass_;
+        rects.push_back(MosaicRect{rect, m.block, m.snap});
       }
       blocks_.endFrame();
       if (!boxes.empty()) {
@@ -361,6 +370,7 @@ class Processor {
   int height_;
   BoxTimeline timeline_;
   TrackBlocks blocks_;
+  int plateClass_;  // -1 when the detector has no plate class
   bool sawKeyframe_ = false;
   std::vector<VideoItem> buffer_;
   std::optional<KeyframeDetections> pending_;

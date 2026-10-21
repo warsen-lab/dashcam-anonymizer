@@ -37,14 +37,16 @@ PixelRect snapped(const PixelRect& r, int block, int width, int height) {
   return clipped({down(r.x1), down(r.y1), up(r.x2), up(r.y2)}, width, height);
 }
 
-// Sets every cell of the cellW x cellH grid anchored at the plane's origin inside `area` (plane pixels,
-// its edges on the grid or at the plane's edge) to the cell's rounded mean. `step` is the byte distance
-// between neighbouring samples, `offset` the first sample's byte (NV12 chroma: 2, 0 / 1).
+// Sets the part inside `area` (plane pixels) of every cell of the cellW x cellH grid anchored at the plane's
+// origin to that part's rounded mean. `step` is the byte distance between neighbouring samples, `offset` the
+// first sample's byte (NV12 chroma: 2, 0 / 1).
 void pixelateGrid(uint8_t* data, int stride, const PixelRect& area, int cellW, int cellH, int step, int offset) {
-  for (int by = area.y1; by < area.y2; by += cellH) {
-    const int ey = std::min(by + cellH, area.y2);
-    for (int bx = area.x1; bx < area.x2; bx += cellW) {
-      const int ex = std::min(bx + cellW, area.x2);
+  for (int gy = area.y1 / cellH * cellH; gy < area.y2; gy += cellH) {
+    const int by = std::max(gy, area.y1);
+    const int ey = std::min(gy + cellH, area.y2);
+    for (int gx = area.x1 / cellW * cellW; gx < area.x2; gx += cellW) {
+      const int bx = std::max(gx, area.x1);
+      const int ex = std::min(gx + cellW, area.x2);
       uint64_t sum = 0;
       for (int y = by; y < ey; ++y) {
         const uint8_t* row = data + static_cast<ptrdiff_t>(y) * stride + offset;
@@ -160,7 +162,7 @@ void applyMosaic(AVFrame& frame, const std::vector<MosaicRect>& rects) {
   for (const MosaicRect& m : ordered) {
     const PixelRect r = clipped(m.rect, frame.width, frame.height);
     if (r.empty()) continue;
-    const PixelRect area = snapped(r, m.block, frame.width, frame.height);
+    const PixelRect area = m.snap ? snapped(r, m.block, frame.width, frame.height) : r;
     pixelateGrid(frame.data[0], frame.linesize[0], area, m.block, m.block, 1, 0);
     const PixelRect c{area.x1 >> sw, area.y1 >> sh, ceilShift(area.x2, sw), ceilShift(area.y2, sh)};
     const int cw = m.block >> sw;
