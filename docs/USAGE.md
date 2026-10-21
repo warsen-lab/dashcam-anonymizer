@@ -57,10 +57,10 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 | 文件 | 内容 |
 |---|---|
-| `<视频名>.redacted.mp4` | 打码后的视频。编码跟随原片（HEVC → HEVC，其他 → H.264），码率取原片的，音频原样复制，旋转、色彩信息照搬 |
+| `<视频名>.redacted.mp4` | 打码后的视频，一律 H.264（macOS 与 Linux 相同）：H.264 原片沿用原码率，HEVC 等其他编码按原码率乘 `output_bitrate_factor_hevc`（默认 1.5）；10 位、4:2:2 原片转成 8 位 4:2:0（运行结束 stderr 一行 note）。音频原样复制，旋转、色彩信息照搬 |
 | `masks.jsonl` | 每帧打了哪些框（一帧一行）：坐标、轨迹编号 track、来源 origin、马赛克块大小 block、是否向外对齐网格 snap（车牌为 false） |
 | `detections.jsonl` | 关键帧上检测到的框，含来源（student / yunet）；confirmed 为 false 的是只出现一次的低分框，没有打码 |
-| `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器 |
+| `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器、目标码率 `output_bit_rate`、流水线 `pipeline` |
 
 - **原子写出：** 运行中只写 `.partial` 文件，成功才改名，失败不会留下看似完整、其实没打全的视频。
 - **退出码：** 0 成功；1 处理出错；2 参数错误；3 输出已存在（加 `--overwrite` 覆盖）。
@@ -98,7 +98,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
   64 分钟全片 10 档：219 fps（229,606 帧 1048 秒）。4K 没测过，请把 `stats.json` 发给我。
 - **内存：** 处理线程最多缓冲 120 帧，4K 约 1.5 GB，32 GB 内存没问题。
-- **画质和大小：** 输出码率等于原片码率，4K HEVC 输出仍是 HEVC。
+- **画质和大小：** 输出一律 H.264：H.264 原片码率不变，4K HEVC 原片按 1.5 倍码率编成 H.264（`output_bitrate_factor_hevc`）；Level 按分辨率和帧率指定（4K60 为 5.2），`vc_eval integrity` 会检查。
 
 ## 4. 调参（`configs/redact.json`）
 

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "common/platform.h"
+
 extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
@@ -21,17 +23,18 @@ struct AVStream;
 
 namespace vc {
 
+// The output is always H.264 (spec 2026-10-20 §3), whatever the source codec.
 struct WriterConfig {
   std::filesystem::path path;  // created as MP4 whatever the extension (so ".partial" works)
   int width = 0;
   int height = 0;
-  AVPixelFormat pixelFormat = AV_PIX_FMT_YUV420P;  // of the frames passed to writeVideo(); converted when
-                                                   // the encoder does not take it
+  AVPixelFormat pixelFormat = AV_PIX_FMT_YUV420P;  // of the frames passed to writeVideo(); anything but 8-bit
+                                                   // 4:2:0 is converted to it (H.264 encoders all take that)
   AVRational timeBase{1, 1000};                    // of the frames' pts
   AVRational frameRate{0, 1};                      // 0/1 when unknown (the encoder assumes 30 fps)
-  std::string sourceCodec = "h264";                // "hevc" stays HEVC, anything else becomes H.264
-  int64_t bitRate = 0;                             // <= 0: 8 Mb/s
-  bool preferHardware = true;                      // VideoToolbox first, then libx264 / libx265
+  int64_t bitRate = 0;                             // <= 0: 8 Mb/s (h264OutputBitRate gives vc_redact's)
+  bool preferHardware = true;                      // h264EncoderCandidates
+  std::string nvencPreset = "p4";                  // h264_nvenc's preset (configs/redact.json nvenc_preset)
 
   // Presentation metadata of the source video, written to the encoder and the MP4 so that the
   // output is shown like the input (aspect ratio, colours, rotation). The defaults mean "not
@@ -69,6 +72,24 @@ void requireMp4Audio(const std::vector<AudioStreamInfo>& audio);
 // extra frame would put the output out of step with the source and masks.jsonl.
 void checkEncodedPackets(int64_t frames, int64_t packets);
 
+// The H.264 encoders to try, in order (spec 2026-10-20 §3): with preferHardware h264_nvenc (not on macOS), then
+// h264_videotoolbox (macOS only), then libx264; without it libx264 alone.
+std::vector<std::string> h264EncoderCandidates(bool preferHardware, Platform platform);
+
+// The output bitrate: the source's (8 Mb/s when it is unknown, i.e. <= 0), times nonH264Factor unless the source is
+// H.264 (configs/redact.json output_bitrate_factor_hevc), rounded to whole bits per second.
+int64_t h264OutputBitRate(bool sourceIsH264, int64_t sourceBitRate, double nonH264Factor);
+
+// level_idc (52 for level 5.2) of the lowest H.264 level whose frame size and macroblock rate (ITU-T H.264 Table
+// A-1) hold width x height at fps: 3840x2160 at 60 fps needs 52, 1920x1080 at 59.94 fps 42. 0 beyond level 6.2.
+// The same table as vc_eval's required_h264_level (py/vc_eval/integrity.py).
+int h264LevelIdc(int width, int height, double fps);
+
+// What vc_redact notes on stderr when the source is not 8-bit 4:2:0 (spec 2026-10-20 §3: it is encoded as 8-bit
+// 4:2:0), e.g. "the source video is yuv420p10le (10-bit 4:2:0); the H.264 output is 8-bit 4:2:0"; nullopt for an
+// 8-bit 4:2:0 or unknown format.
+std::optional<std::string> h264FormatNote(AVPixelFormat source);
+
 // Encodes frames and stream-copies audio into an MP4 file.
 //
 // Not thread-safe, and not tied to one thread by construction either: create it, call every method
@@ -85,7 +106,7 @@ class VideoWriter {
   VideoWriter(const VideoWriter&) = delete;
   VideoWriter& operator=(const VideoWriter&) = delete;
 
-  // e.g. "h264_videotoolbox" or "libx264".
+  // e.g. "h264_nvenc", "h264_videotoolbox" or "libx264".
   const std::string& encoderName() const;
   // Encodes one frame whose pts is in config.timeBase. Clears frame.pict_type so the encoder picks
   // frame types itself. Throws VcError, also when the frame is not config.width x config.height

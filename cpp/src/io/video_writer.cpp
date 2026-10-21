@@ -1,5 +1,8 @@
 #include "io/video_writer.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -9,10 +12,37 @@
 #include "common/vc_error.h"
 #include "io/av_ptr.h"
 
+extern "C" {
+#include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
+}
+
 namespace vc {
 namespace {
 
 constexpr int64_t kDefaultBitRate = 8'000'000;
+constexpr int kMacroblockPx = 16;
+// h264_videotoolbox's level option starts at 3.0 (1.3 is Baseline only) and ends at 5.2.
+constexpr int kVideoToolboxMinLevel = 30;
+constexpr int kVideoToolboxMaxLevel = 52;
+
+// ITU-T H.264 Table A-1: level_idc, MaxMBPS (macroblocks per second), MaxFS (macroblocks per frame). Level 1b has
+// the limits of level 1 and is left out.
+struct H264Level {
+  int idc = 0;
+  double maxMacroblocksPerSecond = 0;
+  int64_t maxFrameMacroblocks = 0;
+};
+constexpr std::array<H264Level, 19> kH264Levels = {{
+    {10, 1485, 99},       {11, 3000, 396},       {12, 6000, 396},       {13, 11880, 396},     {20, 11880, 396},
+    {21, 19800, 792},     {22, 20250, 1620},     {30, 40500, 1620},     {31, 108000, 3600},   {32, 216000, 5120},
+    {40, 245760, 8192},   {41, 245760, 8192},    {42, 522240, 8704},    {50, 589824, 22080},  {51, 983040, 36864},
+    {52, 2073600, 36864}, {60, 4177920, 139264}, {61, 8355840, 139264}, {62, 16711680, 139264},
+}};
+
+bool is8Bit420(AVPixelFormat format) {
+  return format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUVJ420P || format == AV_PIX_FMT_NV12;
+}
 
 struct OutputDeleter {
   void operator()(AVFormatContext* p) const {
@@ -22,35 +52,94 @@ struct OutputDeleter {
   }
 };
 
-// `wanted` when the encoder takes it, else yuv420p, else the encoder's first format (libx265 has no NV12).
+// The 8-bit 4:2:0 format the encoder gets: `wanted` when it is one and the encoder takes it, else NV12, else
+// yuv420p; AV_PIX_FMT_NONE when the encoder takes neither.
 AVPixelFormat encoderFormat(const AVCodecContext* ctx, const AVCodec* codec, AVPixelFormat wanted) {
   const void* configs = nullptr;
   int count = 0;
   if (avcodec_get_supported_config(ctx, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, &configs, &count) < 0 ||
       configs == nullptr || count == 0) {
-    return wanted;  // the encoder accepts any format
+    return is8Bit420(wanted) ? wanted : AV_PIX_FMT_YUV420P;  // the encoder accepts any format
   }
   const auto* formats = static_cast<const AVPixelFormat*>(configs);
-  for (int i = 0; i < count; ++i) {
-    if (formats[i] == wanted) return wanted;
-  }
-  for (int i = 0; i < count; ++i) {
-    if (formats[i] == AV_PIX_FMT_YUV420P) return AV_PIX_FMT_YUV420P;
-  }
-  return formats[0];
+  const auto takes = [&](AVPixelFormat f) { return std::find(formats, formats + count, f) != formats + count; };
+  if (is8Bit420(wanted) && takes(wanted)) return wanted;
+  if (takes(AV_PIX_FMT_NV12)) return AV_PIX_FMT_NV12;
+  if (takes(AV_PIX_FMT_YUV420P)) return AV_PIX_FMT_YUV420P;
+  return AV_PIX_FMT_NONE;
 }
 
-std::vector<std::string> encoderCandidates(const WriterConfig& config) {
-  const bool hevc = config.sourceCodec == "hevc";
-  std::vector<std::string> names;
-  if (config.preferHardware) names.emplace_back(hevc ? "hevc_videotoolbox" : "h264_videotoolbox");
-  names.emplace_back(hevc ? "libx265" : "libx264");
-  return names;
+// Encoder-specific options; the reason it cannot be used, or an empty string. h264_videotoolbox picks levels below
+// what the frame rate needs (4.0 for 1080p at 59.94 fps, 5.1 for 4K60), so High profile and the level are set;
+// h264_nvenc gets the preset and the level; libx264 chooses a sufficient level by itself.
+std::string setEncoderOptions(AVCodecContext& ctx, const std::string& name, const WriterConfig& config, int level) {
+  const auto failed = [&](int ret, const char* what) { return std::string(what) + ": " + avErrorText(ret); };
+  if (name == "h264_videotoolbox") {
+    if (const int ret = av_opt_set(ctx.priv_data, "profile", "high", 0); ret < 0) return failed(ret, "profile high");
+    const int vtLevel =
+        std::clamp(level > 0 ? level : kVideoToolboxMaxLevel, kVideoToolboxMinLevel, kVideoToolboxMaxLevel);
+    if (const int ret = av_opt_set_int(ctx.priv_data, "level", vtLevel, 0); ret < 0) return failed(ret, "level");
+  } else if (name == "h264_nvenc") {
+    if (const int ret = av_opt_set(ctx.priv_data, "preset", config.nvencPreset.c_str(), 0); ret < 0) {
+      return failed(ret, "preset");
+    }
+    if (level > 0) {
+      if (const int ret = av_opt_set_int(ctx.priv_data, "level", level, 0); ret < 0) return failed(ret, "level");
+    }
+  }
+  return {};
 }
 
 bool validRatio(AVRational r) { return r.num > 0 && r.den > 0; }
 
 }  // namespace
+
+std::vector<std::string> h264EncoderCandidates(bool preferHardware, Platform platform) {
+  std::vector<std::string> names;
+  if (preferHardware) {
+    if (platform != Platform::MacOS) names.emplace_back("h264_nvenc");
+    if (platform == Platform::MacOS) names.emplace_back("h264_videotoolbox");
+  }
+  names.emplace_back("libx264");
+  return names;
+}
+
+int64_t h264OutputBitRate(bool sourceIsH264, int64_t sourceBitRate, double nonH264Factor) {
+  const int64_t base = sourceBitRate > 0 ? sourceBitRate : kDefaultBitRate;
+  if (sourceIsH264) return base;
+  return std::llround(static_cast<double>(base) * nonH264Factor);
+}
+
+int h264LevelIdc(int width, int height, double fps) {
+  const int64_t frameMacroblocks = static_cast<int64_t>((width + kMacroblockPx - 1) / kMacroblockPx) *
+                                   static_cast<int64_t>((height + kMacroblockPx - 1) / kMacroblockPx);
+  for (const H264Level& level : kH264Levels) {
+    if (frameMacroblocks <= level.maxFrameMacroblocks &&
+        static_cast<double>(frameMacroblocks) * fps <= level.maxMacroblocksPerSecond) {
+      return level.idc;
+    }
+  }
+  return 0;
+}
+
+std::optional<std::string> h264FormatNote(AVPixelFormat source) {
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(source);
+  if (desc == nullptr || is8Bit420(source)) return std::nullopt;
+  std::string layout;
+  if ((desc->flags & AV_PIX_FMT_FLAG_RGB) != 0) {
+    layout = "RGB";
+  } else if (desc->log2_chroma_w == 1 && desc->log2_chroma_h == 1) {
+    layout = "4:2:0";
+  } else if (desc->log2_chroma_w == 1 && desc->log2_chroma_h == 0) {
+    layout = "4:2:2";
+  } else if (desc->log2_chroma_w == 0 && desc->log2_chroma_h == 0) {
+    layout = "4:4:4";
+  } else {
+    layout = "subsampled " + std::to_string(1 << desc->log2_chroma_w) + "x" + std::to_string(1 << desc->log2_chroma_h);
+  }
+  return std::string("the source video is ") + desc->name + " (" + std::to_string(desc->comp[0].depth) + "-bit " +
+         layout + "); the H.264 output is 8-bit 4:2:0";
+}
 
 void copyPresentation(const AVStream& videoStream, WriterConfig& config) {
   const AVCodecParameters& par = *videoStream.codecpar;
@@ -121,8 +210,9 @@ struct VideoWriter::Impl {
 
   void openEncoder() {
     const AVRational rate = config.frameRate.num > 0 && config.frameRate.den > 0 ? config.frameRate : AVRational{30, 1};
+    const int level = h264LevelIdc(config.width, config.height, av_q2d(rate));
     std::vector<std::pair<std::string, std::string>> failed;  // encoder, reason
-    for (const std::string& name : encoderCandidates(config)) {
+    for (const std::string& name : h264EncoderCandidates(config.preferHardware, buildPlatform())) {
       const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
       if (codec == nullptr) {
         failed.emplace_back(name, "not available");
@@ -133,6 +223,10 @@ struct VideoWriter::Impl {
       ctx->width = config.width;
       ctx->height = config.height;
       ctx->pix_fmt = encoderFormat(ctx.get(), codec, config.pixelFormat);
+      if (ctx->pix_fmt == AV_PIX_FMT_NONE) {
+        failed.emplace_back(name, "takes no 8-bit 4:2:0 input");
+        continue;
+      }
       ctx->time_base = config.timeBase;
       ctx->framerate = rate;
       ctx->bit_rate = config.bitRate > 0 ? config.bitRate : kDefaultBitRate;
@@ -144,6 +238,10 @@ struct VideoWriter::Impl {
       ctx->color_primaries = config.colorPrimaries;
       ctx->color_trc = config.colorTrc;
       if ((output->oformat->flags & AVFMT_GLOBALHEADER) != 0) ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+      if (const std::string why = setEncoderOptions(*ctx, name, config, level); !why.empty()) {
+        failed.emplace_back(name, why);
+        continue;
+      }
       const int ret = avcodec_open2(ctx.get(), codec, nullptr);
       if (ret < 0) {
         failed.emplace_back(name, avErrorText(ret));
@@ -191,7 +289,6 @@ VideoWriter::VideoWriter(const WriterConfig& config, const std::vector<AudioStre
   s.videoStream = avformat_new_stream(s.output.get(), nullptr);
   if (s.videoStream == nullptr) throw VcError("avformat_new_stream failed");
   checkAv(avcodec_parameters_from_context(s.videoStream->codecpar, s.encoder.get()), "copy encoder parameters");
-  if (s.encoder->codec_id == AV_CODEC_ID_HEVC) s.videoStream->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
   s.videoStream->time_base = s.encoder->time_base;
   s.videoStream->avg_frame_rate = s.encoder->framerate;
   s.videoStream->sample_aspect_ratio = s.encoder->sample_aspect_ratio;

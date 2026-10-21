@@ -56,7 +56,13 @@ struct RedactStats {
   double detectFpsActual = 0;
   double detectFpsRequested = 0;
   bool detectFpsAboveVideoRate = false;
-  std::string encoder;   // e.g. "h264_videotoolbox", "libx264"
+  std::string encoder;   // e.g. "h264_nvenc", "h264_videotoolbox", "libx264"; the output is always H.264
+  int64_t outputBitRate = 0;  // the encoder's target: h264OutputBitRate of the source (spec 2026-10-20 §3)
+  // Set when the source is not 8-bit 4:2:0 and is converted (h264FormatNote); redactWarnings prints it.
+  std::string formatNote{};
+  // "cpu-frames": frames go through main memory between decode, detection, mosaic and encode (the GPU path of
+  // spec 2026-10-20 §4, "gpu", comes with stage 2b).
+  std::string pipeline = "cpu-frames";
   // "student/CoreML", "student/CPU" or "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
   std::string detector;
   std::vector<std::string> droppedStreams;
@@ -85,8 +91,8 @@ struct RedactStats {
 size_t pipelineQueueCapacity(int width, int height);
 
 // Lines for stderr after a successful run (empty when there is nothing to warn about): a note when detect_fps
-// is above the video's frame rate (so every frame is a keyframe), and a warning for decoder errors, i.e.
-// corrupt packets that were skipped.
+// is above the video's frame rate (so every frame is a keyframe), a note when the source was not 8-bit 4:2:0
+// (formatNote), and a warning for decoder errors, i.e. corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
 
 // The summary printed after a successful run: one "name: value" line each for the output, the frame

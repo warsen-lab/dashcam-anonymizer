@@ -949,6 +949,70 @@ TEST(RedactJob, ReportsDecoderErrorsInTheStatsAndAsAWarning) {
   EXPECT_TRUE(redactWarnings(clean).empty());
 }
 
+// The source video stream's bitrate as the container states it.
+int64_t sourceBitRate(const fs::path& video) {
+  VideoReader reader(video.string(), HwAccel::None);
+  return reader.videoStream()->codecpar->bit_rate;
+}
+
+nlohmann::json statsOf(const RedactStats& s) {
+  std::ifstream statsFile(s.outputDir / "stats.json");
+  return nlohmann::json::parse(statsFile);
+}
+
+// spec 2026-10-20 §3: a 10-bit HEVC source comes out as 8-bit 4:2:0 H.264 at 1.5 times its bitrate, masked like any
+// other, with a note on the conversion.
+TEST(RedactJob, AnHevcSourceComesOutAsH264AtTheFactorsBitrate) {
+  RedactOptions o = baseOptions("redact_hevc");
+  o.input = test::tenBitVideo();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.frames, 30);
+  EXPECT_EQ(s.maskedFrames, 30);  // the fake face box is masked on every frame, as on an H.264 source
+  EXPECT_EQ(s.encoder, "libx264");
+  const test::VideoPresentation out = test::videoPresentation(s.video);
+  EXPECT_EQ(out.codec, AV_CODEC_ID_H264);
+  EXPECT_EQ(out.pixelFormat, AV_PIX_FMT_YUV420P);
+  const int64_t source = sourceBitRate(o.input);
+  ASSERT_GT(source, 0);
+  EXPECT_EQ(s.outputBitRate, std::llround(static_cast<double>(source) * 1.5));
+  const nlohmann::json stats = statsOf(s);
+  EXPECT_EQ(stats.at("output_bit_rate").get<int64_t>(), s.outputBitRate);
+  EXPECT_EQ(stats.at("encoder").get<std::string>(), "libx264");
+  EXPECT_EQ(stats.at("pipeline").get<std::string>(), "cpu-frames");
+  EXPECT_DOUBLE_EQ(stats.at("config").at("output_bitrate_factor_hevc").get<double>(), 1.5);
+  EXPECT_EQ(s.formatNote, "the source video is yuv420p10le (10-bit 4:2:0); the H.264 output is 8-bit 4:2:0");
+  const std::vector<std::string> warnings = redactWarnings(s);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0], "note: " + s.formatNote);
+  EXPECT_EQ(decodeAll(s.video).size(), 30u);
+}
+
+TEST(RedactJob, TheBitrateFactorComesFromTheConfig) {
+  RedactOptions o = baseOptions("redact_hevc_factor");
+  o.input = test::tenBitVideo();
+  o.config.outputBitrateFactorHevc = 2.0;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.outputBitRate, sourceBitRate(o.input) * 2);
+}
+
+// An H.264 source keeps its bitrate and needs no note.
+TEST(RedactJob, AnH264SourceKeepsItsBitrate) {
+  const RedactOptions o = baseOptions("redact_h264_rate");
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.outputBitRate, sourceBitRate(o.input));
+  EXPECT_TRUE(s.formatNote.empty());
+  EXPECT_EQ(test::videoPresentation(s.video).codec, AV_CODEC_ID_H264);
+}
+
+TEST(RedactJob, A422SourceIsEncodedAs420WithANote) {
+  RedactOptions o = baseOptions("redact_422");
+  o.input = test::yuv422Video();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.frames, 30);
+  EXPECT_EQ(test::videoPresentation(s.video).pixelFormat, AV_PIX_FMT_YUV420P);
+  EXPECT_EQ(s.formatNote, "the source video is yuv422p (8-bit 4:2:2); the H.264 output is 8-bit 4:2:0");
+}
+
 // detect, track and mosaic run one after another on the processing thread: together they are the
 // "main" stage, which runs in parallel with decode and encode. setup_s is the time before the first
 // frame reaches it.

@@ -28,7 +28,6 @@ WriterConfig configFor(const VideoReader& reader, const fs::path& output, bool p
   config.height = reader.info().height;
   config.timeBase = stream->time_base;
   config.frameRate = stream->avg_frame_rate;
-  config.sourceCodec = reader.info().codecName;
   config.bitRate = stream->codecpar->bit_rate;
   config.preferHardware = preferHardware;
   copyPresentation(*stream, config);
@@ -179,11 +178,119 @@ TEST(VideoWriter, CountsOnePacketPerFrame) {
   EXPECT_THROW(checkEncodedPackets(60, 61), VcError);
 }
 
-TEST(VideoWriter, KeepsHevcAsHevc) {
-  const fs::path out = test::tmpDir() / "writer_x265.mp4";
-  EXPECT_EQ(reencode(test::tenBitVideo(), out, false), "libx265");
-  EXPECT_EQ(VideoReader(out.string(), HwAccel::None).info().codecName, "hevc");
-  EXPECT_EQ(framePts(out).size(), 30u);
+// spec 2026-10-20 §3: the output is H.264 whatever the source, here a 10-bit HEVC one.
+TEST(VideoWriter, EncodesAnHevcSourceAsH264) {
+  for (const bool hardware : {false, true}) {
+    const fs::path out = test::tmpDir() / "writer_hevc_to_h264.mp4";
+    fs::remove(out);
+    const std::string encoder = reencode(test::tenBitVideo(), out, hardware);
+    EXPECT_TRUE(encoder == "libx264" || (hardware && encoder == "h264_videotoolbox")) << encoder;
+    const test::VideoPresentation got = test::videoPresentation(out);
+    EXPECT_EQ(got.codec, AV_CODEC_ID_H264) << encoder;
+    EXPECT_EQ(got.pixelFormat, AV_PIX_FMT_YUV420P) << encoder;
+    EXPECT_EQ(framePts(out).size(), 30u) << encoder;
+  }
+}
+
+// An 8-bit 4:2:2 source is encoded as 4:2:0 too: libx264 would otherwise write High 4:2:2, which hardware
+// decoders and NVENC do not handle.
+TEST(VideoWriter, Encodes422As420) {
+  ASSERT_EQ(test::videoPresentation(test::yuv422Video()).pixelFormat, AV_PIX_FMT_YUV422P);
+  for (const bool hardware : {false, true}) {
+    const fs::path out = test::tmpDir() / "writer_422.mp4";
+    fs::remove(out);
+    const std::string encoder = reencode(test::yuv422Video(), out, hardware);
+    const test::VideoPresentation got = test::videoPresentation(out);
+    EXPECT_EQ(got.codec, AV_CODEC_ID_H264) << encoder;
+    EXPECT_EQ(got.pixelFormat, AV_PIX_FMT_YUV420P) << encoder;
+    EXPECT_EQ(framePts(out).size(), 30u) << encoder;
+  }
+}
+
+// h264_videotoolbox left alone writes level 4.0 for 1080p at 59.94 fps and 5.1 for 4K60, below what those need
+// (4.2, 5.2); the writer asks every encoder for a sufficient level.
+TEST(VideoWriter, WritesALevelTheFrameSizeAndRateNeed) {
+  struct Case {
+    int width;
+    int height;
+    AVRational rate;
+    int level;
+  };
+  for (const Case& c : {Case{1920, 1080, AVRational{60000, 1001}, 42}, Case{3840, 2160, AVRational{60, 1}, 52}}) {
+    for (const bool hardware : {false, true}) {
+      WriterConfig config;
+      config.path = test::tmpDir() / "writer_level.mp4";
+      fs::remove(config.path);
+      config.width = c.width;
+      config.height = c.height;
+      config.timeBase = AVRational{c.rate.den, c.rate.num};
+      config.frameRate = c.rate;
+      config.bitRate = 20'000'000;
+      config.preferHardware = hardware;
+      std::string encoder;
+      {
+        VideoWriter writer(config, {});
+        encoder = writer.encoderName();
+        for (int i = 0; i < 3; ++i) {
+          av::FramePtr frame = test::makeFrame(c.width, c.height, AV_PIX_FMT_YUV420P, 100, 128, 128);
+          frame->pts = i;
+          writer.writeVideo(*frame);
+        }
+        writer.finish();
+      }
+      const test::VideoPresentation got = test::videoPresentation(config.path);
+      EXPECT_EQ(got.codec, AV_CODEC_ID_H264) << encoder;
+      EXPECT_GE(got.level, c.level) << encoder << " " << c.width << "x" << c.height;
+    }
+  }
+}
+
+TEST(VideoWriter, ListsTheH264EncodersInOrder) {
+  using Names = std::vector<std::string>;
+  EXPECT_EQ(h264EncoderCandidates(true, Platform::Linux), (Names{"h264_nvenc", "libx264"}));
+  EXPECT_EQ(h264EncoderCandidates(true, Platform::MacOS), (Names{"h264_videotoolbox", "libx264"}));
+  EXPECT_EQ(h264EncoderCandidates(true, Platform::Other), (Names{"h264_nvenc", "libx264"}));
+  for (const Platform p : {Platform::Linux, Platform::MacOS, Platform::Other}) {
+    EXPECT_EQ(h264EncoderCandidates(false, p), (Names{"libx264"}));
+  }
+}
+
+// H.264 sources keep their bitrate; others get it times the factor; an unknown one counts as 8 Mb/s.
+TEST(VideoWriter, ChoosesTheOutputBitRate) {
+  EXPECT_EQ(h264OutputBitRate(true, 6'200'390, 1.5), 6'200'390);
+  EXPECT_EQ(h264OutputBitRate(false, 6'200'390, 1.5), 9'300'585);
+  EXPECT_EQ(h264OutputBitRate(false, 1'000'001, 1.5), 1'500'002);  // 1500001.5 rounds away from zero
+  EXPECT_EQ(h264OutputBitRate(false, 20'000'000, 4.0), 80'000'000);
+  EXPECT_EQ(h264OutputBitRate(true, 0, 1.5), 8'000'000);
+  EXPECT_EQ(h264OutputBitRate(false, 0, 1.5), 12'000'000);
+  EXPECT_EQ(h264OutputBitRate(false, -1, 2.0), 16'000'000);
+}
+
+TEST(VideoWriter, KnowsTheH264LevelOfASizeAndRate) {
+  EXPECT_EQ(h264LevelIdc(3840, 2160, 60), 52);
+  EXPECT_EQ(h264LevelIdc(3840, 2160, 60000.0 / 1001), 52);
+  EXPECT_EQ(h264LevelIdc(3840, 2160, 30), 51);
+  EXPECT_EQ(h264LevelIdc(1920, 1080, 60000.0 / 1001), 42);
+  EXPECT_EQ(h264LevelIdc(1920, 1080, 30), 40);
+  EXPECT_EQ(h264LevelIdc(1280, 720, 60), 32);
+  EXPECT_EQ(h264LevelIdc(1280, 720, 30), 31);
+  EXPECT_EQ(h264LevelIdc(160, 120, 30), 11);
+  EXPECT_EQ(h264LevelIdc(7680, 4320, 60), 61);
+  EXPECT_EQ(h264LevelIdc(7680, 4320, 120), 62);
+  EXPECT_EQ(h264LevelIdc(7680, 4320, 240), 0);
+}
+
+TEST(VideoWriter, NotesSourcesThatAreNot8Bit420) {
+  EXPECT_FALSE(h264FormatNote(AV_PIX_FMT_YUV420P).has_value());
+  EXPECT_FALSE(h264FormatNote(AV_PIX_FMT_YUVJ420P).has_value());
+  EXPECT_FALSE(h264FormatNote(AV_PIX_FMT_NV12).has_value());
+  EXPECT_FALSE(h264FormatNote(AV_PIX_FMT_NONE).has_value());
+  EXPECT_EQ(h264FormatNote(AV_PIX_FMT_YUV420P10LE),
+            "the source video is yuv420p10le (10-bit 4:2:0); the H.264 output is 8-bit 4:2:0");
+  EXPECT_EQ(h264FormatNote(AV_PIX_FMT_YUV422P), "the source video is yuv422p (8-bit 4:2:2); the H.264 output is 8-bit 4:2:0");
+  EXPECT_EQ(h264FormatNote(AV_PIX_FMT_YUV422P10LE),
+            "the source video is yuv422p10le (10-bit 4:2:2); the H.264 output is 8-bit 4:2:0");
+  EXPECT_EQ(h264FormatNote(AV_PIX_FMT_YUV444P), "the source video is yuv444p (8-bit 4:4:4); the H.264 output is 8-bit 4:2:0");
 }
 
 TEST(VideoWriter, CopiesAudio) {
@@ -225,12 +332,6 @@ TEST(VideoWriter, CopiesEveryAudioPacketWithTheSourceCodec) {
   const int expected = test::streamTiming(test::videoWithAudio(), AVMEDIA_TYPE_AUDIO).packets;
   EXPECT_GT(expected, 80);
   EXPECT_EQ(test::streamTiming(out, AVMEDIA_TYPE_AUDIO).packets, expected);
-}
-
-TEST(VideoWriter, TagsHevcAsHvc1) {
-  const fs::path out = test::tmpDir() / "writer_hvc1.mp4";
-  EXPECT_EQ(reencode(test::tenBitVideo(), out, false), "libx265");
-  EXPECT_EQ(test::videoPresentation(out).codecTag, static_cast<uint32_t>(MKTAG('h', 'v', 'c', '1')));
 }
 
 TEST(VideoWriter, KeepsTheSampleAspectRatio) {
@@ -412,15 +513,14 @@ TEST(VideoWriter, KeepsTheRangeOfFramesItConverts) {
   config.path = test::tmpDir() / "writer_full_range.mp4";
   config.width = 128;
   config.height = 128;
-  config.pixelFormat = AV_PIX_FMT_NV12;  // libx265 takes no NV12: converted to yuv420p
-  config.sourceCodec = "hevc";
+  config.pixelFormat = AV_PIX_FMT_YUV422P;  // 4:2:2: converted to 4:2:0 for the encoder
   config.colorRange = AVCOL_RANGE_JPEG;
   config.preferHardware = false;
   fs::remove(config.path);
   {
     VideoWriter writer(config, {});
     for (int i = 0; i < 4; ++i) {
-      av::FramePtr frame = test::makeFrame(128, 128, AV_PIX_FMT_NV12, 235, 128, 128);
+      av::FramePtr frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV422P, 235, 128, 128);
       frame->color_range = AVCOL_RANGE_JPEG;
       frame->pts = i * 33;
       writer.writeVideo(*frame);
