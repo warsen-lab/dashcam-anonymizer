@@ -98,7 +98,9 @@ def _judge(args) -> int:
     frame, teacher, llm = _judges(args)
     if llm is not None:
         print(f"judge: the LLM judge may send up to {len(cands)} crops to {llm.name}", file=sys.stderr)
-    counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm, args.rejudge)
+    llm_cfg = load_config(args.config).llm
+    counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm, args.rejudge,
+                        llm_cfg.ask_on, llm_cfg.parallel)
     print("judge: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "nothing left to judge"))
     return 0
 
@@ -134,7 +136,9 @@ def _pilot(args) -> int:
     frame, teacher, llm = _judges(args)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "pilot_ids.txt").write_text("".join(f"{c.id}\n" for c in cands))
-    counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm)
+    llm_cfg = load_config(args.config).llm
+    counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm,
+                        ask_on=llm_cfg.ask_on, llm_parallel=llm_cfg.parallel)
     page = write_review_page(cands, args.candidates.parent, args.out, _by_id(read_judgments(args.judgments)), "试判 100 张")
     print(f"pilot: {len(cands)} crops; " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + f"; review {page}")
     return 0

@@ -9,7 +9,7 @@ from pathlib import Path
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "hardneg.json"  # the repository's, wherever this runs
 _KEYS = {
     "crop_factor", "min_crop_px", "pad_value", "per_track", "frame_teacher_yes", "frame_teacher_iou", "upscale",
-    "yes_iou", "overlap_iou", "plate", "face", "llm",
+    "yes_iou", "overlap_iou", "contain_frac", "tiny_px", "plate", "face", "llm",
 }
 
 
@@ -26,6 +26,9 @@ class LlmConfig:
     command: tuple[str, ...]  # argv; {image}, {cls}, {cls_zh} and {prompt} are filled in; empty: no LLM judge
     timeout_s: float
     prompt: str
+    ask_on: tuple[str, ...] = ("no", "unsure")  # the model verdicts the LLM is asked about
+    parallel: int = 1  # LLM calls at once
+    image_side: int = 384  # the crop it sees is enlarged to about this, the box drawn in red
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,8 @@ class HardnegConfig:
     upscale: float
     yes_iou: float
     overlap_iou: float
+    contain_frac: float  # a teacher box this much inside the candidate counts as at it (a mask over a whole bumper)
+    tiny_px: float  # a candidate whose long side is below this (frame px) is never judged "no"
     plate: ClassThresholds
     face: ClassThresholds
     llm: LlmConfig
@@ -78,10 +83,16 @@ def load_config(path: Path = DEFAULT_CONFIG) -> HardnegConfig:
         upscale=float(d["upscale"]),
         yes_iou=_unit("yes_iou", d["yes_iou"]),
         overlap_iou=_unit("overlap_iou", d["overlap_iou"]),
+        contain_frac=_unit("contain_frac", d["contain_frac"]),
+        tiny_px=float(d["tiny_px"]),
         plate=_class("plate", d["plate"]),
         face=_class("face", d["face"]),
-        llm=LlmConfig(str(llm["name"]), tuple(str(a) for a in llm["command"]), float(llm["timeout_s"]), str(llm["prompt"])),
+        llm=LlmConfig(str(llm["name"]), tuple(str(a) for a in llm["command"]), float(llm["timeout_s"]), str(llm["prompt"]),
+                      tuple(str(v) for v in llm.get("ask_on", ("no", "unsure"))), int(llm.get("parallel", 1)),
+                      int(llm.get("image_side", 384))),
     )
+    if not set(cfg.llm.ask_on) <= {"no", "unsure"} or cfg.llm.parallel < 1 or cfg.llm.image_side < 64 or cfg.tiny_px < 0:
+        raise ValueError(f"{path}: llm.ask_on within [no, unsure], llm.parallel >= 1, llm.image_side >= 64, tiny_px >= 0")
     if cfg.crop_factor <= 0 or cfg.min_crop_px < 0 or not 0 <= cfg.pad_value <= 255 or cfg.per_track < 1 or cfg.upscale < 1:
         raise ValueError(f"{path}: crop_factor > 0, min_crop_px >= 0, pad_value in [0, 255], per_track >= 1, upscale >= 1")
     return cfg

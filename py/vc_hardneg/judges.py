@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import numpy as np
 from vc_hardneg.candidates import Candidate, box_in_crop
 from vc_hardneg.config import HardnegConfig, LlmConfig
 from vc_hardneg.judgments import HUMAN, Judgment, append_judgments, read_judgments, resolve
-from vc_label.boxes import iou
+from vc_label.boxes import intersection_area, iou
 from vc_label.contracts import Box
 
 LLM_ENV = "VC_HARDNEG_ALLOW_LLM"
@@ -25,15 +26,22 @@ CLS_ZH = {"plate": "车牌", "face": "人脸"}
 Detect = Callable[[np.ndarray], list[Box]]
 
 
-def verdict_from_boxes(target: Box, found: list[Box], cfg: HardnegConfig) -> tuple[str, float]:
-    """"yes" when a box at the target (IoU >= yes_iou) reaches yes_score, "no" when no box overlapping it
-    (IoU >= overlap_iou) reaches no_score, else "unsure"; and the best overlapping score."""
+def verdict_from_boxes(target: Box, found: list[Box], cfg: HardnegConfig, scale: float = 1.0) -> tuple[str, float]:
+    """"yes" when a box at the target reaches yes_score, "no" when no box overlapping it reaches no_score, else
+    "unsure"; and the best overlapping score. A box is at the target with IoU >= yes_iou, overlaps it with IoU >=
+    overlap_iou, and is both when at least contain_frac of it lies inside the target (the target masks it). A
+    target whose long side is below tiny_px frame pixels (`scale`: its upscaling) is never "no": the teachers
+    cannot tell (the 2026-10-21 pilot)."""
     t = cfg.thresholds(target.cls)
-    overlapping = [b for b in found if iou(b, target) >= cfg.overlap_iou]
+
+    def inside(b: Box) -> bool:
+        return b.area > 0 and intersection_area(b, target) / b.area >= cfg.contain_frac
+
+    overlapping = [b for b in found if iou(b, target) >= cfg.overlap_iou or inside(b)]
     best = max((b.score for b in overlapping), default=0.0)
-    if any(iou(b, target) >= cfg.yes_iou and b.score >= t.yes_score for b in found):
+    if any((iou(b, target) >= cfg.yes_iou or inside(b)) and b.score >= t.yes_score for b in found):
         return "yes", best
-    if best < t.no_score:
+    if best < t.no_score and max(target.width, target.height) / scale >= cfg.tiny_px:
         return "no", best
     return "unsure", best
 
@@ -65,7 +73,7 @@ class TeacherJudge:
         b = box_in_crop(c, self.cfg)
         target = Box(c.cls, b.x1 * scale, b.y1 * scale, b.x2 * scale, b.y2 * scale)
         found = [f for f in self.detect[c.cls](img) if f.cls == c.cls]
-        verdict, best = verdict_from_boxes(target, found, self.cfg)
+        verdict, best = verdict_from_boxes(target, found, self.cfg, scale)
         return Judgment(c.id, verdict, self.name, best, f"x{scale:.2f}, {len(found)} boxes")
 
 
@@ -104,8 +112,24 @@ class CommandJudge:
         self.cfg = cfg
         self.name = f"llm:{cfg.name}"
 
+    def _shown(self, c: Candidate, image_path: Path) -> Path:
+        """The crop enlarged to about image_side with the box drawn in red, written to <crop dir>/llm/<id>.png."""
+        crop = cv2.imread(str(image_path))
+        if crop is None:
+            raise FileNotFoundError(f"{image_path} cannot be read")
+        s = max(1.0, self.cfg.image_side / max(crop.shape[:2]))
+        img = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+        ox, oy = c.crop_origin
+        x1, y1, x2, y2 = c.box
+        cv2.rectangle(img, (round((x1 - ox) * s), round((y1 - oy) * s)), (round((x2 - ox) * s), round((y2 - oy) * s)),
+                      (0, 0, 255), 2)
+        out = image_path.parent / "llm" / f"{c.id}.png"
+        out.parent.mkdir(exist_ok=True)
+        cv2.imwrite(str(out), img)
+        return out
+
     def judge(self, c: Candidate, image_path: Path) -> Judgment:
-        fields = {"{image}": str(image_path), "{cls}": c.cls, "{cls_zh}": CLS_ZH[c.cls]}
+        fields = {"{image}": str(self._shown(c, image_path)), "{cls}": c.cls, "{cls_zh}": CLS_ZH[c.cls]}
         fields["{prompt}"] = _fill(self.cfg.prompt, fields)
         argv = [_fill(a, fields) for a in self.cfg.command]
         try:
@@ -126,11 +150,15 @@ class CommandJudge:
 
 
 def run_judges(cands: list[Candidate], judgments_path: Path, crops_root: Path, frame_judge: FrameTeacherJudge,
-               teacher_judge: TeacherJudge, llm_judge=None, rejudge: bool = False) -> Counter:
-    """Judges every candidate without a judgment yet (with rejudge every one people did not judge); appends each
-    verdict as it comes, so an interrupted run keeps what it did. Returns counts of "<judge>:<verdict>"."""
+               teacher_judge: TeacherJudge, llm_judge=None, rejudge: bool = False,
+               ask_on: tuple[str, ...] = ("no", "unsure"), llm_parallel: int = 1) -> Counter:
+    """Judges every candidate without a judgment yet (with rejudge every one people did not judge): the frame
+    teacher, else the teacher; then the LLM, llm_parallel calls at once, about those the models judged one of
+    `ask_on` (its verdict, appended last, is the final word). Appends each verdict as it comes, so an interrupted
+    run keeps what it did. Returns counts of "<judge>:<verdict>"."""
     done = resolve(read_judgments(judgments_path))
     counts: Counter = Counter()
+    ask: list[Candidate] = []
     for c in cands:
         prior = done.get(c.id)
         if prior is not None and (not rejudge or prior.judge == HUMAN):
@@ -143,8 +171,11 @@ def run_judges(cands: list[Candidate], judgments_path: Path, crops_root: Path, f
             j = teacher_judge.judge(c, crop)
         append_judgments(judgments_path, [j])
         counts[f"{j.judge}:{j.verdict}"] += 1
-        if j.verdict == "unsure" and llm_judge is not None:
-            k = llm_judge.judge(c, crops_root / c.image)
-            append_judgments(judgments_path, [k])
-            counts[f"{k.judge}:{k.verdict}"] += 1
+        if j.verdict in ask_on and llm_judge is not None:
+            ask.append(c)
+    if ask:
+        with ThreadPoolExecutor(max_workers=llm_parallel) as pool:
+            for k in pool.map(lambda c: llm_judge.judge(c, crops_root / c.image), ask):
+                append_judgments(judgments_path, [k])
+                counts[f"{k.judge}:{k.verdict}"] += 1
     return counts

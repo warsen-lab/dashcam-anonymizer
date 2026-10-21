@@ -8,12 +8,18 @@
   "upscale": 4,
   "yes_iou": 0.3,
   "overlap_iou": 0.1,
+  "contain_frac": 0.5,
+  "tiny_px": 16,
   "plate": {"yes_score": 0.3, "no_score": 0.1, "max_side": 960},
   "face": {"yes_score": 0.7, "no_score": 0.3, "max_side": 640},
   "llm": {
     "name": "codex",
-    "command": [],
-    "timeout_s": 120,
+    "command": ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-c",
+                "model_reasoning_effort=\"low\"", "--image={image}", "{prompt}"],
+    "timeout_s": 180,
+    "ask_on": ["no", "unsure"],
+    "parallel": 4,
+    "image_side": 384,
     "prompt": "这张小图来自行车记录仪画面，红框里的东西是不是一块{cls_zh}？只回答一个 JSON：{\"verdict\": \"yes\" | \"no\" | \"unsure\", \"reason\": \"一句话\"}。看不清就答 unsure。"
   }
 }
