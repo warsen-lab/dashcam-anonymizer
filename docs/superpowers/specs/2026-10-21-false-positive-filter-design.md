@@ -69,6 +69,10 @@
 - **小图**：以框为中心的正方形，边长取框长边的 2.5 倍、不小于 32 px，超出画面的部分用灰色（114）填充。以原分辨率存 PNG。
 - **清单**：`candidates.jsonl`，每张一行，字段 `id`（段 + 帧 + 轨迹 + 类别的稳定散列）、`video`、`frame`、`cls`、`box`（整帧坐标）、`crop_box`（小图在整帧中的位置）、`score`、`src`、`track`、`image`（相对路径）、`frame_teacher`（整帧老师对照：与该框 IoU ≥ 0.3 的同类老师框的最高分，没有则为 0）。
 
+- **补充（写实施计划时细化）**：
+  - 复核模型的训练小图由 `vc_redact --dump-verify-crops` 直接转储（`verify_crops.bin` + `verify_crops.jsonl`，即运行时的 64×64 RGB 输入），保证训练与运行时像素一致；`candidates.jsonl` 因此多记 `dump_dir`、`dump_index`、`crop_origin`。
+  - 只在有老师标注的帧上挖候选，转储取每 48 帧一次（`--dump-verify-every 48`）。原分辨率小图只用于判定和人工复核。
+
 ### 3.3 判定：`vc_hardneg judge`
 
 **接口**：输入一张候选（小图 + 框在小图中的位置 + 类别），输出一条 `judgment`。
