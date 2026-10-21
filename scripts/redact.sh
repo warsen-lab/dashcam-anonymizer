@@ -3,7 +3,9 @@
 #
 # Every video goes to <output dir>/<video stem>/ (see `vc_redact --help`). A directory argument takes the
 # .mp4 / .mov / .mkv files directly inside it. A failed video is reported and the rest still run; the exit
-# code is 1 when any video failed.
+# code is 1 when any video failed. A video whose stem an earlier one already has would share its output
+# directory: it is refused (exit 3) without running. <output dir>/batch.json lists every video's result
+# and the batch throughput (spec 2026-10-20 §5).
 #
 # Environment overrides:
 #   VC_REDACT       vc_redact binary              (default build/cpp-release/vc_redact)
@@ -11,6 +13,11 @@
 #   VC_FACE_MODEL   YuNet face model directory    (default data/models/yunet; empty = student only)
 #   VC_DETECT_FPS   detections per second, 5 to 60 (default: detect_fps of configs/redact.json, 10)
 #   VC_REDACT_ARGS  extra vc_redact options, e.g. "--hwaccel videotoolbox" or "--overwrite"
+#   VC_GPUS         GPUs to use, e.g. "0,1": videos go to them in turn, each vc_redact runs with
+#                   CUDA_VISIBLE_DEVICES set to its GPU (default: none; CUDA_VISIBLE_DEVICES is left alone)
+#   VC_JOBS         vc_redact processes at once per GPU of VC_GPUS, or in all without VC_GPUS
+#                   (default 4 per GPU, 1 without VC_GPUS); 1 to 64
+#   VC_PYTHON       python3 that writes batch.json (default python3)
 #   VC_SANDBOX      1 (default on macOS): run inside sandbox-exec with outbound network denied
 set -euo pipefail
 
@@ -19,8 +26,12 @@ BIN="${VC_REDACT:-$ROOT/build/cpp-release/vc_redact}"
 MODEL="${VC_MODEL:-$ROOT/data/models/r3}"
 FACE="${VC_FACE_MODEL-$ROOT/data/models/yunet}"
 DETECT_FPS="${VC_DETECT_FPS:-}"
+GPUS_TEXT="${VC_GPUS:-}"
+PYTHON="${VC_PYTHON:-python3}"
 read -r -a EXTRA <<< "${VC_REDACT_ARGS:-}"
 SANDBOX_PROFILE='(version 1)(allow default)(deny network-outbound (remote ip "*:*"))'
+MAX_JOBS=64
+POLL_SECONDS=0.2
 
 usage() { echo "usage: $0 <output dir> <video or directory>..." >&2; exit 2; }
 fail() { echo "redact.sh: $*" >&2; exit 2; }
@@ -31,6 +42,22 @@ out="$1"; shift
 for dir in "$MODEL" ${FACE:+"$FACE"}; do
   [ -s "$dir/model.onnx" ] && [ -s "$dir/model.json" ] || fail "$dir has no model.onnx + model.json"
 done
+
+gpus=()
+if [ -n "$GPUS_TEXT" ]; then
+  IFS=',' read -r -a gpus <<< "$GPUS_TEXT"
+  for gpu in ${gpus[@]+"${gpus[@]}"}; do
+    [[ "$gpu" =~ ^[A-Za-z0-9-]+$ ]] || fail "VC_GPUS must list GPU indices or UUIDs separated by commas, got '$GPUS_TEXT'"
+  done
+fi
+n_gpus=${#gpus[@]}
+if [ "$n_gpus" -gt 0 ]; then default_jobs=4; else default_jobs=1; fi
+JOBS="${VC_JOBS:-$default_jobs}"
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || [ "$JOBS" -gt "$MAX_JOBS" ]; then
+  fail "VC_JOBS must be an integer in [1, $MAX_JOBS], got '$JOBS'"
+fi
+if [ "$n_gpus" -gt 0 ]; then total_slots=$((JOBS * n_gpus)); else total_slots=$JOBS; fi
+command -v "$PYTHON" > /dev/null || fail "$PYTHON is needed to write batch.json (set VC_PYTHON)"
 
 videos=()
 for arg in "$@"; do
@@ -44,6 +71,11 @@ for arg in "$@"; do
   fi
 done
 [ ${#videos[@]} -gt 0 ] || fail "no .mp4 / .mov / .mkv files found"
+for video in "${videos[@]}"; do
+  case "$video" in
+    *$'\t'* | *$'\n'*) fail "a video path holds a tab or a newline: $video" ;;
+  esac
+done
 
 runner=()
 if [ "${VC_SANDBOX:-1}" = 1 ] && command -v sandbox-exec > /dev/null; then
@@ -51,22 +83,124 @@ if [ "${VC_SANDBOX:-1}" = 1 ] && command -v sandbox-exec > /dev/null; then
 fi
 
 mkdir -p "$out"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/redact.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+started="$("$PYTHON" -c 'import time; print(f"{time.time():.3f}")')"
+: > "$tmp/results.tsv"
+
 failed=()
-for video in "${videos[@]}"; do
-  echo "=== $(date +%T) $video"
-  args=(--input "$video" --out "$out" --model "$MODEL")
-  [ -n "$FACE" ] && args+=(--face-model "$FACE")
-  [ -n "$DETECT_FPS" ] && args+=(--detect-fps "$DETECT_FPS")
-  if ${runner[@]+"${runner[@]}"} "$BIN" "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"}; then
-    :
-  else
-    status=$?
-    echo "=== FAILED (exit $status): $video" >&2
-    failed+=("$video")
+pids=()      # by job number, while the job runs
+job_video=()
+job_gpu=()   # the GPU (as listed in VC_GPUS), empty without VC_GPUS
+job_slot=()  # index into gpus, -1 without VC_GPUS
+on_gpu=()    # jobs running per index into gpus
+for ((g = 0; g < n_gpus; g++)); do on_gpu[g]=0; done
+running=0
+next_gpu=0
+
+# One line per video for batch.json: input position, exit status, GPU, path.
+record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp/results.tsv"; }
+
+# Starts vc_redact on `video` in the background; with more than one at once its output goes to a log
+# that is printed when it ends, so that the runs do not interleave.
+launch() {
+  local job=$1 video=$2 gpu=$3
+  local args=(--input "$video" --out "$out" --model "$MODEL")
+  if [ -n "$FACE" ]; then args+=(--face-model "$FACE"); fi
+  if [ -n "$DETECT_FPS" ]; then args+=(--detect-fps "$DETECT_FPS"); fi
+  echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
+  (
+    if [ -n "$gpu" ]; then export CUDA_VISIBLE_DEVICES="$gpu"; fi
+    if [ "$total_slots" -gt 1 ]; then exec > "$tmp/$job.log" 2>&1; fi
+    if ${runner[@]+"${runner[@]}"} "$BIN" "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"}; then status=0; else status=$?; fi
+    echo "$status" > "$tmp/$job.status.partial"
+    mv "$tmp/$job.status.partial" "$tmp/$job.status"
+  ) &
+  pids[job]=$!
+}
+
+# Collects one finished job: prints its log, records its status and frees its slot.
+finish() {
+  local job=$1 status
+  status="$(cat "$tmp/$job.status")"
+  wait "${pids[job]}" || true
+  unset 'pids[job]'
+  if [ "$total_slots" -gt 1 ]; then cat "$tmp/$job.log"; fi
+  if [ "$status" != 0 ]; then
+    echo "=== FAILED (exit $status): ${job_video[job]}" >&2
+    failed+=("${job_video[job]}")
   fi
+  record "$job" "$status" "${job_gpu[job]}" "${job_video[job]}"
+  running=$((running - 1))
+  if [ "${job_slot[job]}" -ge 0 ]; then on_gpu[job_slot[job]]=$((on_gpu[job_slot[job]] - 1)); fi
+}
+
+# Waits until a running job ends and collects it.
+reap_one() {
+  local job
+  while :; do
+    for job in "${!pids[@]}"; do
+      if [ -f "$tmp/$job.status" ]; then
+        finish "$job"
+        return
+      fi
+    done
+    sleep "$POLL_SECONDS"
+  done
+}
+
+# The index of the next GPU in turn with a free slot (there is one whenever fewer than total_slots run).
+free_gpu() {
+  local k g
+  for ((k = 0; k < n_gpus; k++)); do
+    g=$(((next_gpu + k) % n_gpus))
+    if [ "${on_gpu[g]}" -lt "$JOBS" ]; then
+      echo "$g"
+      return 0
+    fi
+  done
+  return 1
+}
+
+seen=()
+for ((job = 0; job < ${#videos[@]}; job++)); do
+  video="${videos[job]}"
+  stem="$(basename "$video")"
+  stem="${stem%.*}"
+  duplicate=0
+  for s in ${seen[@]+"${seen[@]}"}; do
+    if [ "$s" = "$stem" ]; then duplicate=1; fi
+  done
+  if [ "$duplicate" = 1 ]; then
+    echo "=== FAILED (exit 3): $video (an earlier video already writes $out/$stem)" >&2
+    failed+=("$video")
+    record "$job" 3 "" "$video"
+    continue
+  fi
+  seen+=("$stem")
+  while [ "$running" -ge "$total_slots" ]; do reap_one; done
+  gpu=""
+  slot=-1
+  if [ "$n_gpus" -gt 0 ]; then
+    slot="$(free_gpu)"
+    gpu="${gpus[slot]}"
+    on_gpu[slot]=$((on_gpu[slot] + 1))
+    next_gpu=$(((slot + 1) % n_gpus))
+  fi
+  job_video[job]="$video"
+  job_gpu[job]="$gpu"
+  job_slot[job]=$slot
+  launch "$job" "$video" "$gpu"
+  running=$((running + 1))
 done
+while [ "$running" -gt 0 ]; do reap_one; done
 
 echo "=== $(date +%T) done: $(( ${#videos[@]} - ${#failed[@]} )) of ${#videos[@]} redacted into $out"
+if ! "$PYTHON" -I "$ROOT/scripts/batch_json.py" --out "$out" --results "$tmp/results.tsv" --started "$started" \
+    --jobs "$JOBS" --gpus "$GPUS_TEXT"; then
+  echo "redact.sh: could not write $out/batch.json" >&2
+  exit 1
+fi
 if [ ${#failed[@]} -gt 0 ]; then
   printf '    failed: %s\n' "${failed[@]}" >&2
   exit 1

@@ -45,11 +45,15 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 ```
 
 - 某个视频失败时，其余照常处理，最后列出失败的文件，脚本退出码为 1。
-- 同名视频（不同目录下的 `A.mp4`）会写到同一个输出目录。第二个会被拒绝（退出码 3），请分开输出目录。
+- 同名视频（不同目录下的 `A.mp4`）会写到同一个输出目录。第二个不运行、直接记为失败（退出码 3），请分开输出目录。
 - 环境变量：
   - `VC_MODEL`、`VC_FACE_MODEL`：换模型；`VC_FACE_MODEL=` 设为空表示只用学生模型；
   - `VC_DETECT_FPS=15`：检测频率（5–60，默认用 `configs/redact.json` 的 10）；
+  - `VC_JOBS=2`：同时跑几个 `vc_redact`（1–64，默认 1；设了 `VC_GPUS` 时是每块卡几个，默认 4）。同时不止一个时，每个视频的输出在它跑完后整段打印，不会交错；
+  - `VC_GPUS=0,1`：用哪几块 NVIDIA 卡（Linux），视频按顺序轮流分到各卡，每个 `vc_redact` 只看到自己那块（`CUDA_VISIBLE_DEVICES`）；不设时 `CUDA_VISIBLE_DEVICES` 保持原样；
+  - `VC_PYTHON`：写 `batch.json` 用的 python3（默认 `python3`，只用标准库）；
   - `VC_SANDBOX=0`：不套沙箱。
+- 跑完后输出目录下有 `batch.json`（每次覆盖上一次的）：每个视频的 `exit_status`、`gpu`，成功的还有 `frames`、`elapsed_s`、`fps`、`detector`、`encoder`、`pipeline`（取自它的 `stats.json`，失败的为 null）；整批的 `wall_s`（墙钟秒数）、`frames`、`throughput_fps`（成功视频的总帧数 ÷ 整批墙钟时间）、`processes_at_once`。最后一行 `=== throughput: …` 打印同样的合计。
 
 ### 输出
 
