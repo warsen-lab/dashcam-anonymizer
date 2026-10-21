@@ -31,6 +31,7 @@ add_executable(vc_tests
   video_reader_test.cpp
   verifier_crop_test.cpp
   verifier_test.cpp
+  verify_dump_test.cpp
   verify_policy_test.cpp
   video_writer_test.cpp
   yolo_decode_test.cpp

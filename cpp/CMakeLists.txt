@@ -88,6 +88,7 @@ add_library(vc_redact_lib STATIC
   apps/vc_redact/redact_cli.cpp
   apps/vc_redact/redact_config.cpp
   apps/vc_redact/redact_job.cpp
+  apps/vc_redact/verify_dump.cpp
   apps/vc_redact/verify_policy.cpp
 )
 target_include_directories(vc_redact_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
