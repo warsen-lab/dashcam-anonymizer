@@ -19,6 +19,7 @@ from vc_label.contracts import Box, read_jsonl
 
 CANDIDATES = "candidates.jsonl"
 CROPS_DIR = "crops"
+LOW_BANDS = {"plate": (0.1, 0.3), "face": (0.3, 0.5)}  # configs/labeling.json plate_low_score / face_low_score
 EXCLUDED_IOU = 0.3  # a teacher box overlapping an excluded_refs.csv row this much is a known teacher false positive
 
 
@@ -137,6 +138,28 @@ def _frame_teacher(cls: str, box: Box, teacher: list[Box], excluded: list[Box], 
     return max((t.score for t in real if iou(t, box) >= min_iou), default=0.0)
 
 
+def write_crops(cands: list[Candidate], frames_root: Path, out_dir: Path, cfg: HardnegConfig) -> list[Candidate]:
+    """Each candidate's native-resolution crop to out_dir/crops/<id>.png; the candidates with image and crop_origin
+    filled in, ordered by stem, frame and id."""
+    (out_dir / CROPS_DIR).mkdir(parents=True, exist_ok=True)
+    final: list[Candidate] = []
+    images: dict[tuple[str, int], np.ndarray] = {}
+    for c in sorted(cands, key=lambda c: (c.stem, c.frame, c.id)):
+        key = (c.stem, c.frame)
+        if key not in images:
+            images.clear()  # candidates come frame by frame: keep one image
+            path = frames_root / c.stem / f"{c.frame:06d}.jpg"
+            image = cv2.imread(str(path))
+            if image is None:
+                raise FileNotFoundError(f"{path} cannot be read")
+            images[key] = image
+        crop, origin = native_crop(images[key], crop_window(c.box, cfg.crop_factor, cfg.min_crop_px), cfg.pad_value)
+        rel = f"{CROPS_DIR}/{c.id}.png"
+        cv2.imwrite(str(out_dir / rel), crop)
+        final.append(replace(c, image=rel, crop_origin=origin))
+    return final
+
+
 def mine(runs: list[Path], labels_root: Path, frames_root: Path, out_dir: Path, cfg: HardnegConfig) -> MineSummary:
     """Candidates from vc_redact runs made with --dump-verify-crops (each run dir named after its stem)."""
     found: list[Candidate] = []
@@ -177,16 +200,34 @@ def mine(runs: list[Path], labels_root: Path, frames_root: Path, out_dir: Path, 
     for c in found:
         by_track[(c.stem, c.track, c.cls)].append(c)
     picked = [c for key in sorted(by_track) for c in _spread(sorted(by_track[key], key=lambda c: c.frame), cfg.per_track)]
-    (out_dir / CROPS_DIR).mkdir(parents=True, exist_ok=True)
-    final: list[Candidate] = []
-    for c in sorted(picked, key=lambda c: (c.stem, c.frame, c.id)):
-        path = frames_root / c.stem / f"{c.frame:06d}.jpg"
-        image = cv2.imread(str(path))
-        if image is None:
-            raise FileNotFoundError(f"{path} cannot be read")
-        crop, origin = native_crop(image, crop_window(c.box, cfg.crop_factor, cfg.min_crop_px), cfg.pad_value)
-        rel = f"{CROPS_DIR}/{c.id}.png"
-        cv2.imwrite(str(out_dir / rel), crop)
-        final.append(replace(c, image=rel, crop_origin=origin))
+    final = write_crops(picked, frames_root, out_dir, cfg)
+    write_candidates(out_dir / CANDIDATES, final)
+    return MineSummary(rows=rows_read, masked=len(found), candidates=len(final))
+
+
+def mine_labels(stems: list[str], labels_root: Path, frames_root: Path, out_dir: Path, cfg: HardnegConfig,
+                bands: dict[str, tuple[float, float]] = LOW_BANDS) -> MineSummary:
+    """The teachers' own boxes in a score band, as candidates (spec 2026-10-21 §5.1): judging them cleans the labels
+    the student learns from. Only boxes on processed frames whose image is there."""
+    found: list[Candidate] = []
+    rows_read = 0
+    for stem in stems:
+        labels = labels_root / stem
+        processed = {int(v) for v in (labels / "processed.txt").read_text().split()}
+        for d in read_jsonl(labels / "merged.jsonl"):
+            rows_read += 1
+            b = d.box
+            lo, hi = bands.get(b.cls, (1.0, 0.0))
+            if d.frame not in processed or not lo <= b.score < hi:
+                continue
+            if not (frames_root / stem / f"{d.frame:06d}.jpg").is_file():
+                continue
+            coords = (b.x1, b.y1, b.x2, b.y2)
+            found.append(Candidate(
+                id=candidate_id(d.video, d.frame, b.cls, coords), video=d.video, stem=stem, frame=d.frame, cls=b.cls,
+                box=coords, score=b.score, src=b.src, track=-1, dump_dir="", dump_index=-1, frame_teacher=0.0,
+                image="", crop_origin=(0, 0),
+            ))
+    final = write_crops(found, frames_root, out_dir, cfg)
     write_candidates(out_dir / CANDIDATES, final)
     return MineSummary(rows=rows_read, masked=len(found), candidates=len(final))

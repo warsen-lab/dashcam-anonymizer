@@ -85,3 +85,30 @@ def test_mine_keeps_masked_boxes_on_labelled_frames_at_most_per_track(tmp_path):
         assert (out / c.image).is_file()
         b = box_in_crop(c, CFG)
         assert b.x1 == pytest.approx(40 - c.crop_origin[0]) and b.y1 == pytest.approx(40 - c.crop_origin[1])
+
+
+def test_mine_labels_takes_the_low_band_teacher_boxes_on_processed_frames(tmp_path):
+    from vc_hardneg.candidates import LOW_BANDS, mine_labels
+
+    def t(frame, cls, box, score, src="teacher_owlv2"):
+        return {"video": "s.mp4", "frame": frame, "pts_ms": 0, "cls": cls, "x1": box[0], "y1": box[1], "x2": box[2],
+                "y2": box[3], "score": score, "src": src}
+
+    teacher = [
+        t(0, "plate", (10, 10, 30, 20), 0.15),  # low band: kept
+        t(0, "plate", (40, 10, 60, 20), 0.35),  # confident: left out
+        t(0, "plate", (70, 10, 90, 20), 0.05),  # below the band (not a label): left out
+        t(12, "face", (10, 50, 30, 75), 0.4, "teacher_retinaface"),  # low band: kept
+        t(12, "face", (40, 50, 60, 75), 0.6, "teacher_retinaface"),  # confident: left out
+        t(24, "plate", (10, 10, 30, 20), 0.2),  # frame 24 is not processed: left out
+    ]
+    _labels(tmp_path, "s", [0, 12], teacher)
+    out = tmp_path / "out"
+    s = mine_labels(["s"], tmp_path / "labels", tmp_path / "frames", out, CFG)
+    cands = read_candidates(out / "candidates.jsonl")
+    assert (s.rows, s.candidates) == (6, 2) and len(cands) == 2
+    assert [(c.frame, c.cls, c.score, c.src) for c in cands] == [(0, "plate", 0.15, "teacher_owlv2"),
+                                                                  (12, "face", 0.4, "teacher_retinaface")]
+    assert all(c.track == -1 and c.dump_index == -1 and c.dump_dir == "" for c in cands)
+    assert all((out / c.image).is_file() for c in cands)
+    assert LOW_BANDS == {"plate": (0.1, 0.3), "face": (0.3, 0.5)}

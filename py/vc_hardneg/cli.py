@@ -1,4 +1,4 @@
-"""python -m vc_hardneg mine | judge | review | import-human | pilot | pilot-report (spec 2026-10-21 §3)."""
+"""python -m vc_hardneg mine | mine-labels | judge | review | import-human | pilot | pilot-report (spec 2026-10-21 §3)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,12 @@ def _parser() -> argparse.ArgumentParser:
     m.add_argument("--frames-root", type=Path, default=Path("data/frames"))
     m.add_argument("--out", type=Path, required=True)
     m.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    ml = sub.add_parser("mine-labels", help="candidates from the teachers' low-score label boxes (label cleaning)")
+    ml.add_argument("--stem", action="append", required=True, help="a training segment; repeat")
+    ml.add_argument("--labels-root", type=Path, default=Path("data/labels"))
+    ml.add_argument("--frames-root", type=Path, default=Path("data/frames"))
+    ml.add_argument("--out", type=Path, required=True)
+    ml.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     for name, help_ in (("judge", "judge candidates with the local teachers (and the LLM with --llm)"),
                         ("pilot", "sample the pilot, judge it and write its review page")):
         j = sub.add_parser(name, help=help_)
@@ -88,6 +94,14 @@ def _by_id(judgments) -> dict[str, list]:
 def _mine(args) -> int:
     s = mine(args.run, args.labels_root, args.frames_root, args.out, load_config(args.config))
     print(f"mine: {s.rows} dumped crops, {s.masked} masked on labelled frames, {s.candidates} candidates in {args.out / CANDIDATES}")
+    return 0
+
+
+def _mine_labels(args) -> int:
+    from vc_hardneg.candidates import mine_labels
+
+    s = mine_labels(args.stem, args.labels_root, args.frames_root, args.out, load_config(args.config))
+    print(f"mine-labels: {s.rows} teacher boxes, {s.candidates} in the low-score bands; {args.out / CANDIDATES}")
     return 0
 
 
@@ -167,7 +181,7 @@ def _pilot_report(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    handlers = {"mine": _mine, "judge": _judge, "review": _review, "import-human": _import, "pilot": _pilot,
+    handlers = {"mine": _mine, "mine-labels": _mine_labels, "judge": _judge, "review": _review, "import-human": _import, "pilot": _pilot,
                 "pilot-report": _pilot_report}
     try:
         return handlers[args.command](args)

@@ -118,3 +118,16 @@ def test_cli_refuses_the_llm_without_the_switch(tmp_path, monkeypatch, capsys):
                  "--llm"])
     assert code == 2 and "VC_HARDNEG_ALLOW_LLM" in capsys.readouterr().err
     assert not (tmp_path / "j.jsonl").exists()
+
+
+def test_cli_mine_labels(tmp_path):
+    lab = tmp_path / "labels" / "s"
+    lab.mkdir(parents=True)
+    (lab / "processed.txt").write_text("0\n")
+    (lab / "merged.jsonl").write_text(json.dumps({"video": "s.mp4", "frame": 0, "pts_ms": 0, "cls": "plate", "x1": 10,
+                                                  "y1": 10, "x2": 30, "y2": 20, "score": 0.2, "src": "t"}) + "\n")
+    (tmp_path / "frames" / "s").mkdir(parents=True)
+    cv2.imwrite(str(tmp_path / "frames" / "s" / "000000.jpg"), np.zeros((60, 80, 3), np.uint8))
+    assert main(["mine-labels", "--stem", "s", "--labels-root", str(tmp_path / "labels"),
+                 "--frames-root", str(tmp_path / "frames"), "--out", str(tmp_path / "out")]) == 0
+    assert (tmp_path / "out" / "candidates.jsonl").read_text().count("\n") == 1
