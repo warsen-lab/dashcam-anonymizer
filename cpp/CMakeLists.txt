@@ -68,6 +68,7 @@ add_library(vc_detect_lib STATIC
   src/detect/yolo_decode.cpp
   src/detect/yunet_decode.cpp
   src/detect/yunet_detector.cpp
+  src/detect/verifier.cpp
 )
 # Only the .cpp files of this library include nlohmann/json; its headers do not.
 target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime Threads::Threads PRIVATE vc_nlohmann_json)

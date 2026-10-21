@@ -1,0 +1,9 @@
+{
+  "name": "const_verifier",
+  "kind": "verifier",
+  "classes": ["face", "plate"],
+  "input": {"size": 64, "batch": 4, "color": "RGB", "scale": 0.00392156862745098, "pad_value": 114},
+  "crop": {"factor": 2.5, "min_px": 32},
+  "pass_threshold": {"face": 0.5, "plate": 0.5},
+  "metrics": {}
+}
