@@ -21,6 +21,8 @@
 #include "common/bounded_queue.h"
 #include "detect/fake_detector.h"
 #include "detect/merged_detector.h"
+#include "detect/verifier.h"
+#include "detect/verifier_crop.h"
 #include "detect/yunet_detector.h"
 #include "io/av_ptr.h"
 #include "io/video_writer.h"
@@ -28,6 +30,8 @@
 #include "track/box_timeline.h"
 #include "vc_redact/detect_rate.h"
 #include "vc_redact/records.h"
+#include "vc_redact/verify_dump.h"
+#include "vc_redact/verify_policy.h"
 
 namespace vc {
 namespace fs = std::filesystem;
@@ -42,6 +46,8 @@ constexpr uint64_t kBytesPerPixel = 3;  // the largest layout the reader emits: 
 constexpr size_t kMaxBufferedFrames = 120;
 constexpr const char* kMasksFile = "masks.jsonl";
 constexpr const char* kDetectionsFile = "detections.jsonl";
+constexpr const char* kVerifyCropsFile = "verify_crops.bin";
+constexpr const char* kVerifyCropsListFile = "verify_crops.jsonl";
 constexpr const char* kStatsFile = "stats.json";
 
 double secondsSince(Clock::time_point start) {
@@ -153,6 +159,7 @@ void checkOptions(const RedactOptions& o) {
   if (o.modelDir.has_value() == o.fakeDetections.has_value()) {
     throw std::invalid_argument("exactly one of a model directory or fake detections is required");
   }
+  if (o.dumpVerifyEvery < 1) throw std::invalid_argument("dumpVerifyEvery must be >= 1");
   validateRedactConfig(o.config, "redact options");
 }
 
@@ -187,6 +194,15 @@ std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int he
 int classIndex(const std::vector<std::string>& classes, const std::string& name) {
   const auto it = std::find(classes.begin(), classes.end(), name);
   return it == classes.end() ? -1 : static_cast<int>(it - classes.begin());
+}
+
+// Per detector class, its index in the verifier's classes (by name); -1 when the verifier has none or there is
+// no verifier.
+std::vector<int> verifierClassesFor(const std::vector<std::string>& classes, const Verifier* verifier) {
+  std::vector<int> out(classes.size(), -1);
+  if (verifier == nullptr) return out;
+  for (size_t i = 0; i < classes.size(); ++i) out[i] = classIndex(verifier->info().classes, classes[i]);
+  return out;
 }
 
 // A keyframe's detections after the large-face rule, and how many it dropped.
@@ -227,7 +243,7 @@ class Processor {
  public:
   Processor(const RedactOptions& options, Detector& detector, const VideoInfo& info, const DetectSchedule& schedule,
             std::string video, std::ostream& detections, std::ostream& masks, BoundedQueue<Item>& out,
-            RedactStats& stats)
+            RedactStats& stats, Verifier* verifier, VerifyDump* dump)
       : options_(options),
         detector_(detector),
         schedule_(schedule),
@@ -240,7 +256,11 @@ class Processor {
         height_(info.height),
         timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
         blocks_(options.config.mosaic),
-        plateClass_(classIndex(detector.classes(), "plate")) {}
+        plateClass_(classIndex(detector.classes(), "plate")),
+        verifier_(verifier),
+        dump_(dump),
+        sampler_(verifier != nullptr ? verifier->info().crop() : CropParams{}),
+        verifierClass_(verifierClassesFor(detector.classes(), verifier)) {}
 
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
@@ -265,18 +285,22 @@ class Processor {
     const LargeFaceFilter filtered =
         dropLargeLowScoreFaces(std::move(detected), detector_.classes(), options_.config, width_, height_);
     const std::vector<SourcedBox>& found = filtered.kept;
-    stats_.detections += static_cast<int64_t>(found.size());
-    stats_.largeFacesDropped += filtered.dropped;
+    // Boxes the verifier rejects never reach the timeline (spec 2026-10-21 §4.3).
+    std::vector<std::optional<VerifyResult>> verified = verify(view, found);
     std::vector<Box> boxes;
     boxes.reserve(found.size());
-    for (const SourcedBox& b : found) boxes.push_back(b.box);
+    for (size_t i = 0; i < found.size(); ++i) {
+      if (!verified[i] || verified[i]->passed) boxes.push_back(found[i].box);
+    }
+    stats_.detections += static_cast<int64_t>(boxes.size());
+    stats_.largeFacesDropped += filtered.dropped;
 
     const Clock::time_point trackStarted = Clock::now();
     const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
     stats_.track.busySec += secondsSince(trackStarted);
     // The previous keyframe's boxes are written now that the timeline has said which of them it masked.
     writeDetections(step.confirmed);
-    pending_ = KeyframeDetections{item.index, item.ptsMs, found};
+    pending_ = KeyframeDetections{item.index, item.ptsMs, found, std::move(verified)};
     emit(step.masks);
     buffer_.push_back(std::move(item));
   }
@@ -296,20 +320,91 @@ class Processor {
     int64_t frame = 0;
     double ptsMs = 0;
     std::vector<SourcedBox> boxes{};
+    std::vector<std::optional<VerifyResult>> verified{};  // per box: the verifier's result, nullopt when not scored
   };
 
-  // Writes the pending keyframe's detections.jsonl lines with their confirmation flags.
+  // Writes the pending keyframe's detections.jsonl lines with their confirmation flags: `confirmed` holds one
+  // per box the timeline got, in order; a box the verifier rejected is written unconfirmed.
   void writeDetections(const std::vector<bool>& confirmed) {
     if (!pending_) return;
-    if (confirmed.size() != pending_->boxes.size()) {
+    size_t next = 0;
+    for (size_t i = 0; i < pending_->boxes.size(); ++i) {
+      const SourcedBox& b = pending_->boxes[i];
+      const std::optional<VerifyResult>& v = pending_->verified[i];
+      bool masked = false;
+      if (!v || v->passed) {
+        if (next >= confirmed.size()) {
+          throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+        }
+        masked = confirmed[next++];
+      }
+      detections_ << detectionRecord(video_, pending_->frame, pending_->ptsMs, b.box, detector_.classes(), b.src,
+                                     masked, v);
+    }
+    if (next != confirmed.size()) {
       throw VcError("internal error: confirmation flags do not match the keyframe's detections");
     }
-    for (size_t i = 0; i < confirmed.size(); ++i) {
-      const SourcedBox& b = pending_->boxes[i];
-      detections_ << detectionRecord(video_, pending_->frame, pending_->ptsMs, b.box, detector_.classes(), b.src,
-                                     static_cast<bool>(confirmed[i]));
-    }
     pending_.reset();
+  }
+
+  // Crops every box needsVerification() picks when there is a verifier or a dump; writes the crops of dumped
+  // keyframes to the dump and scores those of a class the verifier knows. One entry per box of `found`: nullopt
+  // for the boxes the verifier did not score.
+  std::vector<std::optional<VerifyResult>> verify(const VideoFrame& frame, const std::vector<SourcedBox>& found) {
+    std::vector<std::optional<VerifyResult>> out(found.size());
+    if (verifier_ == nullptr && dump_ == nullptr) return out;
+    const Clock::time_point started = Clock::now();
+    const bool dumpThis = dump_ != nullptr && frame.index % options_.dumpVerifyEvery == 0;
+    const CropParams& p = sampler_.params();
+    const size_t bytes = static_cast<size_t>(p.size) * p.size * 3;
+    std::vector<size_t> scored;  // indices into found; their crops lie in cropBytes_ in this order
+    cropBytes_.clear();
+    for (size_t i = 0; i < found.size(); ++i) {
+      const SourcedBox& b = found[i];
+      const std::string& name = detector_.classes().at(static_cast<size_t>(b.box.cls));
+      if (!needsVerification(b, name, options_.config)) continue;
+      const bool score = verifierClass_.at(static_cast<size_t>(b.box.cls)) >= 0;
+      if (!score && !dumpThis) continue;
+      const size_t at = cropBytes_.size();
+      cropBytes_.resize(at + bytes);
+      sampler_.fill(*frame.av, verifierWindow(b.box, p.factor, p.minPx), cropBytes_.data() + at);
+      if (dumpThis) {
+        dump_->add(video_, frame.index, b.box, name, b.src, cropBytes_.data() + at);
+        ++stats_.verifyDumped;
+      }
+      if (score) {
+        scored.push_back(i);
+      } else {
+        cropBytes_.resize(at);  // dumped only
+      }
+    }
+    if (!scored.empty()) {
+      const size_t per = 3 * static_cast<size_t>(p.size) * p.size;
+      cropFloats_.resize(scored.size() * per);
+      std::vector<VerifierInput> inputs;
+      inputs.reserve(scored.size());
+      for (size_t k = 0; k < scored.size(); ++k) {
+        toPlanarFloat(cropBytes_.data() + k * bytes, p.size, cropFloats_.data() + k * per);
+        inputs.push_back(VerifierInput{verifierClass_[static_cast<size_t>(found[scored[k]].box.cls)],
+                                       cropFloats_.data() + k * per});
+      }
+      const std::vector<float> scores = verifier_->score(inputs);
+      for (size_t k = 0; k < scored.size(); ++k) {
+        const SourcedBox& b = found[scored[k]];
+        const int vc = verifierClass_[static_cast<size_t>(b.box.cls)];
+        const bool passed = scores[k] >= passThreshold(verifier_->info(), vc, options_.config);
+        out[scored[k]] = VerifyResult{scores[k], passed};
+        ++stats_.verifyChecked;
+        if (!passed) {
+          const std::string& name = detector_.classes()[static_cast<size_t>(b.box.cls)];
+          if (name == "face") ++stats_.verifyRejectedFaces;
+          if (name == "plate") ++stats_.verifyRejectedPlates;
+        }
+      }
+    }
+    stats_.verify.busySec += secondsSince(started);
+    ++stats_.verify.items;
+    return out;
   }
 
   static VideoFrame viewOf(const VideoItem& item) {
@@ -372,6 +467,12 @@ class Processor {
   BoxTimeline timeline_;
   TrackBlocks blocks_;
   int plateClass_;  // -1 when the detector has no plate class
+  Verifier* verifier_;              // nullptr: nothing is verified
+  VerifyDump* dump_;                // nullptr: no crops are dumped
+  CropSampler sampler_;
+  std::vector<int> verifierClass_;  // per detector class: its index in the verifier's classes, -1 when not verified
+  std::vector<uint8_t> cropBytes_;  // the crops of the current keyframe, size * size * 3 bytes each
+  std::vector<float> cropFloats_;   // the scored ones as the verifier's input
   bool sawKeyframe_ = false;
   std::vector<VideoItem> buffer_;
   std::optional<KeyframeDetections> pending_;
@@ -483,13 +584,17 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, const
 
 // `audio`: the reader's audio streams, snapshotted on the main thread. `started`: the start of the
 // run, for stats.setupSec.
-void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector,
+void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& detector, Verifier* verifier,
                  const DetectSchedule& schedule, const std::vector<AudioStreamInfo>& audio, const fs::path& partial, Clock::time_point started,
                  RedactStats& stats) {
   const fs::path dir = partial.parent_path();
   std::ofstream detections(dir / kDetectionsFile);
   std::ofstream masks(dir / kMasksFile);
   if (!detections || !masks) throw VcError("cannot create output files in " + dir.string());
+  std::unique_ptr<VerifyDump> dump;
+  if (options.dumpVerifyCrops) {
+    dump = std::make_unique<VerifyDump>(dir, verifier != nullptr ? verifier->info().inputSize : CropParams{}.size);
+  }
 
   const size_t capacity = pipelineQueueCapacity(reader.info().width, reader.info().height);
   BoundedQueue<Item> decoded(capacity);
@@ -521,7 +626,7 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   stats.rateControl = config.rateControl;
   stats.outputBitRate = config.rateControl == RateControl::Bitrate ? config.bitRate : 0;
   Processor processor(options, detector, info, schedule, options.input.filename().string(), detections, masks,
-                      processed, stats);
+                      processed, stats, verifier, dump.get());
   StageStat decodeStat;
   EncodeResult encodeResult;
   bool finished = false;
@@ -557,6 +662,7 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   stats.audioPackets = encodeResult.audioPackets;
   detections.close();
   masks.close();
+  if (dump) dump->close();
   if (!detections || !masks) throw VcError("writing detections.jsonl / masks.jsonl failed");
   if (stats.encode.items != stats.decode.items) {
     throw VcError("encoded " + std::to_string(stats.encode.items) + " of " + std::to_string(stats.decode.items) +
@@ -580,6 +686,11 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["keyframes"] = s.keyframes;
   j["detections"] = s.detections;
   j["large_faces_dropped"] = s.largeFacesDropped;
+  j["verifier"] = s.verifier.empty() ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(s.verifier);
+  j["verify"]["checked"] = s.verifyChecked;
+  j["verify"]["rejected"]["face"] = s.verifyRejectedFaces;
+  j["verify"]["rejected"]["plate"] = s.verifyRejectedPlates;
+  j["verify"]["dumped"] = s.verifyDumped;
   j["masked_frames"] = s.maskedFrames;
   j["mask_boxes"] = s.maskBoxes;
   j["decode_errors"] = s.decodeErrors;
@@ -607,6 +718,7 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["stages"]["detect"] = stageJson(s.detect);
   j["stages"]["detect_student"] = stageJson(s.detectStudent);
   j["stages"]["detect_face"] = stageJson(s.detectFace);
+  j["stages"]["verify"] = stageJson(s.verify);
   j["stages"]["track"] = stageJson(s.track);
   j["stages"]["mosaic"] = stageJson(s.mosaic);
   j["setup_s"] = s.setupSec;
@@ -654,6 +766,11 @@ std::string redactSummary(const RedactStats& s) {
   out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,
                    static_cast<long long>(s.keyframeStride), s.videoFps);
   out += "detector:      " + s.detector + "\n";
+  if (!s.verifier.empty()) {
+    out += formatted("verifier:      %s: %lld checked, %lld faces and %lld plates rejected\n", s.verifier.c_str(),
+                     static_cast<long long>(s.verifyChecked), static_cast<long long>(s.verifyRejectedFaces),
+                     static_cast<long long>(s.verifyRejectedPlates));
+  }
   out += "encoder:       " + s.encoder + "\n";
   out += formatted("audio:         %zu stream(s), %lld packets copied; dropped streams: ", s.audioStreams,
                    static_cast<long long>(s.audioPackets)) +
@@ -699,6 +816,11 @@ RedactStats runRedact(const RedactOptions& options) {
   // owns the reader.
   stats.formatNote = h264FormatNote(static_cast<AVPixelFormat>(reader.videoStream()->codecpar->format)).value_or("");
   const std::unique_ptr<Detector> detector = makeDetector(options, reader.info().width, reader.info().height);
+  std::unique_ptr<Verifier> verifier;
+  if (options.verifierModelDir) {
+    verifier = std::make_unique<Verifier>(*options.verifierModelDir, options.provider,
+                                          SessionSettings{options.config.ortIntraThreads, options.config.trtFp16});
+  }
 
   // The directories this run is about to create (outRoot and parents that do not exist yet), deepest
   // first: a failed run removes the ones that are still empty, so that it leaves nothing behind.
@@ -709,7 +831,8 @@ RedactStats runRedact(const RedactOptions& options) {
   stats.video = stats.outputDir / (stem + ".redacted.mp4");
   const fs::path partial = stats.outputDir / (stem + ".redacted.mp4.partial");
   const std::vector<fs::path> written{partial, stats.video, stats.outputDir / kDetectionsFile,
-                                      stats.outputDir / kMasksFile, stats.outputDir / kStatsFile};
+                                      stats.outputDir / kMasksFile, stats.outputDir / kStatsFile,
+                                      stats.outputDir / kVerifyCropsFile, stats.outputDir / kVerifyCropsListFile};
   // The first check is long ago (loading the detector took its time, CoreML compiles the model there):
   // check again right before anything is removed, and outside the try below, whose handler deletes
   // `written` and the directory, which something else may own by now. What is left is the
@@ -718,15 +841,17 @@ RedactStats runRedact(const RedactOptions& options) {
   try {
     fs::remove_all(stats.outputDir);
     fs::create_directories(stats.outputDir);
-    runPipeline(options, reader, *detector, schedule, audio, partial, started, stats);
+    runPipeline(options, reader, *detector, verifier.get(), schedule, audio, partial, started, stats);
     fs::rename(partial, stats.video);
     stats.frames = stats.decode.items;
     stats.track.items = stats.frames;
-    stats.main = StageStat{stats.detect.busySec + stats.track.busySec + stats.mosaic.busySec, stats.frames};
+    stats.main = StageStat{stats.detect.busySec + stats.verify.busySec + stats.track.busySec + stats.mosaic.busySec,
+                           stats.frames};
     stats.decodeErrors = reader.decodeErrors();
     stats.droppedStreams = reader.droppedStreams();
     stats.audioStreams = reader.audioStreams().size();
     stats.detector = detector->description();
+    stats.verifier = verifier ? verifier->info().name : "";
     if (const auto* merged = dynamic_cast<const MergedDetector*>(detector.get())) {
       stats.detectStudent = StageStat{merged->firstBusySec(), stats.detect.items};
       stats.detectFace = StageStat{merged->secondBusySec(), stats.detect.items};

@@ -170,6 +170,76 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
 
 // A plate's mosaic stays inside its mask (spec 2026-10-19 §4, plates): the same box as above as a plate, mask
 // (85, 88)-(215, 192) in 24 px cells, leaves the rows [72, 88) that the face's mosaic snaps out to as they were.
+fs::path constVerifierDir() { return fs::path(VC_TEST_DATA_DIR) / "const_verifier"; }
+
+// The fake face (src "fake": one detector) is checked; the const verifier gives faces 0.119 < 0.5: nothing is
+// masked, every detection line says why, and the stats count it.
+TEST(RedactJob, TheVerifierRejectsAFaceItDoesNotPass) {
+  RedactOptions o = baseOptions("redact_verifier_face");
+  o.verifierModelDir = constVerifierDir();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.verifier, "const_verifier");
+  EXPECT_EQ(s.verifyChecked, s.keyframes);
+  EXPECT_EQ(s.verifyRejectedFaces, s.keyframes);
+  EXPECT_EQ(s.verifyRejectedPlates, 0);
+  EXPECT_EQ(s.detections, 0);
+  EXPECT_EQ(s.maskedFrames, 0);
+  std::ifstream det(o.outRoot / kStem / "detections.jsonl");
+  size_t lines = 0;
+  for (std::string line; std::getline(det, line); ++lines) {
+    const auto j = nlohmann::json::parse(line);
+    EXPECT_FALSE(j.at("verified").get<bool>()) << line;
+    EXPECT_FALSE(j.at("confirmed").get<bool>()) << line;
+    EXPECT_NEAR(j.at("verify").get<double>(), 0.1192, 1e-4) << line;
+  }
+  EXPECT_EQ(lines, static_cast<size_t>(s.keyframes));
+  std::ifstream statsFile(o.outRoot / kStem / "stats.json");
+  const auto stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("verifier"), "const_verifier");
+  EXPECT_EQ(stats.at("verify").at("rejected").at("face").get<int64_t>(), s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("verify").at("items").get<int64_t>(), s.keyframes);
+}
+
+// A plate scoring 0.9 is above verify_plate_below: never checked, masked as before.
+TEST(RedactJob, ConfidentPlatesSkipTheVerifier) {
+  RedactOptions o = baseOptions("redact_verifier_plate");
+  o.fakeDetections = fakeFile("redact_verifier_plate.jsonl", 60, "plate");
+  o.verifierModelDir = constVerifierDir();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.verifyChecked, 0);
+  EXPECT_EQ(s.maskedFrames, 60);
+}
+
+// The dump holds the crop of every checked box on the dumped keyframes, with or without a verifier model: every
+// keyframe with --dump-verify-every 1, only frame 0 of this 60-frame video with 1000.
+TEST(RedactJob, DumpsTheCropsOfEveryNthFrame) {
+  RedactOptions all = baseOptions("redact_verifier_dump_all");
+  all.dumpVerifyCrops = true;
+  const RedactStats a = runRedact(all);
+  EXPECT_EQ(a.verifyDumped, a.keyframes);  // one fake face per keyframe
+  EXPECT_EQ(a.maskedFrames, 60);           // no model: masking is unchanged
+  const fs::path dirA = all.outRoot / kStem;
+  EXPECT_EQ(lineCount(dirA / "verify_crops.jsonl"), static_cast<size_t>(a.verifyDumped));
+  EXPECT_EQ(fs::file_size(dirA / "verify_crops.bin"), static_cast<uintmax_t>(a.verifyDumped) * 64 * 64 * 3);
+
+  RedactOptions sparse = baseOptions("redact_verifier_dump_sparse");
+  sparse.dumpVerifyCrops = true;
+  sparse.dumpVerifyEvery = 1000;
+  const RedactStats s = runRedact(sparse);
+  EXPECT_EQ(s.verifyDumped, 1);
+  std::ifstream jsonl(sparse.outRoot / kStem / "verify_crops.jsonl");
+  std::string line;
+  ASSERT_TRUE(std::getline(jsonl, line));
+  EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int64_t>(), 0);
+}
+
+TEST(RedactJob, ABrokenVerifierModelStopsTheRunBeforeAnyOutput) {
+  RedactOptions o = baseOptions("redact_verifier_broken");
+  o.verifierModelDir = test::tmpDir() / "no_such_verifier";
+  EXPECT_THROW(runRedact(o), VcError);
+  EXPECT_FALSE(fs::exists(o.outRoot / kStem));
+}
+
 TEST(RedactJob, PixelatesAPlateOnlyInsideItsMask) {
   RedactOptions o = baseOptions("redact_plate_clipped");
   o.fakeDetections = fakeFile("redact_plate_clipped.jsonl", 60, "plate");

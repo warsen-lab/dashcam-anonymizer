@@ -1,5 +1,6 @@
 #include "vc_redact/redact_cli.h"
 
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
@@ -45,6 +46,14 @@ RedactOptions parseRedactArgs(const std::vector<std::string>& args) {
       o.modelDir = fs::path(value());
     } else if (arg == "--face-model") {
       o.faceModelDir = fs::path(value());
+    } else if (arg == "--verifier-model") {
+      o.verifierModelDir = fs::path(value());
+    } else if (arg == "--dump-verify-crops") {
+      o.dumpVerifyCrops = true;
+    } else if (arg == "--dump-verify-every") {
+      const double n = parseNumber(arg, value());
+      if (n < 1 || n != std::floor(n) || n > 1e9) throw UsageError("--dump-verify-every expects an integer >= 1");
+      o.dumpVerifyEvery = static_cast<int64_t>(n);
     } else if (arg == "--fake-detections") {
       o.fakeDetections = fs::path(value());
     } else if (arg == "--config") {
@@ -106,6 +115,12 @@ Options:
   --fake-detections <file>  replay a detections.jsonl instead of running a model
   --face-model <dir>        also run the YuNet face model (model.onnx + model.json from vc_train yunet)
                             on every keyframe and mask what either detector finds
+  --verifier-model <dir>    verifier model (model.onnx + model.json from vc_train verifier): plates and
+                            faces the detectors are unsure of are checked and not masked below its pass
+                            threshold (configs/redact.json verify_*)
+  --dump-verify-crops       write the verifier crops of the boxes it would check to verify_crops.bin /
+                            verify_crops.jsonl (training data; with or without --verifier-model)
+  --dump-verify-every <n>   dump only keyframes whose frame index is a multiple of n (default 1)
   --config <json>           parameters (see configs/redact.json; built-in defaults otherwise)
   --detect-fps <n>          detections per second of video, 5 to 60 (overrides the config): a
                             keyframe every round(video fps / n) frames, every frame once n reaches

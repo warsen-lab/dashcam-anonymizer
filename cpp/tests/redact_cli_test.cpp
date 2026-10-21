@@ -160,5 +160,22 @@ TEST(RedactCli, UsageMentionsEveryOption) {
   }
 }
 
+TEST(RedactCli, ParsesTheVerifierOptions) {
+  const RedactOptions o = parseRedactArgs({"--input", "in.mp4", "--out", "out", "--model", "m", "--verifier-model",
+                                           "v", "--dump-verify-crops", "--dump-verify-every", "12"});
+  ASSERT_TRUE(o.verifierModelDir.has_value());
+  EXPECT_EQ(*o.verifierModelDir, "v");
+  EXPECT_TRUE(o.dumpVerifyCrops);
+  EXPECT_EQ(o.dumpVerifyEvery, 12);
+  const RedactOptions d = parseRedactArgs({"--input", "in.mp4", "--out", "out", "--model", "m"});
+  EXPECT_FALSE(d.verifierModelDir.has_value());
+  EXPECT_FALSE(d.dumpVerifyCrops);
+  EXPECT_EQ(d.dumpVerifyEvery, 1);
+  EXPECT_THROW(parseRedactArgs({"--input", "i", "--out", "o", "--model", "m", "--dump-verify-every", "0"}),
+               UsageError);
+  EXPECT_THROW(parseRedactArgs({"--input", "i", "--out", "o", "--model", "m", "--dump-verify-every", "1.5"}),
+               UsageError);
+}
+
 }  // namespace
 }  // namespace vc

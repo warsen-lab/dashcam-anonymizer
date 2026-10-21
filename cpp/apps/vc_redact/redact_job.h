@@ -26,6 +26,13 @@ struct RedactOptions {
   // The YuNet face model (`vc_train yunet`), run on every keyframe next to the detector above; its
   // boxes are merged with the detector's (MergedDetector). Without it only that detector runs.
   std::optional<std::filesystem::path> faceModelDir;
+  // The verifier model (`vc_train verifier`, spec 2026-10-21 §4.3): the boxes needsVerification() picks are scored
+  // on each keyframe and those below the pass threshold are not masked. Without it nothing is verified.
+  std::optional<std::filesystem::path> verifierModelDir;
+  // Writes verify_crops.bin / verify_crops.jsonl (VerifyDump) next to detections.jsonl: the crop of every box
+  // needsVerification() picks on the keyframes whose frame index is a multiple of dumpVerifyEvery (>= 1).
+  bool dumpVerifyCrops = false;
+  int64_t dumpVerifyEvery = 1;
   RedactConfig config;
   bool detectEveryFrame = false;
   ExecutionProvider provider = ExecutionProvider::Auto;  // providerOrder: CoreML then CPU on macOS
@@ -46,8 +53,13 @@ struct RedactStats {
   std::filesystem::path video;  // the redacted file
   int64_t frames = 0;
   int64_t keyframes = 0;
-  int64_t detections = 0;  // the boxes kept: not counting largeFacesDropped
+  int64_t detections = 0;  // the boxes passed to the timeline: not counting largeFacesDropped or verifier rejections
   int64_t largeFacesDropped = 0;  // large faces scoring below large_face_min_score (spec 2026-10-19 §3.6)
+  std::string verifier;             // the verifier model's name; empty without one
+  int64_t verifyChecked = 0;        // boxes the verifier scored
+  int64_t verifyRejectedFaces = 0;  // ... and rejected, by class
+  int64_t verifyRejectedPlates = 0;
+  int64_t verifyDumped = 0;         // crops written with dumpVerifyCrops
   int64_t maskedFrames = 0;
   int64_t maskBoxes = 0;
   int64_t decodeErrors = 0;
@@ -83,6 +95,7 @@ struct RedactStats {
                             // detectors at once, plus the merge)
   StageStat detectStudent;  // the student (or fake) detector's own busy time; equals detect without a face model
   StageStat detectFace;     // the face model's own busy time (it overlaps detectStudent); {0, 0} without one
+  StageStat verify;         // items = keyframes with something to verify or dump: cropping + scoring
   StageStat track;   // keyframe choice + BoxTimeline; items = frames
   StageStat mosaic;
   StageStat encode;
@@ -109,14 +122,19 @@ std::vector<std::string> redactWarnings(const RedactStats& stats);
 std::string redactSummary(const RedactStats& stats);
 
 // Redacts options.input into <outRoot>/<stem>/: <stem>.redacted.mp4 (written as .partial and
-// renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json.
+// renamed on success), detections.jsonl, masks.jsonl (one line per frame) and stats.json, with dumpVerifyCrops
+// also verify_crops.bin / verify_crops.jsonl.
+// On each keyframe, after the large-face rule, the boxes needsVerification() picks are cropped (verifier_crop.h):
+// the crops of dumped keyframes go to the dump, and with a verifier model the boxes of a class it knows are scored;
+// one below its pass threshold never reaches BoxTimeline and is written with "verify", "verified": false and
+// "confirmed": false (spec 2026-10-21 §4.3).
 // The options, the output directory, the input (including whether MP4 can store its audio) and the
-// detector (with the face model, if any) are checked, in that order, before anything is created or removed (with overwrite, the
+// detector (with the face model and the verifier, if any) are checked, in that order, before anything is created or removed (with overwrite, the
 // previous output is removed once they pass); any later failure removes this run's files (and the output root and its new parent
 // directories when this run created them and they are empty) and rethrows. Decoding, detection plus
 // masking, and encoding run on three threads; the first error stops all of them.
 //
-// Throws std::invalid_argument unless exactly one of modelDir / fakeDetections is set;
+// Throws std::invalid_argument unless exactly one of modelDir / fakeDetections is set or when dumpVerifyEvery < 1;
 // OutputExistsError when the output directory exists without overwrite, or with overwrite is
 // neither empty nor holds masks.jsonl; VcError for an invalid config, media, detector and I/O
 // failures (a frame without a timestamp, an encoder that cannot be opened, fewer frames encoded

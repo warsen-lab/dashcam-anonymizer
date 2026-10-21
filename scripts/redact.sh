@@ -17,6 +17,7 @@
 #   VC_REDACT       vc_redact binary              (default build/cpp-release/vc_redact)
 #   VC_MODEL        student model directory       (default data/models/r3)
 #   VC_FACE_MODEL   YuNet face model directory    (default data/models/yunet; empty = student only)
+#   VC_VERIFIER     verifier model directory      (default data/models/verifier-v1 when it exists; empty = none)
 #   VC_DETECT_FPS   detections per second, 5 to 60 (default: detect_fps of configs/redact.json, 10)
 #   VC_REDACT_ARGS  extra vc_redact options, e.g. "--hwaccel videotoolbox" or "--overwrite"
 #   VC_GPUS         GPUs to use, e.g. "0,1": videos go to them in turn, each vc_redact runs with
@@ -31,6 +32,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${VC_REDACT:-$ROOT/build/cpp-release/vc_redact}"
 MODEL="${VC_MODEL:-$ROOT/data/models/r3}"
 FACE="${VC_FACE_MODEL-$ROOT/data/models/yunet}"
+if [ "${VC_VERIFIER+set}" = set ]; then
+  VERIFIER="$VC_VERIFIER"
+elif [ -d "$ROOT/data/models/verifier-v1" ]; then
+  VERIFIER="$ROOT/data/models/verifier-v1"
+else
+  VERIFIER=""
+fi
 DETECT_FPS="${VC_DETECT_FPS:-}"
 GPUS_TEXT="${VC_GPUS:-}"
 PYTHON="${VC_PYTHON:-python3}"
@@ -45,7 +53,7 @@ fail() { echo "redact.sh: $*" >&2; exit 2; }
 [ $# -ge 2 ] || usage
 out="$1"; shift
 [ -x "$BIN" ] || fail "no vc_redact at $BIN (build it: cmake -S cpp -B build/cpp-release -DCMAKE_BUILD_TYPE=Release -DVC_BUILD_TESTS=OFF && cmake --build build/cpp-release -j 4)"
-for dir in "$MODEL" ${FACE:+"$FACE"}; do
+for dir in "$MODEL" ${FACE:+"$FACE"} ${VERIFIER:+"$VERIFIER"}; do
   [ -s "$dir/model.onnx" ] && [ -s "$dir/model.json" ] || fail "$dir has no model.onnx + model.json"
 done
 
@@ -128,6 +136,7 @@ ARGS=()
 build_args() {
   ARGS=(--input "$1" --out "$out" --model "$MODEL")
   if [ -n "$FACE" ]; then ARGS+=(--face-model "$FACE"); fi
+  if [ -n "$VERIFIER" ]; then ARGS+=(--verifier-model "$VERIFIER"); fi
   if [ -n "$DETECT_FPS" ]; then ARGS+=(--detect-fps "$DETECT_FPS"); fi
 }
 
