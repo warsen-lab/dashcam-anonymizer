@@ -225,17 +225,25 @@ bool sameBytes(const AVFrame& a, const AVFrame& b) {
 TEST(MosaicGrid, ApplyMosaicMatchesThePreviousImplementationByteForByte) {
   std::mt19937 rng(2026);
   for (const AVPixelFormat format : {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV444P,
-                                     AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUVJ420P}) {
+                                     AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUV440P,
+                                     AV_PIX_FMT_YUV410P}) {
     for (const auto& [width, height] : {std::pair{640, 360}, std::pair{641, 361}, std::pair{1920, 1080}}) {
+      // A corner (it may lie outside the frame) and a positive size, so that no rect starts out empty and the
+      // rects overlap (and cross the frame edges) often enough to cover the draw order.
       std::uniform_int_distribution<int> x(-50, width + 50);
       std::uniform_int_distribution<int> y(-50, height + 50);
+      std::uniform_int_distribution<int> w(1, width / 2);
+      std::uniform_int_distribution<int> h(1, height / 2);
       std::uniform_int_distribution<size_t> step(0, kMosaicBlockLadder.size() - 1);
       for (int trial = 0; trial < 6; ++trial) {
         std::vector<MosaicRect> rects;
-        for (int k = 0; k < 4; ++k) {
-          rects.push_back(MosaicRect{{x(rng), y(rng), x(rng), y(rng)}, kMosaicBlockLadder[step(rng)], k % 2 == 0});
-        }
-        rects.push_back(MosaicRect{{x(rng), y(rng), x(rng) + 300, y(rng) + 200}, 16, trial % 2 == 0});
+        const auto randomRect = [&](int block, bool snap) {
+          const int x1 = x(rng);
+          const int y1 = y(rng);
+          return MosaicRect{{x1, y1, x1 + w(rng), y1 + h(rng)}, block, snap};
+        };
+        for (int k = 0; k < 4; ++k) rects.push_back(randomRect(kMosaicBlockLadder[step(rng)], k % 2 == 0));
+        rects.push_back(randomRect(16, trial % 2 == 0));
         av::FramePtr shared = test::makeNoiseFrame(width, height, format, static_cast<unsigned>(trial + width));
         av::FramePtr legacy = test::deepCopy(*shared);
         applyMosaic(*shared, rects);

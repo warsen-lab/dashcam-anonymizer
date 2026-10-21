@@ -25,7 +25,7 @@ TEST(RedactCli, ParsesAModelRun) {
   EXPECT_FALSE(o.fakeDetections.has_value());
   EXPECT_EQ(o.provider, ExecutionProvider::Cpu);
   EXPECT_FALSE(o.preferHardwareEncoder);
-  EXPECT_EQ(o.hwAccel, HwAccel::None);
+  EXPECT_EQ(o.hwAccel, defaultRedactHwAccel(buildPlatform()));
   EXPECT_FALSE(o.detectEveryFrame);
   EXPECT_FALSE(o.overwrite);
 }
@@ -33,7 +33,7 @@ TEST(RedactCli, ParsesAModelRun) {
 TEST(RedactCli, AppliesDefaults) {
   const RedactOptions o = parseRedactArgs({"--input", "in.mp4", "--out", "out", "--model", "m"});
   EXPECT_EQ(o.provider, ExecutionProvider::Auto);
-  EXPECT_EQ(o.hwAccel, HwAccel::None);
+  EXPECT_EQ(o.hwAccel, defaultRedactHwAccel(buildPlatform()));
   EXPECT_TRUE(o.preferHardwareEncoder);
   EXPECT_DOUBLE_EQ(o.config.detectFps, RedactConfig{}.detectFps);
   EXPECT_FALSE(o.faceModelDir.has_value());  // without --face-model only the student detects

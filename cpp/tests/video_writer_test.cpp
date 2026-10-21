@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -114,10 +115,16 @@ TEST(VideoWriter, ReencodesH264WithTheSoftwareEncoder) {
   EXPECT_EQ(VideoReader(out.string(), HwAccel::None).info().codecName, "h264");
 }
 
-TEST(VideoWriter, PrefersVideoToolboxWhenAvailable) {
+// Any encoder of this platform's candidate list may open (hardware where there is one, else libx264).
+bool isACandidate(const std::string& encoder, bool preferHardware) {
+  const std::vector<std::string> names = h264EncoderCandidates(preferHardware, buildPlatform());
+  return std::find(names.begin(), names.end(), encoder) != names.end();
+}
+
+TEST(VideoWriter, PrefersTheHardwareEncoderWhenAvailable) {
   const fs::path out = test::tmpDir() / "writer_vt.mp4";
   const std::string encoder = reencode(test::basicVideo(), out, true);
-  EXPECT_TRUE(encoder == "h264_videotoolbox" || encoder == "libx264") << encoder;
+  EXPECT_TRUE(isACandidate(encoder, true)) << encoder;
   EXPECT_EQ(framePts(out).size(), 60u);
 }
 
@@ -139,7 +146,8 @@ TEST(VideoWriter, SaysWhyItFallsBackToTheSoftwareEncoder) {
   }
   const std::string err = testing::internal::GetCapturedStderr();
   ASSERT_EQ(encoder, "libx264");
-  EXPECT_NE(err.find("vc: video encoder h264_videotoolbox"), std::string::npos) << err;
+  const std::string first = h264EncoderCandidates(true, buildPlatform()).front();
+  EXPECT_NE(err.find("vc: video encoder " + first), std::string::npos) << err;
   EXPECT_NE(err.find("using libx264"), std::string::npos) << err;
   // FFmpeg's own messages aside, the writer prints exactly one line.
   size_t ours = 0;
@@ -184,7 +192,7 @@ TEST(VideoWriter, EncodesAnHevcSourceAsH264) {
     const fs::path out = test::tmpDir() / "writer_hevc_to_h264.mp4";
     fs::remove(out);
     const std::string encoder = reencode(test::tenBitVideo(), out, hardware);
-    EXPECT_TRUE(encoder == "libx264" || (hardware && encoder == "h264_videotoolbox")) << encoder;
+    EXPECT_TRUE(isACandidate(encoder, hardware)) << encoder;
     const test::VideoPresentation got = test::videoPresentation(out);
     EXPECT_EQ(got.codec, AV_CODEC_ID_H264) << encoder;
     EXPECT_EQ(got.pixelFormat, AV_PIX_FMT_YUV420P) << encoder;
