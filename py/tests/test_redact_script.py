@@ -2,17 +2,20 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "redact.sh"
 
-# Stands in for vc_redact: notes how many runs are going on and which GPU it was given, can wait until
-# FAKE_BARRIER runs go on at once (exit 9 after 5 s), fails for stems starting with "bad" and otherwise writes
-# a stats.json with 120 frames in 2 s.
+# Stands in for vc_redact: notes how many runs are going on (in all and on its GPU, by CUDA_VISIBLE_DEVICES) and
+# which GPU it was given, records its pid, can wait until FAKE_BARRIER runs go on at once (exit 9 after 5 s), runs
+# FAKE_SLEEP_<stem> (else FAKE_SLEEP) seconds, kills its parent subshell with SIGKILL for stems starting with
+# "orphan", fails for stems starting with "bad" and otherwise writes a stats.json with 120 frames in 2 s.
 FAKE = r"""#!/usr/bin/env bash
 set -euo pipefail
 while [ $# -gt 0 ]; do
@@ -25,9 +28,12 @@ done
 stem="$(basename "$input")"; stem="${stem%.*}"
 state="$FAKE_STATE"
 mkdir -p "$state/running"
-: > "$state/running/$stem"
+gpu="${CUDA_VISIBLE_DEVICES-unset}"
+: > "$state/running/$gpu.$stem"
 ls "$state/running" | wc -l | tr -d ' ' >> "$state/concurrency"
-echo "$stem ${CUDA_VISIBLE_DEVICES-unset}" >> "$state/gpus"
+echo "$gpu $(ls "$state/running" | grep -c "^$gpu\.")" >> "$state/gpu_concurrency"
+echo "$stem $gpu" >> "$state/gpus"
+echo "$$" >> "$state/pids"
 echo "fake vc_redact on $stem"
 if [ -n "${FAKE_BARRIER:-}" ]; then
   for _ in $(seq 50); do
@@ -36,8 +42,14 @@ if [ -n "${FAKE_BARRIER:-}" ]; then
   done
   if [ "$(ls "$state/running" | wc -l | tr -d ' ')" -lt "$FAKE_BARRIER" ]; then echo "barrier timeout" >&2; exit 9; fi
 fi
-sleep "${FAKE_SLEEP:-0}"
-rm -f "$state/running/$stem"
+case "$stem" in orphan*) kill -9 "$PPID" ;; esac
+nap_var="FAKE_SLEEP_$stem"
+sleep "${!nap_var:-${FAKE_SLEEP:-0}}" &
+napper=$!
+trap 'kill "$napper" 2>/dev/null; exit 143' TERM INT
+wait "$napper"
+trap - TERM INT
+rm -f "$state/running/$gpu.$stem"
 case "$stem" in bad*) echo "fake failure on $stem" >&2; exit 1 ;; esac
 mkdir -p "$out/$stem"
 printf '{"frames": 120, "elapsed_s": 2.0, "detector": "student/CPU", "encoder": "libx264", "pipeline": "cpu-frames"}\n' \
@@ -59,7 +71,7 @@ def batch(tmp_path):
     state.mkdir()
     out = tmp_path / "out"
 
-    def run(names, **env_extra):
+    def run(names, start_only=False, **env_extra):
         videos = []
         for name in names:
             path = tmp_path / "in" / name
@@ -69,7 +81,12 @@ def batch(tmp_path):
         env = {k: v for k, v in os.environ.items() if k not in ("CUDA_VISIBLE_DEVICES", "VC_GPUS", "VC_JOBS")}
         env.update(VC_REDACT=str(fake), VC_MODEL=str(model), VC_FACE_MODEL="", VC_SANDBOX="0",
                    VC_PYTHON=sys.executable, FAKE_STATE=str(state), **env_extra)
-        done = subprocess.run([str(SCRIPT), str(out), *videos], env=env, capture_output=True, text=True, timeout=60)
+        command = [str(SCRIPT), str(out), *videos]
+        if start_only:  # in a session of its own, so that a test can signal the script's whole process group
+            proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            return proc, out, state
+        done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
         return done, out, state
 
     return run
@@ -81,6 +98,36 @@ def _batch_json(out):
 
 def _gpu_of(state):
     return dict(line.split() for line in (state / "gpus").read_text().splitlines())
+
+
+def _gpu_concurrency(state):
+    """The most runs at once seen on each GPU, by CUDA_VISIBLE_DEVICES."""
+    most = {}
+    for line in (state / "gpu_concurrency").read_text().splitlines():
+        gpu, n = line.split()
+        most[gpu] = max(most.get(gpu, 0), int(n))
+    return most
+
+
+def _pids(state):
+    return [int(p) for p in (state / "pids").read_text().split()]
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_for(condition, seconds=15):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _concurrency(state):
@@ -138,11 +185,31 @@ def test_vc_gpus_hands_the_videos_out_in_turn(batch):
 
 
 def test_no_gpu_runs_more_than_vc_jobs_at_once(batch):
-    done, out, state = batch(["a.mp4", "b.mp4", "c.mp4", "d.mp4"], VC_GPUS="0,1", VC_JOBS="1", FAKE_SLEEP="0.3")
+    names = ["a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4", "f.mp4"]
+    done, out, state = batch(names, VC_GPUS="0,1", VC_JOBS="2", FAKE_SLEEP="0.3")
     assert done.returncode == 0, done.stderr
-    assert max(_concurrency(state)) <= 2
-    gpus = list(_gpu_of(state).values())
-    assert sorted(gpus) == ["0", "0", "1", "1"]
+    assert _gpu_concurrency(state) == {"0": 2, "1": 2}  # both GPUs are used to the limit and not beyond
+    assert max(_concurrency(state)) == 4
+    assert sorted(_gpu_of(state).values()) == ["0", "0", "0", "1", "1", "1"]
+
+
+def test_the_next_video_goes_to_the_first_gpu_with_a_free_slot_after_the_last_one_assigned(batch):
+    # a keeps GPU 0 busy; b, c and d are short, so GPU 1 frees up each time and takes the next video
+    done, out, state = batch(["a.mp4", "b.mp4", "c.mp4", "d.mp4"], VC_GPUS="0,1", VC_JOBS="1",
+                             FAKE_SLEEP_a="2.0", FAKE_SLEEP_b="0.1", FAKE_SLEEP_c="0.1", FAKE_SLEEP_d="0.1")
+    assert done.returncode == 0, done.stderr
+    assert _gpu_of(state) == {"a": "0", "b": "1", "c": "1", "d": "1"}
+    assert _gpu_concurrency(state) == {"0": 1, "1": 1}
+    assert [v["gpu"] for v in _batch_json(out)["videos"]] == ["0", "1", "1", "1"]
+
+
+def test_the_search_for_a_free_gpu_starts_after_the_last_one_assigned(batch):
+    # b and c hold GPUs 1 and 2; a (GPU 0) ends first, d takes GPU 0 and e, once d is done, GPU 0 again
+    done, out, state = batch(["a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"], VC_GPUS="0,1,2", VC_JOBS="1",
+                             FAKE_SLEEP_a="0.1", FAKE_SLEEP_b="2.0", FAKE_SLEEP_c="2.0", FAKE_SLEEP_d="0.1")
+    assert done.returncode == 0, done.stderr
+    assert _gpu_of(state) == {"a": "0", "b": "1", "c": "2", "d": "0", "e": "0"}
+    assert max(_gpu_concurrency(state).values()) == 1
 
 
 def test_vc_gpus_defaults_to_four_jobs_per_gpu(batch):
@@ -176,3 +243,87 @@ def test_bad_vc_jobs_and_vc_gpus_are_refused_before_running(batch, env, message)
     done, out, state = batch(["a.mp4"], **env)
     assert done.returncode == 2 and message in done.stderr
     assert not (state / "gpus").exists() and not (out / "batch.json").exists()
+
+
+def test_a_vc_jobs_beyond_the_bound_is_refused_not_wrapped(batch):
+    done, out, state = batch(["a.mp4"], VC_JOBS="99999999999999999999")
+    assert done.returncode == 2 and "VC_JOBS must be an integer in [1, 64]" in done.stderr
+    assert not (state / "gpus").exists() and not (out / "batch.json").exists()
+
+
+def test_a_carriage_return_in_a_file_name_reaches_batch_json(batch):
+    name = "a\rb.mp4"
+    try:
+        done, out, state = batch([name])
+    except OSError:
+        pytest.skip("this file system takes no carriage return in a file name")
+    assert done.returncode == 0, done.stderr
+    entry = _batch_json(out)["videos"][0]
+    assert Path(entry["video"]).name == name
+    assert Path(entry["output_dir"]).name == "a\rb" and entry["exit_status"] == 0 and entry["frames"] == 120
+
+
+def test_ctrl_c_stops_every_running_vc_redact(batch):
+    proc, out, state = batch(["a.mp4", "b.mp4", "c.mp4"], start_only=True, VC_JOBS="2", FAKE_SLEEP="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists() and len(_pids(state)) == 2), "two jobs should start"
+        pids = _pids(state)
+        os.killpg(proc.pid, signal.SIGINT)  # what Ctrl-C sends: the script and all its children
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 130, stderr
+    assert not any(_alive(pid) for pid in pids), "a vc_redact is still running"
+    assert stderr.count("=== interrupted:") == 1
+    assert "did not finish: " in stderr and "a.mp4" in stderr and "b.mp4" in stderr and "1 not started" in stderr
+    assert len(pids) == 2  # c.mp4 never started
+    b = _batch_json(out)
+    assert [Path(v["video"]).name for v in b["videos"]] == ["a.mp4", "b.mp4"]
+    assert all(v["exit_status"] != 0 for v in b["videos"])
+    assert not any(line.endswith("c") for line in (state / "gpus").read_text().split())
+
+
+def test_sigterm_stops_every_running_vc_redact_and_exits_143(batch):
+    proc, out, state = batch(["a.mp4", "b.mp4"], start_only=True, VC_JOBS="2", FAKE_SLEEP="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists() and len(_pids(state)) == 2)
+        pids = _pids(state)
+        proc.send_signal(signal.SIGTERM)  # to the script alone
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 143, stderr
+    assert not any(_alive(pid) for pid in pids)
+    assert (out / "batch.json").exists() and "=== interrupted:" in stderr
+
+
+def test_ctrl_c_with_one_job_reaches_vc_redact_and_exits_130(batch):
+    proc, out, state = batch(["a.mp4", "b.mp4"], start_only=True, FAKE_SLEEP="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists() and len(_pids(state)) == 1)
+        pids = _pids(state)
+        os.killpg(proc.pid, signal.SIGINT)
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 130, stderr
+    assert not any(_alive(pid) for pid in pids)
+    assert "did not finish: " in stderr and "a.mp4" in stderr and "1 not started" in stderr
+    assert [Path(v["video"]).name for v in _batch_json(out)["videos"]] == ["a.mp4"]
+
+
+def test_a_job_that_ends_without_reporting_is_a_failure_not_a_wait_for_ever(batch):
+    # the fake kills its job's subshell with SIGKILL, so no status file is ever written
+    done, out, state = batch(["a.mp4", "orphan.mp4", "c.mp4"], VC_JOBS="2")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "the job for " in done.stderr and "orphan.mp4 ended without reporting (exit 137)" in done.stderr
+    assert "=== FAILED (exit 137): " in done.stderr
+    by_name = {Path(v["video"]).name: v for v in _batch_json(out)["videos"]}
+    assert by_name["orphan.mp4"]["exit_status"] == 137 and by_name["orphan.mp4"]["frames"] is None
+    assert by_name["a.mp4"]["exit_status"] == 0 and by_name["c.mp4"]["exit_status"] == 0

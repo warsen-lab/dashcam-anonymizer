@@ -54,6 +54,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
   - `VC_PYTHON`：写 `batch.json` 用的 python3（默认 `python3`，只用标准库）；
   - `VC_SANDBOX=0`：不套沙箱。
 - 跑完后输出目录下有 `batch.json`（每次覆盖上一次的）：每个视频的 `exit_status`、`gpu`，成功的还有 `frames`、`elapsed_s`、`fps`、`detector`、`encoder`、`pipeline`（取自它的 `stats.json`，失败的为 null）；整批的 `wall_s`（墙钟秒数）、`frames`、`throughput_fps`（成功视频的总帧数 ÷ 整批墙钟时间）、`processes_at_once`。最后一行 `=== throughput: …` 打印同样的合计。
+- Ctrl-C（SIGINT）或 SIGTERM：停掉所有在跑的 `vc_redact`，打印一行 `=== interrupted: did not finish: …`，仍写出已知部分的 `batch.json`，退出码 130 / 143。
 
 ### 输出
 

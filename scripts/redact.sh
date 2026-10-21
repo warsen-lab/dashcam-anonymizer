@@ -5,7 +5,9 @@
 # .mp4 / .mov / .mkv files directly inside it. A failed video is reported and the rest still run; the exit
 # code is 1 when any video failed. A video whose stem an earlier one already has would share its output
 # directory: it is refused (exit 3) without running. <output dir>/batch.json lists every video's result
-# and the batch throughput (spec 2026-10-20 §5).
+# and the batch throughput (spec 2026-10-20 §5). Ctrl-C (SIGINT) or SIGTERM stops every running vc_redact,
+# prints one line with the videos that did not finish, still writes batch.json and exits 130 / 143. With a
+# single slot (no parallel run) vc_redact runs in the foreground, so Ctrl-C reaches it directly.
 #
 # Environment overrides:
 #   VC_REDACT       vc_redact binary              (default build/cpp-release/vc_redact)
@@ -53,7 +55,7 @@ fi
 n_gpus=${#gpus[@]}
 if [ "$n_gpus" -gt 0 ]; then default_jobs=4; else default_jobs=1; fi
 JOBS="${VC_JOBS:-$default_jobs}"
-if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || [ "$JOBS" -gt "$MAX_JOBS" ]; then
+if ! [[ "$JOBS" =~ ^[1-9][0-9]?$ ]] || [ "$JOBS" -gt "$MAX_JOBS" ]; then
   fail "VC_JOBS must be an integer in [1, $MAX_JOBS], got '$JOBS'"
 fi
 if [ "$n_gpus" -gt 0 ]; then total_slots=$((JOBS * n_gpus)); else total_slots=$JOBS; fi
@@ -89,43 +91,42 @@ started="$("$PYTHON" -c 'import time; print(f"{time.time():.3f}")')"
 : > "$tmp/results.tsv"
 
 failed=()
-pids=()      # by job number, while the job runs
+pids=()      # by job number, while a background job runs
 job_video=()
 job_gpu=()   # the GPU (as listed in VC_GPUS), empty without VC_GPUS
 job_slot=()  # index into gpus, -1 without VC_GPUS
 on_gpu=()    # jobs running per index into gpus
 for ((g = 0; g < n_gpus; g++)); do on_gpu[g]=0; done
 running=0
+recorded=0
+fg_job=""    # the job that runs in the foreground (a single slot), while it runs
 next_gpu=0
 
 # One line per video for batch.json: input position, exit status, GPU, path.
-record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp/results.tsv"; }
-
-# Starts vc_redact on `video` in the background; with more than one at once its output goes to a log
-# that is printed when it ends, so that the runs do not interleave.
-launch() {
-  local job=$1 video=$2 gpu=$3
-  local args=(--input "$video" --out "$out" --model "$MODEL")
-  if [ -n "$FACE" ]; then args+=(--face-model "$FACE"); fi
-  if [ -n "$DETECT_FPS" ]; then args+=(--detect-fps "$DETECT_FPS"); fi
-  echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
-  (
-    if [ -n "$gpu" ]; then export CUDA_VISIBLE_DEVICES="$gpu"; fi
-    if [ "$total_slots" -gt 1 ]; then exec > "$tmp/$job.log" 2>&1; fi
-    if ${runner[@]+"${runner[@]}"} "$BIN" "${args[@]}" ${EXTRA[@]+"${EXTRA[@]}"}; then status=0; else status=$?; fi
-    echo "$status" > "$tmp/$job.status.partial"
-    mv "$tmp/$job.status.partial" "$tmp/$job.status"
-  ) &
-  pids[job]=$!
+record() {
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp/results.tsv"
+  recorded=$((recorded + 1))
 }
 
-# Collects one finished job: prints its log, records its status and frees its slot.
-finish() {
-  local job=$1 status
-  status="$(cat "$tmp/$job.status")"
-  wait "${pids[job]}" || true
-  unset 'pids[job]'
-  if [ "$total_slots" -gt 1 ]; then cat "$tmp/$job.log"; fi
+write_batch_json() {
+  "$PYTHON" -I "$ROOT/scripts/batch_json.py" --out "$out" --results "$tmp/results.tsv" --started "$started" \
+    --jobs "$JOBS" --gpus "$GPUS_TEXT"
+}
+
+# For the subshell of a job: vc_redact sees only its GPU.
+use_gpu() { if [ -n "$1" ]; then export CUDA_VISIBLE_DEVICES="$1"; fi; }
+
+ARGS=()
+build_args() {
+  ARGS=(--input "$1" --out "$out" --model "$MODEL")
+  if [ -n "$FACE" ]; then ARGS+=(--face-model "$FACE"); fi
+  if [ -n "$DETECT_FPS" ]; then ARGS+=(--detect-fps "$DETECT_FPS"); fi
+}
+
+# Records one ended job: prints its log (parallel runs only), lists a failure and frees its slot.
+collect() {
+  local job=$1 status=$2
+  if [ "$total_slots" -gt 1 ] && [ -f "$tmp/$job.log" ]; then cat "$tmp/$job.log"; fi
   if [ "$status" != 0 ]; then
     echo "=== FAILED (exit $status): ${job_video[job]}" >&2
     failed+=("${job_video[job]}")
@@ -135,19 +136,113 @@ finish() {
   if [ "${job_slot[job]}" -ge 0 ]; then on_gpu[job_slot[job]]=$((on_gpu[job_slot[job]] - 1)); fi
 }
 
-# Waits until a running job ends and collects it.
+# With a single slot vc_redact runs in the foreground, so that Ctrl-C reaches it directly.
+run_foreground() {
+  local job=$1 video=$2 gpu=$3 status
+  build_args "$video"
+  echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
+  fg_job=$job
+  if (
+    use_gpu "$gpu"
+    ${runner[@]+"${runner[@]}"} "$BIN" "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
+  ); then status=0; else status=$?; fi
+  fg_job=""
+  collect "$job" "$status"
+}
+
+# Starts vc_redact on `video` in the background; its output goes to a log that is printed when it ends, so
+# that the runs do not interleave. A background job of a script ignores SIGINT (and so would its vc_redact),
+# so the job's subshell passes SIGTERM on to vc_redact, which is how abort_batch stops them.
+launch() {
+  local job=$1 video=$2 gpu=$3
+  build_args "$video"
+  echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
+  (
+    terminated=0
+    child=""
+    # shellcheck disable=SC2329  # runs as the TERM trap
+    on_term() {
+      terminated=1
+      if [ -n "$child" ]; then kill -TERM "$child" 2> /dev/null || true; fi
+    }
+    trap on_term TERM
+    use_gpu "$gpu"
+    exec > "$tmp/$job.log" 2>&1
+    ${runner[@]+"${runner[@]}"} "$BIN" "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"} &
+    child=$!
+    if [ "$terminated" = 1 ]; then kill -TERM "$child" 2> /dev/null || true; fi
+    status=0
+    wait "$child" || status=$?
+    while kill -0 "$child" 2> /dev/null; do wait "$child" || status=$?; done
+    echo "$status" > "$tmp/$job.status.partial"
+    mv "$tmp/$job.status.partial" "$tmp/$job.status"
+  ) &
+  pids[job]=$!
+}
+
+# Collects a background job that wrote its status.
+finish() {
+  local job=$1 status
+  status="$(cat "$tmp/$job.status")"
+  wait "${pids[job]}" || true
+  unset 'pids[job]'
+  collect "$job" "$status"
+}
+
+# Waits until a background job ends and collects it. A job whose subshell is gone without a status (it was
+# killed, or could not write the file) is a failure, not something to wait for.
 reap_one() {
-  local job
+  local job status
   while :; do
     for job in "${!pids[@]}"; do
       if [ -f "$tmp/$job.status" ]; then
         finish "$job"
         return
       fi
+      if ! kill -0 "${pids[job]}" 2> /dev/null; then
+        if [ -f "$tmp/$job.status" ]; then  # renamed just before the subshell exited
+          finish "$job"
+          return
+        fi
+        status=0
+        wait "${pids[job]}" || status=$?
+        if [ "$status" = 0 ]; then status=70; fi
+        echo "redact.sh: the job for ${job_video[job]} ended without reporting (exit $status)" >&2
+        unset 'pids[job]'
+        collect "$job" "$status"
+        return
+      fi
     done
     sleep "$POLL_SECONDS"
   done
 }
+
+# SIGINT / SIGTERM: stops the running jobs, writes batch.json for what is known and exits 130 / 143.
+abort_batch() {
+  local code=$1 job status names="" rest inflight
+  trap '' INT TERM
+  inflight=()
+  if [ ${#pids[@]} -gt 0 ]; then inflight=("${!pids[@]}"); fi
+  for job in ${inflight[@]+"${inflight[@]}"}; do kill -TERM "${pids[job]}" 2> /dev/null || true; done
+  for job in ${inflight[@]+"${inflight[@]}"}; do
+    wait "${pids[job]}" 2> /dev/null || true
+    status="$code"
+    if [ -f "$tmp/$job.status" ]; then status="$(cat "$tmp/$job.status")"; fi
+    if [ "$status" != 0 ]; then names="${names:+$names, }${job_video[job]}"; fi
+    if [ "$total_slots" -gt 1 ] && [ -f "$tmp/$job.log" ]; then cat "$tmp/$job.log"; fi
+    record "$job" "$status" "${job_gpu[job]}" "${job_video[job]}"
+  done
+  if [ -n "$fg_job" ]; then
+    names="${names:+$names, }${job_video[fg_job]}"
+    record "$fg_job" "$code" "${job_gpu[fg_job]}" "${job_video[fg_job]}"
+  fi
+  rest="$(( ${#videos[@]} - recorded )) not started"
+  echo "=== interrupted: ${names:+did not finish: $names; }$rest" >&2
+  write_batch_json || echo "redact.sh: could not write $out/batch.json" >&2
+  exit "$code"
+}
+trap 'abort_batch 130' INT
+trap 'abort_batch 143' TERM
 
 # The index of the next GPU in turn with a free slot (there is one whenever fewer than total_slots run).
 free_gpu() {
@@ -190,14 +285,13 @@ for ((job = 0; job < ${#videos[@]}; job++)); do
   job_video[job]="$video"
   job_gpu[job]="$gpu"
   job_slot[job]=$slot
-  launch "$job" "$video" "$gpu"
   running=$((running + 1))
+  if [ "$total_slots" -gt 1 ]; then launch "$job" "$video" "$gpu"; else run_foreground "$job" "$video" "$gpu"; fi
 done
 while [ "$running" -gt 0 ]; do reap_one; done
 
 echo "=== $(date +%T) done: $(( ${#videos[@]} - ${#failed[@]} )) of ${#videos[@]} redacted into $out"
-if ! "$PYTHON" -I "$ROOT/scripts/batch_json.py" --out "$out" --results "$tmp/results.tsv" --started "$started" \
-    --jobs "$JOBS" --gpus "$GPUS_TEXT"; then
+if ! write_batch_json; then
   echo "redact.sh: could not write $out/batch.json" >&2
   exit 1
 fi

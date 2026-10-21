@@ -19,7 +19,9 @@ STATS_FIELDS = ("detector", "encoder", "pipeline")
 def read_results(path: Path) -> list[tuple[int, int, str | None, str]]:
     """redact.sh's lines "<position>\\t<exit status>\\t<gpu>\\t<video>", in input order."""
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # Split on "\n" only (the file's separator): a path may hold \r, U+0085 or U+2028, which splitlines() and
+    # universal newlines would cut. surrogateescape keeps a path that is not valid UTF-8.
+    for line in path.read_bytes().decode("utf-8", "surrogateescape").split("\n"):
         if not line:
             continue
         position, status, gpu, video = line.split("\t", 3)
