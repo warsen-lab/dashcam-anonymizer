@@ -210,13 +210,19 @@ def run_judges(cands: list[Candidate], judgments_path: Path, crops_root: Path, f
     """Judges every candidate without a judgment yet (with rejudge every one people did not judge): the frame
     teacher, else the teacher; then the LLM about those the models judged one of `ask_on`, in batches of up to
     llm_batch of one class, llm_parallel calls at once (its verdict, appended last, is the final word). Appends
-    the verdicts as they come, so an interrupted run keeps what it did. Returns counts of "<judge>:<verdict>"."""
-    done = resolve(read_judgments(judgments_path))
+    the verdicts as they come, so an interrupted run keeps what it did; a rerun asks the LLM about what the models
+    judged one of `ask_on` but the LLM never answered, without judging it again. Returns counts of "<judge>:<verdict>"."""
+    judged = read_judgments(judgments_path)
+    done = resolve(judged)
+    llm_answered = {j.id for j in judged if j.judge.startswith("llm:")}
     counts: Counter = Counter()
     ask: list[Candidate] = []
     for c in cands:
         prior = done.get(c.id)
         if prior is not None and (not rejudge or prior.judge == HUMAN):
+            if (llm_judge is not None and prior.judge != HUMAN and prior.verdict in ask_on
+                    and c.id not in llm_answered):
+                ask.append(c)  # an interrupted run judged it but never asked the LLM
             continue
         j = frame_judge.judge(c)
         if j is None:

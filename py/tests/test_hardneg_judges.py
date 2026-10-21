@@ -186,3 +186,31 @@ def test_run_judges_sends_the_llm_batches_of_one_class(tmp_path):
 
     run_judges(cands, tmp_path / "j.jsonl", tmp_path, FrameTeacherJudge(CFG), teacher, FakeLlm(), llm_batch=2)
     assert sorted(batches) == [["f0", "f1"], ["p0", "p1"], ["p2"]]
+
+
+def test_a_rerun_asks_the_llm_about_what_an_interrupted_run_judged_but_never_asked(tmp_path):
+    cands = [_cand(f"p{i}", image=f"crops/p{i}.png") for i in range(4)]
+    _crops_for(tmp_path, cands)
+    path = tmp_path / "j.jsonl"
+    # an interrupted run: the teacher judged all four, the LLM answered p0 only; a person judged p3
+    append_judgments(path, [Judgment(f"p{i}", "no", "teacher") for i in range(4)] +
+                     [Judgment("p0", "yes", "llm:fake"), Judgment("p3", "no", HUMAN)])
+    teacher_calls = []
+
+    def plate_detect(img):
+        teacher_calls.append(1)
+        return []
+
+    asked = []
+
+    class FakeLlm:
+        def judge_batch(self, cs, paths):
+            asked.extend(c.id for c in cs)
+            return [Judgment(c.id, "no", "llm:fake") for c in cs]
+
+    counts = run_judges(cands, path, tmp_path, FrameTeacherJudge(CFG), TeacherJudge(CFG, plate_detect, lambda i: []),
+                        FakeLlm(), llm_batch=4)
+    assert sorted(asked) == ["p1", "p2"] and teacher_calls == []  # no teacher rerun, nobody asked twice
+    assert counts == {"llm:fake:no": 2}
+    # without an LLM a rerun has nothing to do
+    assert run_judges(cands, path, tmp_path, FrameTeacherJudge(CFG), TeacherJudge(CFG, plate_detect, lambda i: [])) == {}
