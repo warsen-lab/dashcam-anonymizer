@@ -171,14 +171,15 @@ DetectSchedule keyframeSchedule(const RedactOptions& o, const AVStream& stream) 
 }
 
 std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int height) {
+  const SessionSettings settings{o.config.ortIntraThreads, o.config.trtFp16};
   std::unique_ptr<Detector> detector;
   if (o.fakeDetections) {
     detector = std::make_unique<FakeDetector>(*o.fakeDetections);
   } else {
-    detector = std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height);
+    detector = std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height, settings);
   }
   if (!o.faceModelDir) return detector;
-  auto face = std::make_unique<YuNetDetector>(*o.faceModelDir, o.provider, o.config.face, width, height);
+  auto face = std::make_unique<YuNetDetector>(*o.faceModelDir, o.provider, o.config.face, width, height, settings);
   return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 
@@ -460,8 +461,10 @@ void encodeStage(BoundedQueue<Item>& in, WriterConfig config, const std::vector<
 }
 
 // Everything the encode thread needs to know about the input video, copied by value here on the
-// main thread, so that it never reads the demuxer's streams (the decode thread is using them).
-WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool preferHardware) {
+// main thread, so that it never reads the demuxer's streams (the decode thread is using them). The output is
+// H.264 (spec 2026-10-20 §3) at constant quality, or with rate_control "bitrate" at the source's bit rate, times
+// output_bitrate_factor_hevc for any other codec.
+WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, const RedactOptions& options) {
   const AVStream* stream = reader.videoStream();
   WriterConfig c;
   c.path = path;
@@ -469,10 +472,11 @@ WriterConfig writerConfig(const VideoReader& reader, const fs::path& path, bool 
   c.height = reader.info().height;
   c.timeBase = stream->time_base;
   c.frameRate = stream->avg_frame_rate;
-  c.sourceCodec = reader.info().codecName;
-  c.bitRate = stream->codecpar->bit_rate;
-  c.constantQuality = true;  // at the source's bit rate a re-encode comes out visibly soft
-  c.preferHardware = preferHardware;
+  c.bitRate = h264OutputBitRate(stream->codecpar->codec_id == AV_CODEC_ID_H264, stream->codecpar->bit_rate,
+                                options.config.outputBitrateFactorHevc);  // only used with rate_control "bitrate"
+  c.rateControl = options.config.rateControl;
+  c.preferHardware = options.preferHardwareEncoder;
+  c.nvencPreset = options.config.nvencPreset;
   copyPresentation(*stream, c);  // aspect ratio, colour tags and rotation stay as in the input
   return c;
 }
@@ -513,7 +517,9 @@ void runPipeline(const RedactOptions& options, VideoReader& reader, Detector& de
   // half-built pipeline; the reader's info and the video stream's metadata are copied (like the
   // audio streams' codec parameters and time bases) because the decode thread owns the reader.
   const VideoInfo info = reader.info();
-  const WriterConfig config = writerConfig(reader, partial, options.preferHardwareEncoder);
+  const WriterConfig config = writerConfig(reader, partial, options);
+  stats.rateControl = config.rateControl;
+  stats.outputBitRate = config.rateControl == RateControl::Bitrate ? config.bitRate : 0;
   Processor processor(options, detector, info, schedule, options.input.filename().string(), detections, masks,
                       processed, stats);
   StageStat decodeStat;
@@ -579,6 +585,13 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["decode_errors"] = s.decodeErrors;
   j["detector"] = s.detector;
   j["encoder"] = s.encoder;
+  j["rate_control"] = s.rateControl == RateControl::Quality ? "quality" : "bitrate";
+  if (s.rateControl == RateControl::Bitrate) {
+    j["output_bit_rate"] = s.outputBitRate;
+  } else {
+    j["output_bit_rate"] = nullptr;  // constant quality: no target rate
+  }
+  j["pipeline"] = s.pipeline;
   j["audio_streams"] = s.audioStreams;
   j["audio_packets"] = s.audioPackets;
   j["dropped_streams"] = s.droppedStreams;
@@ -606,6 +619,8 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
 
 }  // namespace
 
+HwAccel defaultRedactHwAccel(Platform platform) { return platform == Platform::Linux ? HwAccel::Auto : HwAccel::None; }
+
 size_t pipelineQueueCapacity(int width, int height) {
   const uint64_t pixels = width > 0 && height > 0 ? static_cast<uint64_t>(width) * static_cast<uint64_t>(height) : 1;
   const uint64_t frames = kQueueBudgetBytes / (pixels * kBytesPerPixel);
@@ -618,6 +633,7 @@ std::vector<std::string> redactWarnings(const RedactStats& stats) {
     warnings.push_back(formatted("note: detect_fps %g is above the video's %.2f fps, so every frame is a keyframe",
                                  stats.detectFpsRequested, stats.videoFps));
   }
+  if (!stats.formatNote.empty()) warnings.push_back("note: " + stats.formatNote);
   if (stats.decodeErrors > 0) {
     warnings.push_back("warning: the decoder rejected " + std::to_string(stats.decodeErrors) +
                        " corrupt packet(s) or frame(s) and skipped them, so the output lacks those frames "
@@ -679,6 +695,9 @@ RedactStats runRedact(const RedactOptions& options) {
   stats.detectFpsActual = schedule.actualFps;
   stats.detectFpsRequested = options.detectEveryFrame ? 0.0 : options.config.detectFps;
   stats.detectFpsAboveVideoRate = schedule.aboveVideoRate;
+  // 10-bit and 4:2:2 sources are encoded as 8-bit 4:2:0 (spec 2026-10-20 §3); read here, before the decode thread
+  // owns the reader.
+  stats.formatNote = h264FormatNote(static_cast<AVPixelFormat>(reader.videoStream()->codecpar->format)).value_or("");
   const std::unique_ptr<Detector> detector = makeDetector(options, reader.info().width, reader.info().height);
 
   // The directories this run is about to create (outRoot and parents that do not exist yet), deepest

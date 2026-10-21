@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/luma_plane.h"
+#include "common/platform.h"
 
 struct AVFrame;
 struct AVPacket;
@@ -14,10 +15,22 @@ struct AVStream;
 
 namespace vc {
 
-enum class HwAccel { None, VideoToolbox, Auto };
+enum class HwAccel { None, VideoToolbox, Cuda, Auto };
 
-// Parses "none" | "videotoolbox" | "auto"; throws std::invalid_argument.
+// Parses "none" | "videotoolbox" | "cuda" | "auto"; throws std::invalid_argument.
 HwAccel parseHwAccel(const std::string& text);
+
+// The hardware decoder a requested mode means on a platform (spec 2026-10-20 §3).
+enum class HwDevice { None, VideoToolbox, Cuda };
+struct HwDecodePlan {
+  HwDevice device = HwDevice::None;  // the device to try; None decodes in software
+  bool required = false;             // a device that cannot be opened is an error instead of software decoding
+  bool noteOnFallback = false;       // software decoding instead of the device gets a line on stderr
+};
+// none: software. videotoolbox: VideoToolbox, required. cuda: CUDA (NVDEC), software with a note when it cannot be
+// opened (on macOS it never can). auto: CUDA with that note on Linux, VideoToolbox silently falling back on macOS,
+// software elsewhere.
+HwDecodePlan hwDecodePlan(HwAccel requested, Platform platform);
 
 struct VideoInfo {
   int width = 0;
@@ -28,7 +41,7 @@ struct VideoInfo {
 };
 
 // A decoded frame in CPU memory, always 8-bit YUV (planar or NV12), so
-// plane 0 is the luma plane.
+// plane 0 is the luma plane. Hardware frames (VideoToolbox, CUDA) are copied back to memory.
 struct VideoFrame {
   // 0-based count of the frames the decoder has returned, in decoder output
   // (display) order. Frames lost to corrupt packets are not counted, so this can
@@ -45,7 +58,7 @@ class VideoReader {
  public:
   // Throws VcError when the file cannot be opened, has no decodable video
   // stream, or VideoToolbox was requested explicitly and is unavailable.
-  // HwAccel::Auto falls back to software decoding.
+  // HwAccel::Auto and HwAccel::Cuda fall back to software decoding (hwDecodePlan).
   VideoReader(const std::string& path, HwAccel hwAccel);
   ~VideoReader();
   VideoReader(const VideoReader&) = delete;

@@ -45,6 +45,7 @@ struct YuNetDetector::Impl {
   ModelInfo info;
   fs::path onnx;
   ExecutionProvider provider = ExecutionProvider::Cpu;
+  SessionSettings settings{};
   YuNetParams params;
   Ort::Session session{nullptr};
   std::string backend = "CPU";
@@ -74,9 +75,9 @@ struct YuNetDetector::Impl {
     CreatedSession created;
     std::string newInputName;
     try {
-      const std::optional<fs::path> cache =
-          provider == ExecutionProvider::CoreML ? yunetCoreMlCacheDirectory(onnx, pw, ph) : std::nullopt;
-      created = createOrtSession(onnx, provider, cache, fixSize);
+      const SessionCaches caches{[&] { return yunetCoreMlCacheDirectory(onnx, pw, ph); },
+                                 [&] { return tensorRtCacheDirectory(onnx, pw, ph); }};
+      created = createOrtSession(onnx, provider, caches, settings, fixSize);
       newInputName = checkModel(created.session, width, height, pw, ph);  // its VcError is a model problem, never retried
     } catch (const Ort::Exception& e) {
       throw VcError("onnxruntime: " + onnx.string() + ": " + e.what());
@@ -181,7 +182,7 @@ struct YuNetDetector::Impl {
 };
 
 YuNetDetector::YuNetDetector(const fs::path& modelDir, ExecutionProvider provider, const YuNetParams& params,
-                             int frameWidth, int frameHeight)
+                             int frameWidth, int frameHeight, const SessionSettings& settings)
     : impl_(std::make_unique<Impl>()) {
   Impl& s = *impl_;
   const fs::path json = modelDir / "model.json";
@@ -193,6 +194,7 @@ YuNetDetector::YuNetDetector(const fs::path& modelDir, ExecutionProvider provide
   s.onnx = modelDir / "model.onnx";
   if (!fs::is_regular_file(s.onnx)) throw VcError("missing " + s.onnx.string());
   s.provider = provider;
+  s.settings = settings;
   s.params = params;
   s.sws->flags = SWS_BILINEAR;
   s.open(frameWidth, frameHeight);

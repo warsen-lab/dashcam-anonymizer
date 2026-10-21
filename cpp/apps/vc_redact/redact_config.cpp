@@ -14,23 +14,36 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 19> kKeys = {
+constexpr std::array<std::string_view, 24> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
     "max_mask_area_ratio", "mosaic_min_block_px",    "mosaic_blocks_per_long_side",
     "face_score_threshold", "face_nms_iou",       "face_confirm_score",
     "plate_confirm_score", "large_face_area_fraction", "large_face_min_score",
-    "hold_lost_ghosts"};
+    "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
+    "nvenc_preset",        "trt_fp16",            "ort_intra_threads"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
 
 // Mosaic block settings are small positive integers; anything larger is a typo, not a block size.
-constexpr double kMaxMosaicSetting = 4096;
+constexpr int kMaxMosaicSetting = 4096;
+// More onnxruntime threads than this is a typo, not a thread count.
+constexpr int kMaxOrtIntraThreads = 1024;
+constexpr double kMinBitrateFactor = 1.0;
+constexpr double kMaxBitrateFactor = 4.0;
 
 // Float settings are written with this many decimals: 0.15f must read 0.15, not 0.15000000596….
 constexpr double kJsonFloatScale = 1e6;
+
+constexpr std::string_view kQualityName = "quality";
+constexpr std::string_view kBitrateName = "bitrate";
+
+// "rate_control must be ..." for a value that is neither name; `got` is what it was.
+std::string rateControlRule(const std::string& origin, const std::string& got) {
+  return origin + ": rate_control must be \"quality\" or \"bitrate\", got '" + got + "'";
+}
 
 // A number as it reads in a message: 5, not 5.000000.
 std::string plainNumber(double v) {
@@ -44,15 +57,17 @@ double jsonFloat(float v) {
   return std::round(static_cast<double>(v) * kJsonFloatScale) / kJsonFloatScale;
 }
 
-// The setting as an int: `key` must be a JSON integer in [1, kMaxMosaicSetting] (a fraction or an
-// out-of-range number must not be truncated or overflow into a different value); absent: `fallback`.
-int mosaicSetting(const nlohmann::json& j, const char* key, int fallback, const std::string& origin) {
+// The setting as an int: `key` must be a JSON integer in [low, high] (a fraction or an out-of-range number must
+// not be truncated or overflow into a different value); absent: `fallback`.
+int integerSetting(const nlohmann::json& j, const char* key, int fallback, int low, int high,
+                   const std::string& origin) {
   const auto it = j.find(key);
   if (it == j.end()) return fallback;
-  const std::string rule = origin + ": " + key + " must be an integer in [1, 4096]";
+  const std::string rule =
+      origin + ": " + key + " must be an integer in [" + std::to_string(low) + ", " + std::to_string(high) + "]";
   if (!it->is_number_integer()) throw VcError(rule);
   const double value = it->get<double>();  // exact for every value that can pass the range test
-  if (!(value >= 1 && value <= kMaxMosaicSetting)) throw VcError(rule);
+  if (!(value >= low && value <= high)) throw VcError(rule);
   return static_cast<int>(value);
 }
 
@@ -80,6 +95,26 @@ bool boolSetting(const nlohmann::json& j, const char* key, bool fallback, const 
   return it->get<bool>();
 }
 
+// The setting as a string: `key` must be a JSON string; absent: `fallback`.
+std::string stringSetting(const nlohmann::json& j, const char* key, const std::string& fallback,
+                          const std::string& origin) {
+  const auto it = j.find(key);
+  if (it == j.end()) return fallback;
+  if (!it->is_string()) throw VcError(origin + ": " + key + " must be a string");
+  return it->get<std::string>();
+}
+
+// The rate_control setting: the string "quality" or "bitrate" (absent: `fallback`).
+RateControl rateControlSetting(const nlohmann::json& j, RateControl fallback, const std::string& origin) {
+  const auto it = j.find("rate_control");
+  if (it == j.end()) return fallback;
+  if (!it->is_string()) throw VcError(origin + ": rate_control must be a string");
+  const std::string name = it->get<std::string>();
+  if (name == kQualityName) return RateControl::Quality;
+  if (name == kBitrateName) return RateControl::Bitrate;
+  throw VcError(rateControlRule(origin, name));
+}
+
 }  // namespace
 
 void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
@@ -103,6 +138,7 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.plateConfirmScore), "plate_confirm_score must be finite");
   require(std::isfinite(c.largeFaceAreaFraction), "large_face_area_fraction must be finite");
   require(std::isfinite(c.largeFaceMinScore), "large_face_min_score must be finite");
+  require(std::isfinite(c.outputBitrateFactorHevc), "output_bitrate_factor_hevc must be finite");
   require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
           "detect_fps must be in [" + plainNumber(kMinDetectFps) + ", " + plainNumber(kMaxDetectFps) + "]");
   require(c.decode.scoreThreshold >= 0 && c.decode.scoreThreshold <= 1, "score_threshold must be in [0, 1]");
@@ -125,6 +161,14 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.largeFaceAreaFraction > 0 && c.largeFaceAreaFraction <= 1, "large_face_area_fraction must be in (0, 1]");
   require(c.largeFaceMinScore >= 0 && c.largeFaceMinScore <= 1, "large_face_min_score must be in [0, 1]");
   require(c.face.topK >= 1, "the face model's top_k must be >= 1");
+  require(c.outputBitrateFactorHevc >= kMinBitrateFactor && c.outputBitrateFactorHevc <= kMaxBitrateFactor,
+          "output_bitrate_factor_hevc must be in [1, 4]");
+  require(c.rateControl == RateControl::Quality || c.rateControl == RateControl::Bitrate,
+          "rate_control must be \"quality\" or \"bitrate\", got '" + std::to_string(static_cast<int>(c.rateControl)) +
+              "'");
+  require(std::find(kNvencPresets.begin(), kNvencPresets.end(), c.nvencPreset) != kNvencPresets.end(),
+          "nvenc_preset must be one of p1 ... p7, got '" + c.nvencPreset + "'");
+  require(c.ortIntraThreads >= 0 && c.ortIntraThreads <= kMaxOrtIntraThreads, "ort_intra_threads must be in [0, 1024]");
 }
 
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin) {
@@ -167,8 +211,14 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   c.largeFaceAreaFraction = numberSetting(j, "large_face_area_fraction", c.largeFaceAreaFraction, origin);
   c.largeFaceMinScore = floatSetting(j, "large_face_min_score", c.largeFaceMinScore, origin);
   c.timeline.holdLostGhosts = boolSetting(j, "hold_lost_ghosts", c.timeline.holdLostGhosts, origin);
-  c.mosaic.minBlockPx = mosaicSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, origin);
-  c.mosaic.blocksPerLongSide = mosaicSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, origin);
+  c.mosaic.minBlockPx = integerSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, 1, kMaxMosaicSetting, origin);
+  c.mosaic.blocksPerLongSide =
+      integerSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, 1, kMaxMosaicSetting, origin);
+  c.outputBitrateFactorHevc = numberSetting(j, "output_bitrate_factor_hevc", c.outputBitrateFactorHevc, origin);
+  c.rateControl = rateControlSetting(j, c.rateControl, origin);
+  c.nvencPreset = stringSetting(j, "nvenc_preset", c.nvencPreset, origin);
+  c.trtFp16 = boolSetting(j, "trt_fp16", c.trtFp16, origin);
+  c.ortIntraThreads = integerSetting(j, "ort_intra_threads", c.ortIntraThreads, 0, kMaxOrtIntraThreads, origin);
   validateRedactConfig(c, origin);
   return c;
 }
@@ -202,6 +252,11 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["large_face_area_fraction"] = c.largeFaceAreaFraction;
   j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
+  j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;
+  j["rate_control"] = std::string(c.rateControl == RateControl::Quality ? kQualityName : kBitrateName);
+  j["nvenc_preset"] = c.nvencPreset;
+  j["trt_fp16"] = c.trtFp16;
+  j["ort_intra_threads"] = c.ortIntraThreads;
   return j;
 }
 

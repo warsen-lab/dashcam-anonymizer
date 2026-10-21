@@ -22,6 +22,8 @@ std::filesystem::path basicVideo();
 std::filesystem::path staticThenNoiseVideo();
 // 1 s, 640x360 @ 30 fps 10-bit HEVC (30 frames).
 std::filesystem::path tenBitVideo();
+// 1 s, 640x360 @ 30 fps 8-bit 4:2:2 H.264 (High 4:2:2, 30 frames).
+std::filesystem::path yuv422Video();
 // 1 s AAC audio, no video stream.
 std::filesystem::path audioOnlyFile();
 // 2 s, 640x360 @ 30 fps H.264 (60 frames) with 2 s of AAC audio.
@@ -81,6 +83,9 @@ struct VideoPresentation {
   std::array<int32_t, 9> displayMatrix{};
   double rotationDegrees = 0;  // av_display_rotation_get of the matrix, 0 without one
   uint32_t codecTag = 0;
+  AVCodecID codec = AV_CODEC_ID_NONE;
+  int level = 0;          // the codec parameters' level (H.264: level_idc, 52 for 5.2)
+  int pixelFormat = -1;   // the codec parameters' format (an AVPixelFormat)
 };
 VideoPresentation videoPresentation(const std::filesystem::path& path);
 

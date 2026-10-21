@@ -35,7 +35,7 @@ class YuNetDetector : public Detector {
   // YuNet's float32 input or the outputs cls_8 ... bbox_32, when a fixed input does not fit, or when
   // onnxruntime fails (also on the CPU retry).
   YuNetDetector(const std::filesystem::path& modelDir, ExecutionProvider provider, const YuNetParams& params,
-                int frameWidth, int frameHeight);
+                int frameWidth, int frameHeight, const SessionSettings& settings = {});
   ~YuNetDetector() override;
   YuNetDetector(const YuNetDetector&) = delete;
   YuNetDetector& operator=(const YuNetDetector&) = delete;
@@ -48,7 +48,7 @@ class YuNetDetector : public Detector {
   std::vector<Box> detect(const VideoFrame& frame) override;
   const std::vector<std::string>& classes() const override;
   std::string source() const override { return "yunet"; }
-  // Of the current session ("CoreML" or "CPU").
+  // Of the current session (providerLabel, e.g. "CoreML" or "CPU").
   std::string backend() const override;
 
  private:

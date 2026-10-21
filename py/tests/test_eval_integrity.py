@@ -4,14 +4,18 @@ import subprocess
 import pytest
 
 from vc_eval import integrity
-from vc_eval.integrity import FFMPEG, check_integrity, probe
+from vc_eval.integrity import FFMPEG, check_integrity, probe, required_h264_level
 
 
-def _video(path, seconds=1, audio=True, rate=30, faststart=False, size="160x120"):
+def _video(path, seconds=1, audio=True, rate=30, faststart=False, size="160x120", codec="libx264", level=None):
     args = [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s={size}:r={rate}:d={seconds}"]
     if audio:
         args += ["-f", "lavfi", "-i", f"sine=f=440:d={seconds}", "-c:a", "aac", "-shortest"]
-    args += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    args += ["-c:v", codec, "-pix_fmt", "yuv420p"]
+    if codec == "libx265":
+        args += ["-x265-params", "log-level=error"]
+    if level is not None:
+        args += ["-level", level]
     if faststart:
         args += ["-movflags", "+faststart"]
     args.append(str(path))
@@ -49,7 +53,8 @@ def test_probe_reads_streams(tmp_path):
 def test_identical_files_pass(tmp_path):
     v = _video(tmp_path / "a.mp4")
     r = check_integrity(v, v)
-    assert r.passed and set(r.checks) == {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"}
+    assert r.passed and set(r.checks) == {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync",
+                                          "h264", "h264_level"}
 
 
 def test_missing_audio_and_wrong_length_fail(tmp_path):
@@ -67,7 +72,7 @@ def test_probe_rejects_a_non_media_file(tmp_path):
         probe(bad)
 
 
-CHECKS = {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync"}
+CHECKS = {"decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync", "h264", "h264_level"}
 
 
 def test_probe_of_a_clean_file_has_no_decode_errors(tmp_path):
@@ -275,3 +280,59 @@ def test_the_report_carries_the_frame_count_of_the_redacted_video(tmp_path):
     v = _video(tmp_path / "a.mp4")
     assert check_integrity(v, v).redacted_frames == 30
     assert check_integrity(v, tmp_path / "nope.mp4").redacted_frames is None
+
+
+@pytest.mark.parametrize("width, height, fps, level", [
+    (3840, 2160, 60, 52),           # 4K60 needs 5.2 (spec 2026-10-20 §3)
+    (3840, 2160, 60000 / 1001, 52),
+    (3840, 2160, 30, 51),
+    (1920, 1080, 60000 / 1001, 42),
+    (1920, 1080, 30, 40),
+    (1280, 720, 60, 32),
+    (1280, 720, 30, 31),
+    (160, 120, 30, 11),
+    (7680, 4320, 60, 61),
+    (7680, 4320, 120, 62),
+    (7680, 4320, 240, None),        # beyond the last level
+])
+def test_required_h264_level_follows_table_a1(width, height, fps, level):
+    assert required_h264_level(width, height, fps) == level
+
+
+def test_an_h264_output_at_a_sufficient_level_passes(tmp_path):
+    src = _video(tmp_path / "src.mp4", seconds=0.2, audio=False, rate=60, size="1280x720")
+    r = check_integrity(src, src)
+    assert r.checks["h264"] is True and r.checks["h264_level"] is True
+    assert r.details["h264_level"].endswith("1280x720 at 60.00 fps needs 3.2")
+
+
+def test_an_hevc_output_fails_the_h264_checks(tmp_path):
+    src = _video(tmp_path / "src.mp4", audio=False)
+    out = _video(tmp_path / "out.mp4", audio=False, codec="libx265")
+    r = check_integrity(src, out)
+    assert r.checks["h264"] is False and r.checks["h264_level"] is False and not r.passed
+    assert r.details["h264"] == "redacted video codec hevc"
+    assert "not H.264" in r.details["h264_level"]
+    assert r.checks["frame_count"] is True and r.checks["resolution"] is True  # only the codec checks fail
+
+
+def test_a_level_below_what_the_size_and_rate_need_fails(tmp_path):
+    src = _video(tmp_path / "src.mp4", seconds=0.2, audio=False, rate=60, size="1280x720")
+    out = _video(tmp_path / "out.mp4", seconds=0.2, audio=False, rate=60, size="1280x720", level="3.1")
+    assert probe(out).video.level == 31
+    r = check_integrity(src, out)
+    assert r.checks["h264"] is True and r.checks["h264_level"] is False and not r.passed
+    assert r.details["h264_level"] == "level 3.1; 1280x720 at 60.00 fps needs 3.2"
+
+
+def test_an_unknown_level_fails_the_level_check(tmp_path, monkeypatch):
+    src, out = _video(tmp_path / "src.mp4"), _video(tmp_path / "out.mp4")
+
+    def no_level(data):
+        for stream in data["streams"]:
+            stream.pop("level", None)
+
+    _drop_from_probe(monkeypatch, out, no_level)
+    assert probe(out).video.level is None
+    r = check_integrity(src, out)
+    assert r.checks["h264_level"] is False and "level unknown" in r.details["h264_level"]

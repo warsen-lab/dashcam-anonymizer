@@ -21,42 +21,22 @@ namespace {
 // A track's block moves up the ladder only when its mask asks for more than this many times the block.
 constexpr double kBlockUpgradeFactor = 1.5;
 
-int ceilShift(int value, int shift) { return -((-value) >> shift); }
-
-PixelRect clipped(const PixelRect& r, int width, int height) {
-  return {std::clamp(r.x1, 0, width), std::clamp(r.y1, 0, height), std::clamp(r.x2, 0, width),
-          std::clamp(r.y2, 0, height)};
-}
-
-// `r` (inside the frame) with its edges moved out to multiples of `block`, clipped to the frame.
-PixelRect snapped(const PixelRect& r, int block, int width, int height) {
-  const auto down = [block](int v) { return v / block * block; };
-  const auto up = [block](int v) {
-    return static_cast<int>((static_cast<int64_t>(v) + block - 1) / block * block);
-  };
-  return clipped({down(r.x1), down(r.y1), up(r.x2), up(r.y2)}, width, height);
-}
-
-// Sets the part inside `area` (plane pixels) of every cell of the cellW x cellH grid anchored at the plane's
-// origin to that part's rounded mean. `step` is the byte distance between neighbouring samples, `offset` the
-// first sample's byte (NV12 chroma: 2, 0 / 1).
-void pixelateGrid(uint8_t* data, int stride, const PixelRect& area, int cellW, int cellH, int step, int offset) {
-  for (int gy = area.y1 / cellH * cellH; gy < area.y2; gy += cellH) {
-    const int by = std::max(gy, area.y1);
-    const int ey = std::min(gy + cellH, area.y2);
-    for (int gx = area.x1 / cellW * cellW; gx < area.x2; gx += cellW) {
-      const int bx = std::max(gx, area.x1);
-      const int ex = std::min(gx + cellW, area.x2);
+// Sets every cell of `cells` (plane pixels, each cell's part inside the area) to its rounded mean. `step` is the
+// byte distance between neighbouring samples, `offset` the first sample's byte (NV12 chroma: 2, 0 / 1).
+void pixelateGrid(uint8_t* data, int stride, const grid::CellGrid& cells, int step, int offset) {
+  for (int row = 0; row < cells.rows; ++row) {
+    for (int col = 0; col < cells.cols; ++col) {
+      const PixelRect cell = grid::cellRect(cells, col, row);
       uint64_t sum = 0;
-      for (int y = by; y < ey; ++y) {
-        const uint8_t* row = data + static_cast<ptrdiff_t>(y) * stride + offset;
-        for (int x = bx; x < ex; ++x) sum += row[x * step];
+      for (int y = cell.y1; y < cell.y2; ++y) {
+        const uint8_t* line = data + static_cast<ptrdiff_t>(y) * stride + offset;
+        for (int x = cell.x1; x < cell.x2; ++x) sum += line[x * step];
       }
-      const uint64_t count = static_cast<uint64_t>(ey - by) * static_cast<uint64_t>(ex - bx);
-      const auto mean = static_cast<uint8_t>((sum + count / 2) / count);
-      for (int y = by; y < ey; ++y) {
-        uint8_t* row = data + static_cast<ptrdiff_t>(y) * stride + offset;
-        for (int x = bx; x < ex; ++x) row[x * step] = mean;
+      const uint64_t count = static_cast<uint64_t>(cell.y2 - cell.y1) * static_cast<uint64_t>(cell.x2 - cell.x1);
+      const uint8_t mean = grid::roundedMean(sum, count);
+      for (int y = cell.y1; y < cell.y2; ++y) {
+        uint8_t* line = data + static_cast<ptrdiff_t>(y) * stride + offset;
+        for (int x = cell.x1; x < cell.x2; ++x) line[x * step] = mean;
       }
     }
   }
@@ -153,26 +133,21 @@ void applyMosaic(AVFrame& frame, const std::vector<MosaicRect>& rects) {
   if (!av_frame_is_writable(&frame)) {
     throw VcError("mosaic: frame buffers are shared; make the frame writable first");
   }
-  const int sw = desc->log2_chroma_w;
-  const int sh = desc->log2_chroma_h;
   // Largest blocks first: where masks overlap, the finer mosaic drawn last is what shows.
   std::vector<MosaicRect> ordered = rects;
   std::stable_sort(ordered.begin(), ordered.end(),
                    [](const MosaicRect& a, const MosaicRect& b) { return a.block > b.block; });
   for (const MosaicRect& m : ordered) {
-    const PixelRect r = clipped(m.rect, frame.width, frame.height);
-    if (r.empty()) continue;
-    const PixelRect area = m.snap ? snapped(r, m.block, frame.width, frame.height) : r;
-    pixelateGrid(frame.data[0], frame.linesize[0], area, m.block, m.block, 1, 0);
-    const PixelRect c{area.x1 >> sw, area.y1 >> sh, ceilShift(area.x2, sw), ceilShift(area.y2, sh)};
-    const int cw = m.block >> sw;
-    const int ch = m.block >> sh;
+    const grid::MaskCells cells = grid::maskCells(m.rect, m.block, m.snap, frame.width, frame.height,
+                                                  desc->log2_chroma_w, desc->log2_chroma_h);
+    if (cells.luma.cells() == 0) continue;
+    pixelateGrid(frame.data[0], frame.linesize[0], cells.luma, 1, 0);
     if (nv12) {
-      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 2, 0);
-      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 2, 1);
+      pixelateGrid(frame.data[1], frame.linesize[1], cells.chroma, 2, 0);
+      pixelateGrid(frame.data[1], frame.linesize[1], cells.chroma, 2, 1);
     } else {
-      pixelateGrid(frame.data[1], frame.linesize[1], c, cw, ch, 1, 0);
-      pixelateGrid(frame.data[2], frame.linesize[2], c, cw, ch, 1, 0);
+      pixelateGrid(frame.data[1], frame.linesize[1], cells.chroma, 1, 0);
+      pixelateGrid(frame.data[2], frame.linesize[2], cells.chroma, 1, 0);
     }
   }
 }

@@ -63,6 +63,10 @@ fs::path tenBitVideo() {
                    "-x265-params log-level=error");
 }
 
+fs::path yuv422Video() {
+  return makeMedia("yuv422.mp4", "-f lavfi -i testsrc2=s=640x360:r=30:d=1 -c:v libx264 -pix_fmt yuv422p");
+}
+
 fs::path audioOnlyFile() {
   return makeMedia("audio_only.m4a", "-f lavfi -i sine=f=440:d=1 -c:a aac");
 }
@@ -227,6 +231,9 @@ VideoPresentation videoPresentation(const fs::path& path) {
   p.colorPrimaries = par->color_primaries;
   p.colorTrc = par->color_trc;
   p.codecTag = par->codec_tag;
+  p.codec = par->codec_id;
+  p.level = par->level;
+  p.pixelFormat = par->format;
   const AVPacketSideData* sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
   if (sd != nullptr && sd->size >= sizeof(int32_t) * 9) {
     p.hasDisplayMatrix = true;

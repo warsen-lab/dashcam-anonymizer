@@ -11,9 +11,9 @@
 ## 依赖
 
 - CMake ≥ 3.24，支持 C++20 的编译器
-- FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux `libavformat-dev libavcodec-dev libswscale-dev libavutil-dev`。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
+- FFmpeg ≥ 8（libswscale ≥ 9）开发库：macOS `brew install ffmpeg`；Linux 不要用 apt 的 `libavformat-dev` 等（Ubuntu 22.04 / 24.04 带的是 FFmpeg 4.4 / 6.1，版本不够），用 `scripts/setup_linux.sh` 从源码编 FFmpeg 8（见 `docs/USAGE.md`）。代码依赖 FFmpeg 8 的动态 `sws_scale_frame`，更旧的版本在 CMake 配置阶段就会报错
 - GoogleTest：macOS `brew install googletest`；Linux `libgtest-dev`
-- onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
+- onnxruntime 1.30.0 官方预编译包（macOS arm64，含 CoreML EP；在 Linux 上 CMake 默认找 x64 GPU 包 `onnxruntime-linux-x64-gpu-1.30.0`，含 CUDA 与 TensorRT EP）与 nlohmann/json 3.12.0 单头文件。CMake 配置阶段**不会**下载它们，需要事先解压到所有 checkout 共享的缓存目录（默认 `~/.cache/video-compliance/third_party`，可用 `-DVC_THIRD_PARTY_DIR=…` 覆盖；缺少时配置会报错并指向这里）：
 
   ```bash
   (
@@ -33,6 +33,8 @@
 
   这两步会联网（合计约 43MB），只需做一次。**在计费流量的网络上先征得同意再下载**。每个文件都先下载到临时目录，`shasum -a 256 -c` 校验通过后才解压或放进缓存；校验和对不上时脚本在那一步直接失败（退出码非 0），缓存里不会留下没校验过的文件。其他机器或 worktree 直接复用同一份缓存，不必重复下载。
 
+**Linux（NVIDIA）**：`scripts/setup_linux.sh` 在 Ubuntu 22.04 / 24.04 上装齐依赖并以 `-DVC_WITH_CUDA=ON` 构建到 `build/cpp-linux`（会联网，要先设 `VC_ALLOW_DOWNLOAD=1`；下载按脚本里的 sha256 表校验，见 `docs/USAGE.md` §7）。它从源码编 FFmpeg 8.1.2（NVENC / NVDEC + libx264）装到 `~/.cache/video-compliance/linux/ffmpeg-8.1.2/`，CMake 用 `-DCMAKE_PREFIX_PATH=<那个目录>` 找到它；onnxruntime 用 Linux GPU 包 `onnxruntime-linux-x64-gpu-1.30.0`，解压到上面同一个 `third_party` 目录。生产用的 Docker 镜像见 `docker/Dockerfile`。
+
 ## 构建
 
 ```bash
@@ -42,6 +44,8 @@ cmake --build build/cpp -j 4
 
 不指定 `CMAKE_BUILD_TYPE` 时，单配置生成器（Makefile、Ninja）默认按 Release 构建。
 
+`-DVC_WITH_CUDA=ON` 打开 NVIDIA GPU 的代码路径（设计见 `docs/superpowers/specs/2026-10-20-linux-nvidia-deployment-design.md`）：启用 CUDA 语言，`CMAKE_CUDA_ARCHITECTURES` 默认 `86;89`（A10 / RTX 3090，L4 / L40S / RTX 4090），并定义宏 `VC_WITH_CUDA`；找不到 nvcc 时配置阶段直接报错。默认 `OFF`：不编译、不链接任何 CUDA，macOS 和本机测试都用它。目前 `ON` 只多出 CUDA 语言和这个宏，核函数在 GPU 计划里实现。
+
 产物：`build/cpp/vc_extract`、`build/cpp/vc_redact`、`build/cpp/vc_detect` 和测试程序 `build/cpp/tests/vc_tests`。
 
 ## 测试
@@ -49,11 +53,11 @@ cmake --build build/cpp -j 4
 测试视频由本机 `ffmpeg` 现场生成到 `build/cpp/tests/tmp/`，不需要联网。本机请按模块过滤运行：
 
 ```bash
-./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*'
+./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*:BuildConfig.*'
 ./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
-./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*'
-./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:BoundedQueue.*:RedactConfig.*:Records.*'
+./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*:ExecutionProvider.*'
+./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:MosaicGrid.*:BoundedQueue.*:RedactConfig.*:Records.*'
 ./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectCli.*:DetectImages.*:DetectRate.*'
 ```
 
@@ -81,7 +85,7 @@ cmake --build build/cpp -j 4
 | `--motion-threshold` | 0.05 | 与上一帧 160×90 缩略图的平均亮度差（0–1） |
 | `--dedup` | 关闭 | 与上一张保留帧差异低于该值时跳过，训练采集建议 0.01 |
 | `--clip S,D` | 关闭 | 导出第 S 秒起 D 秒内的每一帧，用于时间覆盖率评测 |
-| `--hwaccel` | auto | `auto` / `none` / `videotoolbox`；显式指定 `videotoolbox` 时，编码格式不被支持会回退到软解，统计行的 `decoded` 会写明实际用的是 hardware 还是 software |
+| `--hwaccel` | auto | `auto` / `none` / `videotoolbox` / `cuda`（`auto` 与 `cuda` 的含义同 `vc_redact`）；显式指定 `videotoolbox` 时，编码格式不被支持会回退到软解，统计行的 `decoded` 会写明实际用的是 hardware 还是 software |
 | `--jpeg-q` | 2 | MJPEG 量化值，2 最好（约等于质量 95） |
 | `--overwrite` | 关闭 | 覆盖已有输出目录，见下方安全规则 |
 
@@ -109,7 +113,7 @@ cmake --build build/cpp -j 4
 - `<视频名>.redacted.mp4`：打码后的视频。先写成 `.redacted.mp4.partial`，全部成功后才改名，所以不会出现写了一半的成品
 - `detections.jsonl`：关键帧上检测器的原始输出，每个框一行（格式见主设计 §3.2），`src` 为 `student`（回放时为 `fake`）；加了 `--face-model` 时还有 `yunet`（只有人脸模型检出）和 `student+yunet`（两个检测器检出的同一个目标，合并后的框，见下方“人脸模型”）；每行最后有 `confirmed`（true / false），false 表示分数低于本类确认门槛、只在一个关键帧出现、没有打码的框。一个关键帧的检测要等到下一个关键帧（或视频结尾）才写出
 - `masks.jsonl`：每一帧一行，列出这一帧实际打码的框：`cls`、坐标、`track`（轨迹编号，从 1 起；同一条轨迹每帧至多一个框）和来源 `origin`（`detected` 为轨迹在这个关键帧上检测到的框，`interpolated` 为前后两个关键帧之间插值出来的，`held` 为目标在下一个关键帧没被检出时原地保持（按速度外推，至多半个框边）的框），以及打码用的马赛克块大小 `block` 和边界是否向外对齐网格 `snap`（车牌为 `false`）
-- `stats.json`：帧数、关键帧数、检测与打码数量（含被丢弃的大人脸个数 `large_faces_dropped`，见“人脸模型”）、实际使用的检测后端和编码器、音频与被丢弃的流、本次生效的完整配置、各阶段的忙碌时间和帧率（`stages`，见下）、准备时间 `setup_s` 和总耗时 `elapsed_s`；关键帧间隔 `video_fps`、`keyframe_stride`、`detect_fps_actual`（实际每秒检测次数 = video_fps / keyframe_stride）
+- `stats.json`：帧数、关键帧数、检测与打码数量（含被丢弃的大人脸个数 `large_faces_dropped`，见“人脸模型”）、实际使用的检测后端和编码器、编码器的码率控制 `rate_control` 和目标码率 `output_bit_rate`（恒定画质时为 `null`）、流水线 `pipeline`（目前总是 `cpu-frames`：帧在内存里流转；全程 GPU 的 `gpu` 在 GPU 计划里）、音频与被丢弃的流、本次生效的完整配置、各阶段的忙碌时间和帧率（`stages`，见下）、准备时间 `setup_s` 和总耗时 `elapsed_s`；关键帧间隔 `video_fps`、`keyframe_stride`、`detect_fps_actual`（实际每秒检测次数 = video_fps / keyframe_stride）
 
 流水线是三个并行的阶段，各占一个线程：**decode**（解码）、**main**（处理线程，依次做 detect 检测、track 关键帧选择与跟踪、mosaic 打码）、**encode**（编码与写文件）。`stages` 里的 `decode` / `main` / `encode` 就是这三个线程各自的忙碌时间（不含排队等待），`main` 的忙碌时间等于 `detect + track + mosaic` 之和（`items` 为帧数；`detect` 的 `items` 为关键帧数，是每个关键帧检测的墙钟时间之和（有人脸模型时另有 `detect_student`、`detect_face`）），后三项只是 main 的分解，彼此不并行。整体帧率大致受三者中最慢的那个限制。`setup_s` 是从启动到第一帧进入处理线程的时间：打开输入、检查输出目录、加载模型（CoreML 在这一步编译模型）、启动线程、解出第一帧；编码器要等编码线程收到第一帧才打开，这部分时间算在 `encode` 里。
 
@@ -123,15 +127,15 @@ cmake --build build/cpp -j 4
 | `--config <json>` | 内置默认值 | 参数文件，格式见 `configs/redact.json`；省略的键取默认值，未知键、类型不对或越界的值会报错（退出码 2）。内置默认值与仓库里的 `configs/redact.json` 相同，其中检测频率 10 fps、分数阈值 0.05 是 2026-10-18 代理验证选定的（见 `docs/reports/proxy-validation-2026-10-18.md`），外扩、收缩、确认门槛是 2026-10-19 标定的（见 `docs/reports/stable-masks-2026-10-19.md`） |
 | `--detect-fps <n>` | 10 | 每秒检测几次（关键帧），5 到 60，覆盖配置里的 `detect_fps`。关键帧按帧序号每隔 stride = max(1, ⌊视频帧率 / n + 0.5⌋) 帧一个，整段不变（60 fps 视频上 5/10/15/30/60 是每 12/6/4/2/1 帧）；n 达到视频帧率就是逐帧检测，超过时 stderr 多一行 note:。视频帧率取视频流的 avg_frame_rate，读不到退回 r_frame_rate，都没有就报错。缓冲满 120 帧时仍强制出一个关键帧 |
 | `--detect-every-frame` | 关闭 | 每一帧都检测，用来做时间覆盖率评测的对照 |
-| `--ep` | coreml | `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者 |
-| `--hwaccel` | none | 解码方式：`none` / `auto` / `videotoolbox`（与 `vc_extract` 不同，默认不用硬解） |
-| `--encoder` | auto | `auto` 先试 VideoToolbox 再退到软编；`software` 直接用 libx264 / libx265 |
+| `--ep` | auto | `auto` / `tensorrt` / `cuda` / `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者。`auto` 在 Linux 上依次试 TensorRT、CUDA、CPU，在 macOS 上试 CoreML、CPU（与原来的默认 `coreml` 相同）；显式指定的用不了时退到 CPU。跳过的每一个在 stderr 写一行原因，例如 `vc: TensorRT execution provider unavailable (…); trying CUDA`。TensorRT / CUDA 的会话在 GPU 计划里接上，在那之前它们总是报不可用 |
+| `--hwaccel` | macOS `none`，Linux `auto` | 解码方式：`none` / `auto` / `videotoolbox` / `cuda`。`auto` 在 Linux 上试 CUDA（NVDEC，解完拷回内存），打不开退回软件解码并在 stderr 写一行；在 macOS 上试 VideoToolbox，打不开悄悄退回软件解码（与 `vc_extract` 不同，macOS 上默认不用硬解，1080p H.264 软解更快）。`cuda` 打不开时退回软件解码并写一行 `vc: CUDA (NVDEC) decoding unavailable (原因); decoding in software`（macOS 上总是这样）；显式的 `videotoolbox` 打不开则报错 |
+| `--encoder` | auto | `auto` 按 `h264_nvenc`（不在 macOS 上）→ `h264_videotoolbox`（只在 macOS 上）→ libx264 的顺序试；`software` 直接用 libx264 |
 | `--overwrite` | 关闭 | 覆盖上一次 `vc_redact` 的输出目录，见下方 |
 
 要点：
 
 - **补框：一个目标一个框**（设计见 `docs/superpowers/specs/2026-10-19-stable-masks-and-speed-design.md` §3）：前后两个关键帧上的框分两轮配对（同类、一对一、代价小的先配）。第一轮按中心距离除以平均边长，不超过 `match_max_distance`；剩下的再配第二轮：x、y 方向的位移都除以两框所有边里最长的那条，都不超过 `match_max_distance_loose`（默认 6），且两框的宽、高各自相差不超过 3 倍，所以一个间隔里移动好几个框宽的车牌、人脸也能配上；但任一端分数低于本类确认门槛的配对（轨迹一端按它最后一次真实检测的分数算，幽灵按丢失前那次检测）只在第一轮配，不进第二轮（设计 §3.8）。配上的框连成一条轨迹，**每条轨迹每帧至多一个框**：两个关键帧之间按中心和宽高线性插值；下一个关键帧上没配上时，在原地保持，已有速度就按速度外推，但每个轴的位移不超过半个框宽 / 框高；这条轨迹再留一个关键帧（幽灵），在下一个关键帧配上了就从保持到的位置插值过去，没配上就结束，中间那一段不再打码。速度从轨迹最后一次真实检测量起。目标第一次被检出之前的帧不打码。每条轨迹的打码框大小还会平滑（平滑的是宽、高，不是各条边）：需要变大时立刻变大，需要变小时宽、高每帧最多缩小 `shrink_per_frame`（默认 0.2），且不小于当帧要盖的框；框始终以当帧要盖的框的中心为中心，所以快速移动的目标不会被拖出一条长尾；目标丢失、原地保持的那几帧不缩小。面积超过 `max_mask_area_ratio`（默认 4）倍时，宽、高按同一比例向要盖的框收缩到恰好 4 倍。分数低于确认门槛（`face_confirm_score` 默认 0.5、`plate_confirm_score` 默认 0.2，按类别判断，与来源无关，合并框按合并后的分数）的框，只有在相邻两个关键帧被配进同一条轨迹时才打码，确认后从它第一次出现的关键帧起打码（那一段本来就要等下一个关键帧才输出，不增加延迟）；高分框出现即打码，确认过的轨迹之后的低分框不再需要确认。`hold_lost_ghosts`（默认 `false`，设计 §3.7）打开时，幽灵在下一个关键帧也没配上，[k1, k2) 仍在幽灵的保持位置打码（`origin` 为 `held`，位置不再移动、不加运动外扩，大小延续保持段的大小，也不缩小），然后轨迹才结束；视频最后一个关键帧之后的尾段里，幽灵同样在保持位置打码，代价是消失的目标（包括误检）多留一个间隔的码。
-- **马赛克**（设计 §4）：网格固定在画面坐标上，不随打码框移动：打码区域的四边向外扩到块大小的整数倍，每块取块内均值，画面右、下边缘的不完整块取实际像素的均值；色度平面按子采样换算（4:2:0 为块大小的一半）。块大小按轨迹固定：轨迹开始时取档位 {16, 24, 32, 48, 64, 96, 128, 192, 256} 中第一个不小于 max(mosaic_min_block_px, ⌈长边 / mosaic_blocks_per_long_side⌉) 的值，之后只有这个计算值超过当前块大小的 1.5 倍才升档，不降档（超过 256 的一律用 256）。打码框互相重叠时按块大小从大到小打，细的盖在粗的上面。**车牌例外**：四边不向外扩，马赛克只画在打码框内，仍按同一张画面网格分块，被框边切开的块取框内那部分的均值（车牌又扁又小，向外对齐 16 px 网格会让屏上面积翻到约 2.3 倍）。
+- **马赛克**（设计 §4）：网格固定在画面坐标上，不随打码框移动：打码区域的四边向外扩到块大小的整数倍，每块取块内均值，画面右、下边缘的不完整块取实际像素的均值；色度平面按子采样换算（4:2:0 为块大小的一半）。块大小按轨迹固定：轨迹开始时取档位 {16, 24, 32, 48, 64, 96, 128, 192, 256} 中第一个不小于 max(mosaic_min_block_px, ⌈长边 / mosaic_blocks_per_long_side⌉) 的值，之后只有这个计算值超过当前块大小的 1.5 倍才升档，不降档（超过 256 的一律用 256）。打码框互相重叠时按块大小从大到小打，细的盖在粗的上面。**车牌例外**：四边不向外扩，马赛克只画在打码框内，仍按同一张画面网格分块，被框边切开的块取框内那部分的均值（车牌又扁又小，向外对齐 16 px 网格会让屏上面积翻到约 2.3 倍）。“框 → 要打哪些块、每块的像素范围”（含车牌那种被框边切开的块）写成 `cpp/src/mask/mosaic_grid.h` 里的纯函数（`grid::maskCells`、`grid::cellRect`、`grid::roundedMean`，标了 `VC_HOST_DEVICE`），GPU 计划里的 CUDA 马赛克用同一套，所以两边逐像素相同。
 - **已知的局限**（设计 §3.5 接受的代价）：
   - 目标在两个关键帧之间掉头（反向运动）时，那个间隔里是线性插值，掉头那一段可能盖不全。
   - 目标在某个关键帧漏检、而在漏检的间隔里停下或掉头时，原地保持（至多外推半个框边）的框可能盖不全。
@@ -139,12 +143,14 @@ cmake --build build/cpp -j 4
   - 第二轮配错（例如两个相邻同类目标在还没有速度的第一个间隔里交错），配错的那一段可能盖不全；分数都不低于确认门槛的两个框，若恰是相距较远的同类误检，仍可能被第二轮配上，插值框会在两者之间移动（低于门槛的框不会，见上）。
   - 视频最后一个关键帧之后的几帧只按速度外推半个框边，快速移动的目标可能离开打码框。
   - 只被低分检到一次的真目标会漏，例如快速横穿、只露一次的小脸。
+- **Linux 部署用的配置键**（设计 2026-10-20）：`rate_control`（默认 `"quality"` 恒定画质，`"bitrate"` 按码率）、`output_bitrate_factor_hevc`（默认 1.5，[1, 4]，`"bitrate"` 下非 H.264 原片的码率系数）、`nvenc_preset`（默认 `p4`，`p1`–`p7`）、`trt_fp16`（默认 `true`）、`ort_intra_threads`（默认 0 = onnxruntime 自己定，> 0 设每个会话的 intra-op 线程数，macOS 上也生效）；写进 `stats.json` 的 `config`，含义见 `docs/USAGE.md` §4。
 - **检测器出错整段失败**：模型无法加载、推理报错、输出里有非有限的分数或框等都会让整次运行失败，并删除本次已写出的所有文件（本次新建的输出根目录和新建的上级目录，空了也一并删除），不留半成品；而不是悄悄少打几个码。
 - **音频直接拷贝**（不重编码）；MP4 放不下的音频编码（例如 MOV 里的 `pcm_mulaw`）在打开输入后、加载模型和创建或删除任何输出之前就报错并点名这个编码（退出码 1，加了 `--overwrite` 时上一次的输出也原样保留），不会写出一个没有声音的视频。GPS / 字幕 / 额外视频流等其他流会被丢弃，丢了哪些会列在运行结束的统计行和 `stats.json` 的 `dropped_streams` 里。
 - **画面呈现信息随原片**：像素宽高比（SAR）、色彩范围 / 矩阵 / 原色 / 传输特性这四个标签，以及旋转（显示矩阵）都从输入视频流拷到输出，所以竖拍视频、BT.709 或全范围标签的视频输出后显示不变；原片没有写的项目输出里也不写。需要换像素格式才能编码时，色彩范围和矩阵照原样带过去，不会被悄悄压缩成有限范围。
-- **编码格式跟随原片**：HEVC 仍是 HEVC，其他一律输出 H.264，容器固定为 MP4，按恒定画质编码（VideoToolbox `-q:v` 65，libx264 / libx265 crf 18），不跟原片码率：按原片码率重编，VideoToolbox 的输出明显发糊（1080p 行车记录 SSIM Y 0.92，恒定画质 0.985），代价是文件约为原片的 4 倍。VideoToolbox 不可用（例如 H.264 宽或高超过 4096）时退到 libx264 / libx265，stderr 会有一行 `vc: video encoder h264_videotoolbox could not be opened (原因); using libx264`，实际用的编码器写在统计行 `encoder`。编码器交回的包数必须与送进去的帧数一致，否则整次运行失败。
-- **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或 CoreML 无法使用、已回退，回退时 stderr 会有提示）；`fake` 表示回放。加了 `--face-model` 时两个检测器都列出，例如 `student/CoreML + yunet/CoreML`、`fake + yunet/CPU`。
+- **输出一律 H.264**（设计 2026-10-20 §3，macOS 与 Linux 相同），容器固定为 MP4。编码器按顺序尝试 `h264_nvenc`（不在 macOS 上）→ `h264_videotoolbox`（只在 macOS 上）→ `libx264`，`--encoder software` 只用 libx264；前面的打不开（例如 VideoToolbox 的 H.264 宽或高超过 4096）时 stderr 一行 `vc: video encoder h264_videotoolbox could not be opened (原因); using libx264`，实际用的写在统计行和 `stats.json` 的 `encoder`。码率由配置键 `rate_control` 定，默认 `"quality"`，按恒定画质编码，不跟原片码率：VideoToolbox `q:v` 65、libx264 `crf` 18、NVENC `rc=vbr` 加 `cq=19`（不设码率）。按原片码率重编，VideoToolbox 的输出明显发糊（1080p 行车记录对原片 SSIM Y 0.92，恒定画质 0.985），代价是文件约为原片的 4 倍；NVENC 的 `cq` 19 是暂定值，等 GPU 计划 1c 在目标机上按 SSIM 标定。`"bitrate"` 按码率编码：H.264 原片取原片视频流的码率，HEVC 等其他编码乘 `output_bitrate_factor_hevc`（默认 1.5，只在这个模式下用），读不到原码率时按 8 Mb/s（再乘系数）。`stats.json` 的 `rate_control` 写用了哪种，`output_bit_rate` 在 `"bitrate"` 下是目标码率，在 `"quality"` 下是 `null`。Level 按 H.264 Table A-1 由分辨率和帧率定（1080p 59.94 fps 要 4.2，4K60 要 5.2）：VideoToolbox 自己选的偏低（这两种分别给 4.0、5.1），所以给它指定 High profile 和这个 Level（它的 Level 选项只有 3.0–5.2）；NVENC 也指定 Level，并用 `nvenc_preset`；libx264 自己选的就够；两种码率控制下都是这样。编码器的输入一律是 8 位 4:2:0（NV12 或 yuv420p）：10 位原片在解码时转成 NV12，4:2:2 / 4:4:4 原片在送进编码器前转换；原片不是 8 位 4:2:0 时，运行结束 stderr 多一行 `vc_redact: note: the source video is yuv420p10le (10-bit 4:2:0); the H.264 output is 8-bit 4:2:0`（退出码仍为 0）。编码器交回的包数必须与送进去的帧数一致，否则整次运行失败。
+- **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或前面的执行提供者无法使用、已回退，回退时 stderr 会有提示）；Linux + NVIDIA 上会是 `student/TensorRT`、`student/CUDA`（GPU 计划）；`fake` 表示回放。加了 `--face-model` 时两个检测器都列出，例如 `student/CoreML + yunet/CoreML`、`fake + yunet/CPU`。
 - **CoreML 编译缓存**：用 CoreML 时，onnxruntime 第一次创建会话要把模型编译成 CoreML 模型（大模型可能要几十秒以上），编译结果放在 `$VC_CACHE/coreml-cache/<model.onnx 的 sha256>/`（`VC_CACHE` 默认 `~/.cache/video-compliance`，所有 checkout 共享，`vc_detect` 也用它），之后同一个模型直接复用；模型文件内容一变，sha256 跟着变，会重新编译到新目录。目录建不了时 stderr 提示一行，照常编译、只是不缓存。缓存是多个进程共享的：同时第一次运行的几个进程会抢着写它（"Error copying compiled model to cache path"），编译到一半被杀掉的进程还会留下加载不了的编译结果；用缓存创建 CoreML 会话失败时，会先不带缓存目录再试一次 CoreML（stderr 一行，写明失败原因和缓存目录，并提示 `delete <目录> to rebuild the cache`；共享的缓存目录原样留着，不删不修，别的进程可能正在写它），这一次还失败才退到 CPU。因此损坏的缓存目录不会被修复：此后每次运行都会先失败一次、再不带缓存重新编译一遍，直到手动删掉这个目录（`~/.cache/video-compliance/coreml-cache/<sha>`，设了 `$VC_CACHE` 时在它下面），下一次运行才会重建缓存。与缓存无关的 CoreML 失败（例如这个模型根本建不起 CoreML 会话）现在在退到 CPU 之前也会多编译一次。旧模型的缓存目录不会自动删除，需要时手动清理。
+- **TensorRT 引擎缓存**（GPU 计划里用上）：`$VC_CACHE/trt-cache/<model.onnx 的 sha256>/<宽>x<高>/`，与 CoreML 缓存同一做法，按模型内容和输入尺寸分目录（学生模型是它的输入尺寸，如 `1920x1088`；YuNet 是补边后的帧尺寸，如 `3840x2176`）。
 - **模型必须是 float32**：`model.onnx` 的输入输出是 float16 或其他类型时会直接报错，不会静默转换。`model.json` 与 ONNX 的输入尺寸、类别数不一致也会报错。
 - **解码错误**：解码器拒绝并跳过的损坏数据包 / 帧的个数写在统计行的 `decode errors` 和 `stats.json` 的 `decode_errors`；大于 0 时 stderr 还会多一行 `vc_redact: warning: …`（退出码仍为 0），这些帧不在输出里。
 - **`--detect-every-frame`** 只是评测对照用的开关，会让检测耗时随帧数线性增长，日常处理不要打开。
@@ -195,7 +201,7 @@ printf '{"video":"basic.mp4","frame":0,"pts_ms":0,"cls":"face","x1":100,"y1":100
 | `--model <dir>` | 必填 | `model.onnx` + `model.json` |
 | `--frames <dir>` | 必填 | `vc_extract` 的输出目录（`frames.csv` 和 `<帧号:06d>.jpg`） |
 | `--out <jsonl>` | 必填 | 要写的检测文件；先写 `.partial` 再改名，失败时不留文件 |
-| `--ep` | cpu | `cpu` / `coreml`；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
+| `--ep` | cpu | `cpu` / `coreml`（也接受 `auto` / `tensorrt` / `cuda`，回退规则同 `vc_redact`）；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
 | `--score <x>` | 0.15 | 分数阈值，取值 [0, 1]；比较时应与 Python 端一致 |
 
 检测的 NMS IoU 固定用默认值 0.5（没有对应参数），与 Python 端比较时要用同一个值。参数值以 `--` 开头会被当作漏写了值（退出码 2），与 `vc_redact` 相同。`frames.csv` 里一张图都没有时报错（退出码 1），不会写出一个空的检测文件。

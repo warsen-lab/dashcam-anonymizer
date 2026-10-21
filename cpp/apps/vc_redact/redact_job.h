@@ -14,6 +14,10 @@
 
 namespace vc {
 
+// vc_redact's --hwaccel default (spec 2026-10-20 §3): auto on Linux (CUDA, else software), none elsewhere (on macOS
+// software decoding is faster than VideoToolbox for 1080p H.264).
+HwAccel defaultRedactHwAccel(Platform platform);
+
 struct RedactOptions {
   std::filesystem::path input;
   std::filesystem::path outRoot;  // outputs go to outRoot / <input stem>
@@ -24,8 +28,8 @@ struct RedactOptions {
   std::optional<std::filesystem::path> faceModelDir;
   RedactConfig config;
   bool detectEveryFrame = false;
-  ExecutionProvider provider = ExecutionProvider::CoreML;
-  HwAccel hwAccel = HwAccel::None;
+  ExecutionProvider provider = ExecutionProvider::Auto;  // providerOrder: CoreML then CPU on macOS
+  HwAccel hwAccel = defaultRedactHwAccel(buildPlatform());
   bool preferHardwareEncoder = true;
   bool overwrite = false;
 };
@@ -56,8 +60,18 @@ struct RedactStats {
   double detectFpsActual = 0;
   double detectFpsRequested = 0;
   bool detectFpsAboveVideoRate = false;
-  std::string encoder;   // e.g. "h264_videotoolbox", "libx264"
-  // "student/CoreML", "student/CPU" or "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
+  std::string encoder;   // e.g. "h264_nvenc", "h264_videotoolbox", "libx264"; the output is always H.264
+  RateControl rateControl = RateControl::Quality;  // configs/redact.json rate_control
+  // The encoder's target with rate_control "bitrate": h264OutputBitRate of the source (spec 2026-10-20 §3); 0 (null
+  // in stats.json) with "quality".
+  int64_t outputBitRate = 0;
+  // Set when the source is not 8-bit 4:2:0 and is converted (h264FormatNote); redactWarnings prints it.
+  std::string formatNote{};
+  // "cpu-frames": frames go through main memory between decode, detection, mosaic and encode (the GPU path of
+  // spec 2026-10-20 §4, "gpu", comes with stage 2b).
+  std::string pipeline = "cpu-frames";
+  // "student/<backend>" (providerLabel: "student/CoreML", "student/CPU", on Linux + NVIDIA "student/TensorRT") or
+  // "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
   std::string detector;
   std::vector<std::string> droppedStreams;
   size_t audioStreams = 0;
@@ -85,8 +99,8 @@ struct RedactStats {
 size_t pipelineQueueCapacity(int width, int height);
 
 // Lines for stderr after a successful run (empty when there is nothing to warn about): a note when detect_fps
-// is above the video's frame rate (so every frame is a keyframe), and a warning for decoder errors, i.e.
-// corrupt packets that were skipped.
+// is above the video's frame rate (so every frame is a keyframe), a note when the source was not 8-bit 4:2:0
+// (formatNote), and a warning for decoder errors, i.e. corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
 
 // The summary printed after a successful run: one "name: value" line each for the output, the frame
