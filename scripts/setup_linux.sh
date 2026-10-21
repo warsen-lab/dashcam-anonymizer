@@ -3,14 +3,24 @@
 # (spec 2026-10-20 §2):
 #
 #   scripts/setup_linux.sh                 development machine: checks the driver (>= 550), installs the apt
-#                                          packages (sudo), builds FFmpeg 8 and vc_redact with its tests
-#   scripts/setup_linux.sh --docker-build  docker/Dockerfile's build stage: root, no GPU, apt done by the Dockerfile,
-#                                          vc_redact without tests
+#                                          packages (sudo), builds FFmpeg 8 (with libx265, see below) and vc_redact
+#                                          with its tests
+#   scripts/setup_linux.sh --docker-deps   docker/Dockerfile's first build step (root, no GPU, apt done by the
+#                                          Dockerfile): downloads and unpacks onnxruntime, nlohmann/json and CMake,
+#                                          builds FFmpeg 8 without libx265. Nothing in it depends on cpp/, so the image
+#                                          layer survives C++ changes
+#   scripts/setup_linux.sh --docker-build  the Dockerfile's second build step, after COPY cpp/: builds vc_redact
+#                                          without tests from what --docker-deps left; downloads nothing
 #   scripts/setup_linux.sh --check-pins    lists the pinned downloads; exit 1 while a checksum is empty (no network)
 #
-# Everything but --check-pins downloads, so it refuses to run unless VC_ALLOW_DOWNLOAD=1. Each download is checked
-# against its sha256 in PINS and kept in the cache all checkouts share ($VC_CACHE/downloads); a file there whose
-# checksum matches is not downloaded again.
+# Every mode but --check-pins is part of a build that downloads, so it refuses to run unless VC_ALLOW_DOWNLOAD=1.
+# Each download is checked against its sha256 in PINS and kept in the cache all checkouts share ($VC_CACHE/downloads;
+# the Dockerfile mounts a BuildKit cache there); a file there whose checksum matches is not downloaded again.
+#
+# libx265: the C++ test fixtures make 10-bit HEVC videos with libx265 (tenBitVideo() in cpp/tests), so the
+# development machine, which builds the tests, installs libx265-dev and builds FFmpeg with --enable-libx265 (the build
+# is GPL already for libx264). The Docker image builds no tests and does not read HEVC encoded by us, so its FFmpeg
+# is built without libx265.
 #
 # Environment:
 #   VC_ALLOW_DOWNLOAD=1  required for anything but --check-pins
@@ -52,7 +62,7 @@ PINS=(
 )
 
 die() { echo "setup_linux.sh: $*" >&2; exit 2; }
-usage() { echo "usage: $0 [--docker-build | --check-pins]" >&2; exit 2; }
+usage() { echo "usage: $0 [--docker-deps | --docker-build | --check-pins]" >&2; exit 2; }
 
 # pin <name> <field>: field 2 is the url, 3 the sha256.
 pin() {
@@ -132,7 +142,7 @@ check_driver() {
   fi
 }
 
-# The apt packages of the development machine: build tools, libx264, GoogleTest, and from NVIDIA's repository the
+# The apt packages of the development machine: build tools, libx264, libx265, GoogleTest, and from NVIDIA's repository the
 # CUDA toolkit, cuDNN 9 and the TensorRT runtime pinned to $TENSORRT_VERSION.
 install_apt_packages() {
   [ -n "${TENSORRT_VERSION:-}" ] || die "TENSORRT_VERSION must name the TensorRT apt version onnxruntime 1.30.0 needs"
@@ -143,7 +153,7 @@ install_apt_packages() {
   "${sudo[@]}" dpkg -i "$keyring"
   "${sudo[@]}" apt-get update
   local packages=(build-essential pkg-config nasm curl ca-certificates xz-utils python3 python3-venv
-                  libx264-dev libgtest-dev "cuda-toolkit-$CUDA_APT_VERSION" libcudnn9-cuda-12
+                  libx264-dev libx265-dev libgtest-dev "cuda-toolkit-$CUDA_APT_VERSION" libcudnn9-cuda-12
                   "libnvinfer10=$TENSORRT_VERSION" "libnvinfer-plugin10=$TENSORRT_VERSION"
                   "libnvonnxparsers10=$TENSORRT_VERSION")
   if [ "$VERSION_ID" = 24.04 ]; then packages+=(cmake); fi
@@ -181,13 +191,18 @@ unpack_third_party() {
 }
 
 # FFmpeg 8 with NVENC / NVDEC (nv-codec-headers, MIT) and libx264 (GPL: the build is GPL), shared libraries
-# that find each other through their RPATH.
+# that find each other through their RPATH. build_ffmpeg 1 adds libx265 (the test fixtures, see the header).
 build_ffmpeg() {
-  if [ -x "$FFMPEG_PREFIX/bin/ffmpeg" ] && "$FFMPEG_PREFIX/bin/ffmpeg" -hide_banner -encoders 2> /dev/null | grep -q h264_nvenc; then
-    echo "setup_linux.sh: FFmpeg $FFMPEG_VERSION is already in $FFMPEG_PREFIX"
-    return 0
+  local with_x265=$1 encoders
+  if [ -x "$FFMPEG_PREFIX/bin/ffmpeg" ]; then
+    encoders="$("$FFMPEG_PREFIX/bin/ffmpeg" -hide_banner -encoders 2> /dev/null || true)"
+    if grep -q h264_nvenc <<< "$encoders" && { [ "$with_x265" != 1 ] || grep -q libx265 <<< "$encoders"; }; then
+      echo "setup_linux.sh: FFmpeg $FFMPEG_VERSION is already in $FFMPEG_PREFIX"
+      return 0
+    fi
   fi
-  local src headers ffmpeg
+  local src headers ffmpeg options=()
+  if [ "$with_x265" = 1 ]; then options+=(--enable-libx265); fi
   src="$(mktemp -d)"
   headers="$(fetch "nv-codec-headers-$NV_CODEC_VERSION.tar.gz")"
   ffmpeg="$(fetch "ffmpeg-$FFMPEG_VERSION.tar.xz")"
@@ -197,7 +212,7 @@ build_ffmpeg() {
   (
     cd "$src/ffmpeg-$FFMPEG_VERSION"
     PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig" ./configure --prefix="$FFMPEG_PREFIX" \
-      --enable-shared --disable-static --disable-doc --enable-gpl --enable-libx264 \
+      --enable-shared --disable-static --disable-doc --enable-gpl --enable-libx264 ${options[@]+"${options[@]}"} \
       --enable-ffnvcodec --enable-nvenc --enable-nvdec --enable-cuvid \
       --extra-ldflags="-Wl,-rpath,$FFMPEG_PREFIX/lib"
     make -j "$(nproc)"
@@ -220,7 +235,8 @@ build_vc_redact() {
 mode=dev
 case "${1:-}" in
   "") ;;
-  --docker-build) mode=docker ;;
+  --docker-deps) mode=docker-deps ;;
+  --docker-build) mode=docker-build ;;
   --check-pins)
     check_pins
     exit $?
@@ -232,10 +248,22 @@ esac
 [ "${VC_ALLOW_DOWNLOAD:-}" = 1 ] || die "this downloads onnxruntime, FFmpeg and more (see PINS); set VC_ALLOW_DOWNLOAD=1 to allow it"
 check_os
 check_pins > /dev/null || die "some pinned downloads have no sha256 yet: run $0 --check-pins"
-if [ "$mode" = dev ]; then
-  check_driver
-  install_apt_packages
-fi
-unpack_third_party
-build_ffmpeg
-if [ "$mode" = dev ]; then build_vc_redact ON; else build_vc_redact OFF; fi
+case "$mode" in
+  dev)
+    check_driver
+    install_apt_packages
+    unpack_third_party
+    build_ffmpeg 1
+    build_vc_redact ON
+    ;;
+  docker-deps)
+    unpack_third_party
+    cmake_binary > /dev/null  # unpacks Kitware's CMake now, so that --docker-build downloads nothing
+    build_ffmpeg 0
+    ;;
+  docker-build)
+    [ -x "$FFMPEG_PREFIX/bin/ffmpeg" ] && [ -f "$THIRD_PARTY/$ORT_PACKAGE/include/onnxruntime_cxx_api.h" ] ||
+      die "FFmpeg or onnxruntime is missing: run $0 --docker-deps first"
+    build_vc_redact OFF
+    ;;
+esac

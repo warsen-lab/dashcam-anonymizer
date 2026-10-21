@@ -15,10 +15,15 @@ RUN apt-get update \
       libx264-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY cpp/ cpp/
-COPY scripts/setup_linux.sh scripts/
 ENV VC_CACHE=/opt/vc-cache VC_FFMPEG_PREFIX=/opt/ffmpeg VC_THIRD_PARTY_DIR=/opt/third_party VC_BUILD_DIR=/opt/vc/build
-# Building the image is the consent to its downloads (all of them pinned by sha256 in setup_linux.sh).
+# Layer order: what a C++ change does not touch comes first. Only setup_linux.sh is copied before the downloads and the
+# FFmpeg build, so editing cpp/ rebuilds vc_redact alone; the downloads also sit in a BuildKit cache mount, which
+# survives even a change of setup_linux.sh (and its pins). Building the image is the consent to its downloads (all of
+# them pinned by sha256 in setup_linux.sh).
+COPY scripts/setup_linux.sh scripts/
+RUN --mount=type=cache,id=vc-downloads,target=/opt/vc-cache/downloads \
+    VC_ALLOW_DOWNLOAD=1 scripts/setup_linux.sh --docker-deps
+COPY cpp/ cpp/
 RUN VC_ALLOW_DOWNLOAD=1 scripts/setup_linux.sh --docker-build
 
 FROM nvidia/cuda:${CUDA_TAG}-cudnn-runtime-ubuntu22.04@${CUDA_RUNTIME_DIGEST}
@@ -40,6 +45,9 @@ COPY configs/ /opt/vc/configs/
 COPY py/vc_eval/ /opt/vc/py/vc_eval/
 COPY py/vc_label/__init__.py py/vc_label/contracts.py /opt/vc/py/vc_label/
 COPY docker/entrypoint.sh /opt/vc/entrypoint.sh
+# NVENC and NVDEC need libnvidia-encode and libnvcuvid, which the NVIDIA container toolkit mounts only with the
+# "video" capability; without it FFmpeg silently falls back to libx264 and software decoding.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV VC_REDACT=/opt/vc/bin/vc_redact VC_MODEL=/models/r3 VC_FACE_MODEL=/models/yunet VC_CACHE=/cache VC_SANDBOX=0 \
     PATH=/opt/ffmpeg/bin:$PATH PYTHONPATH=/opt/vc/py
 VOLUME ["/models", "/cache"]
