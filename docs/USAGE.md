@@ -15,7 +15,7 @@ scripts/redact.sh <输出目录> <视频文件或目录>...
 
 ## 1. 环境（本机已就绪，换机器时才需要）
 
-日常使用的是 **macOS + Apple Silicon**：检测走 CoreML，编码走 VideoToolbox。Linux + NVIDIA 的部署做了一部分，见 §7。
+日常使用的是 **macOS + Apple Silicon**：检测走 CoreML，编码走 VideoToolbox。Linux + NVIDIA 的部署做了一部分，见 §7。从零安装的逐步说明（含 Linux 裸机与 Docker、哪些还没在 GPU 上验证）见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 | 组件 | 说明 |
 |---|---|
