@@ -261,6 +261,8 @@ PYTHONPATH=py .venv/bin/python -m vc_eval viewing --masks data/redacted/fps10/<s
 
 各打印一行摘要（`coverage` 的摘要里 `low-confidence (report only)` 是低置信层的覆盖率，不影响通过与否），`--json` 另存完整结果。`coverage` 只判这一段，多段的合并覆盖率由 `run` 判定。`temporal` 要求 `--dense` 指向的 `detections.jsonl` 旁边有该次运行的 `stats.json`，写着 `"detect_every_frame": true` 和总帧数，且 `--sparse` 恰好覆盖第 0 到 `frames-1` 帧。`coverage` 与 `integrity` 未通过时退出码为 1，`temporal` 只报告；输入有问题（文件缺失、标注过期、帧号对不上、视频读不出）退出码为 2。`viewing` 在全部帧上算观感指标，不需要参照标注（没有标注的整段视频也能算），`masks.jsonl` 必须一帧一行、帧号从 0 连续；打印的 `area` 是屏上面积，行尾的 `box-union area` 是框并集面积。`vc_redact` 把框裁在画面内，所以有框超出 `--width` / `--height` 就说明给小了，直接报错；退出码 0，输入有问题时 2。
 
+`integrity` 的检查项依次是 `decodable`、`frame_count`、`resolution`、`duration`、`audio_kept`、`av_sync`，以及（设计 2026-10-20 §3）`h264`（输出是 H.264）和 `h264_level`（ffprobe 报的 Level 不低于输出的分辨率与帧率所需，按 H.264 Table A-1：4K60 要 5.2，1080p 59.94 fps 要 4.2，1080p 30 fps 要 4.0；Level 读不到也算未通过）。`run` 的完整性表相应多 `H.264`、`Level` 两列。
+
 ### vc_eval 的测试
 
 按文件运行，用假的 `vc_redact` / `vc_detect` 和 ffmpeg 现场生成的小视频，不跑真正的二进制：

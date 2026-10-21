@@ -69,7 +69,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 1. **直接看视频。** 重点看小车牌（公交、货车）、画面边缘的人脸、快速横穿的目标。
 2. **看速度和后端：** `stats.json` 里的 `elapsed_s`、`stages`、`detector`（应为 `student/CoreML + yunet/CoreML`）、`encoder`。
-3. **完整性**（需要 Python 环境）：帧数、时长、音频、音画同步。
+3. **完整性**（需要 Python 环境）：帧数、时长、音频、音画同步，以及输出是 H.264、Level 够它的分辨率和帧率（4K60 要 5.2）。
    ```bash
    PYTHONPATH=py .venv/bin/python -m vc_eval integrity --source <原视频> --redacted <输出>.redacted.mp4
    ```

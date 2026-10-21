@@ -25,6 +25,7 @@ class StreamInfo:
     start: float | None
     width: int | None = None
     height: int | None = None
+    level: int | None = None  # H.264 / HEVC level as ffprobe reports it (level_idc: 52 for 5.2); None when unknown
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,38 @@ def _stream(s: dict) -> StreamInfo:
         start=_number(s.get("start_time")),
         width=_number(s.get("width"), int),
         height=_number(s.get("height"), int),
+        level=_level(s.get("level")),
     )
+
+
+def _level(value) -> int | None:
+    """ffprobe's level, None for a missing or unknown one (it prints -99 when the stream has none)."""
+    level = _number(value, int)
+    return level if level is not None and level > 0 else None
+
+
+# H.264 Table A-1 (ITU-T H.264 Annex A): level_idc, MaxMBPS (macroblocks per second), MaxFS (macroblocks per frame).
+# Level 1b has the limits of level 1 and is left out.
+H264_LEVELS = (
+    (10, 1485, 99), (11, 3000, 396), (12, 6000, 396), (13, 11880, 396), (20, 11880, 396), (21, 19800, 792),
+    (22, 20250, 1620), (30, 40500, 1620), (31, 108000, 3600), (32, 216000, 5120), (40, 245760, 8192),
+    (41, 245760, 8192), (42, 522240, 8704), (50, 589824, 22080), (51, 983040, 36864), (52, 2073600, 36864),
+    (60, 4177920, 139264), (61, 8355840, 139264), (62, 16711680, 139264),
+)
+
+
+def required_h264_level(width: int, height: int, fps: float) -> int | None:
+    """level_idc of the lowest H.264 level whose frame size and macroblock rate hold width x height at fps
+    (3840x2160 at 60 fps: 52, i.e. 5.2); None beyond level 6.2. Mirrors h264LevelIdc in cpp/src/io/video_writer.cpp."""
+    frame_mbs = math.ceil(width / 16) * math.ceil(height / 16)
+    for level, max_mbps, max_fs in H264_LEVELS:
+        if frame_mbs <= max_fs and frame_mbs * fps <= max_mbps:
+            return level
+    return None
+
+
+def _level_text(level: int) -> str:
+    return f"{level // 10}.{level % 10}"
 
 
 _probe_cache: dict[tuple, MediaInfo] | None = None
@@ -134,7 +166,7 @@ class IntegrityReport:
         return bool(self.checks) and all(self.checks.values())
 
 
-_CHECKS = ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync")
+_CHECKS = ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync", "h264", "h264_level")
 
 
 def _unreadable(reason: str) -> IntegrityReport:
@@ -153,13 +185,41 @@ def _seconds(value: float | None) -> str:
     return "unknown" if value is None else f"{value:.3f} s"
 
 
+def _check_h264(report: IntegrityReport, r: MediaInfo) -> None:
+    """The output is H.264 (spec 2026-10-20 §3) and its level is at least the one its size and frame rate need."""
+    codec = r.video.codec or "unknown"
+    report.checks["h264"] = r.video.codec == "h264"
+    report.details["h264"] = f"redacted video codec {codec}"
+    if r.video.codec != "h264":
+        report.checks["h264_level"] = False
+        report.details["h264_level"] = f"not checked: the redacted video is {codec}, not H.264"
+        return
+    if not (r.video.width and r.video.height and r.fps > 0):
+        report.checks["h264_level"] = False
+        report.details["h264_level"] = f"unknown size or frame rate ({_size(r.video)}, {r.fps:g} fps)"
+        return
+    need = required_h264_level(r.video.width, r.video.height, r.fps)
+    have = "unknown" if r.video.level is None else _level_text(r.video.level)
+    wanted = "beyond 6.2" if need is None else _level_text(need)
+    report.checks["h264_level"] = need is not None and r.video.level is not None and r.video.level >= need
+    report.details["h264_level"] = f"level {have}; {_size(r.video)} at {r.fps:.2f} fps needs {wanted}"
+
+
 def check_integrity(source: Path, redacted: Path) -> IntegrityReport:
-    """Source and redacted must agree; a source that cannot be probed raises ValueError, a broken output fails."""
+    """Source and redacted must agree, and the output must be H.264 at a sufficient level; a source that cannot be
+    probed raises ValueError, a broken output fails."""
     s = probe(source)
     try:
         r = probe(redacted)
     except ValueError as exc:
         return _unreadable(str(exc))
+    report = _compare(s, r)
+    _check_h264(report, r)
+    return report
+
+
+def _compare(s: MediaInfo, r: MediaInfo) -> IntegrityReport:
+    """The checks of the redacted video `r` against its source `s`: decoding, frames, size, duration and audio."""
     frame = 1.0 / s.fps if s.fps > 0 else 1.0 / 30
     report = IntegrityReport(redacted_frames=r.video.frames)
     report.checks["decodable"] = bool(r.video.frames) and len(r.errors) <= len(s.errors)

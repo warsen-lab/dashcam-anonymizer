@@ -11,7 +11,7 @@ CLS_NAME = {"face": "人脸", "plate": "车牌"}
 PARALLEL_STAGES = ("decode", "main", "encode")  # the three pipeline threads
 MAIN_STAGES = ("detect", "track", "mosaic")  # run one after another on the main thread
 STAGE_NAME = {"decode": "解码", "main": "主线程", "encode": "编码", "detect": "检测（关键帧）", "track": "补框", "mosaic": "打码"}
-INTEGRITY_CHECKS = ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync")
+INTEGRITY_CHECKS = ("decodable", "frame_count", "resolution", "duration", "audio_kept", "av_sync", "h264", "h264_level")
 
 
 def _pct(rate: dict) -> str:
@@ -275,7 +275,8 @@ def _integrity_lines(runs: list[dict]) -> list[str]:
     mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
     lines = [
         "", "## 输出完整性（P3）", "",
-        "| 段 | fps | 可解码 | 帧数 | 分辨率 | 时长 | 音频 | 音画同步 | 未通过项 |", "|---|---|---|---|---|---|---|---|---|",
+        "| 段 | fps | 可解码 | 帧数 | 分辨率 | 时长 | 音频 | 音画同步 | H.264 | Level | 未通过项 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in runs:
         i = r["integrity"]

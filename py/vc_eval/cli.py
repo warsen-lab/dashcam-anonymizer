@@ -25,7 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--sparse", type=Path, required=True, help="masks.jsonl of the sparse run")
     t.add_argument("--frame-height", type=int, required=True)
     t.add_argument("--json", type=Path)
-    i = sub.add_parser("integrity", help="frame count, duration, audio and A/V sync of the output")
+    i = sub.add_parser("integrity", help="frame count, duration, audio, A/V sync, H.264 and its level of the output")
     i.add_argument("--source", type=Path, required=True)
     i.add_argument("--redacted", type=Path, required=True)
     i.add_argument("--json", type=Path)
