@@ -167,7 +167,7 @@ TEST(ExecutionProvider, SaysWhyAGpuProviderIsUnavailable) {
 // uploads past proxy settings) must already be off by then. The environment is set once per process, so the first
 // call runs in a fresh process (a "threadsafe" death test re-executes the binary).
 TEST(ExecutionProvider, SwitchesTheTelemetryOffBeforeAskingForGpuProviders) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  ::testing::GTEST_FLAG(death_test_style) = "threadsafe";  // GTEST_FLAG_SET needs googletest 1.12; Ubuntu 22.04 has 1.11
   EXPECT_EXIT(
       {
         unsetenv("ORT_DISABLE_TELEMETRY");

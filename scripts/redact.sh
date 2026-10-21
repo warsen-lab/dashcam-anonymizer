@@ -151,12 +151,12 @@ run_foreground() {
   local job=$1 video=$2 gpu=$3 status=0
   build_args "$video"
   echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
+  fg_job=$job  # before the launch, so a signal right after it still finds the job
   (
     use_gpu "$gpu"
     exec ${runner[@]+"${runner[@]}"} "$BIN" "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
   ) &
   fg_pid=$!
-  fg_job=$job
   wait "$fg_pid" || status=$?
   fg_status=$status
   collect "$job" "$status"
@@ -254,7 +254,9 @@ abort_batch() {
   if [ -n "$fg_job" ] && [ -z "${done_job[fg_job]:-}" ]; then
     # Its real status: a video that finished before the signal stays a success; the TERM above ends the others.
     status="$fg_status"
-    if [ -z "$status" ]; then
+    if [ -z "$status" ] && [ -z "$fg_pid" ]; then
+      status="$code"  # the signal came before its pid was known
+    elif [ -z "$status" ]; then
       status=0
       wait "$fg_pid" 2> /dev/null || status=$?
       if [ "$status" = 127 ]; then status="$code"; fi  # not a child of ours any more

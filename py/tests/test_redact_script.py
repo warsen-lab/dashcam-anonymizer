@@ -123,7 +123,10 @@ def _alive(pid):
 
 def _strays(directory):
     """Command lines of processes still running that mention `directory` (the fake, its sleep, the script)."""
-    listing = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
+    try:
+        listing = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
+    except PermissionError:  # sandbox-exec without network refuses to run ps; the tests' own pid checks still run
+        return []
     return [line for line in listing.splitlines() if str(directory) in line]
 
 
