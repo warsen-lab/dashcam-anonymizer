@@ -1,4 +1,5 @@
-"""python -m vc_train dataset | train | export (proxy-validation spec §4) | yunet (the face model for vc_redact)."""
+"""python -m vc_train dataset | train | export (proxy-validation spec §4) | yunet (the face model for vc_redact) |
+verifier (the verifier for vc_redact --verifier-model, spec 2026-10-21 §4)."""
 
 from __future__ import annotations
 
@@ -50,6 +51,20 @@ def _parser() -> argparse.ArgumentParser:
     y.add_argument("--out", type=Path, required=True, help="new or empty directory for model.onnx + model.json")
     y.add_argument("--source", type=Path, default=None, help="OpenCV Zoo ONNX (default: the cached face_detection_yunet_2023mar.onnx)")
     y.add_argument("--frames-root", type=Path, default=Path("data/frames"), help="the out dir must not be under it")
+
+    v = sub.add_parser("verifier", help="train the verifier on judged candidates (spec 2026-10-21 §4)")
+    v.add_argument("--candidates", type=Path, required=True, help="vc_hardneg candidates.jsonl")
+    v.add_argument("--judgments", type=Path, required=True, help="vc_hardneg judgments.jsonl")
+    v.add_argument("--val-stem", action="append", required=True, help="stems held out for validation; repeat")
+    v.add_argument("--out", type=Path, required=True, help="new or empty directory for model.onnx + model.json")
+    v.add_argument("--epochs", type=int, default=30)
+    v.add_argument("--batch", type=int, default=256)
+    v.add_argument("--lr", type=float, default=1e-3)
+    v.add_argument("--device", default="mps")
+    v.add_argument("--seed", type=int, default=0)
+    v.add_argument("--keep", type=float, default=0.995,
+                   help="share of the real validation crops each class's pass threshold lets through")
+    v.add_argument("--onnx-batch", type=int, default=16, help="the exported model's fixed batch")
     return p
 
 
@@ -151,13 +166,50 @@ def _yunet(args) -> int:
     return 0
 
 
+def _verifier(args) -> int:
+    import hashlib
+
+    from vc_train.verifier import VERIFIER_CLASSES, export_verifier, load_crops, load_samples, pass_thresholds, train_verifier
+
+    if not 0 < args.keep <= 1:
+        raise ValueError(f"--keep must be in (0, 1], got {args.keep}")
+    if args.out.exists() and (not args.out.is_dir() or any(args.out.iterdir())):
+        raise ValueError(f"{args.out} is not empty; choose a new --out")  # before training, not after
+    samples = load_samples(args.candidates, args.judgments)
+    crops = load_crops(samples)
+    r = train_verifier(samples, crops, args.val_stem, args.epochs, args.batch, args.lr, args.device, args.seed)
+    thresholds = pass_thresholds(r.val_probs, r.val_labels, r.val_cls, args.keep)
+    metrics = {}
+    for i, name in enumerate(VERIFIER_CLASSES):
+        m = r.val_cls == i
+        real, fake = m & (r.val_labels == 1), m & (r.val_labels == 0)
+        metrics[name] = {
+            "val_real": int(real.sum()), "val_not_real": int(fake.sum()),
+            "real_passed": float((r.val_probs[real] >= thresholds[name]).mean()) if real.any() else None,
+            "not_real_rejected": float((r.val_probs[fake] < thresholds[name]).mean()) if fake.any() else None,
+        }
+
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    meta = {"name": args.out.name, "pass_threshold": thresholds, "metrics": metrics,
+            "train": {"samples": r.train_count, "val_stems": args.val_stem, "epochs": args.epochs, "keep": args.keep,
+                      "candidates_sha256": sha(args.candidates), "judgments_sha256": sha(args.judgments)}}
+    onnx_path = export_verifier(r.model, args.out, crops.shape[1], args.onnx_batch, meta)
+    print(f"verifier: {onnx_path}; pass thresholds {thresholds}")
+    for name, m in metrics.items():
+        print(f"  {name}: {m}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # before any command can reach ultralytics, directly or by unpickling a checkpoint (defence in depth: train and
     # export call it again where they load a model)
     ultralytics_offline_env()
     args = _parser().parse_args(argv)
     try:
-        return {"dataset": _dataset, "train": _train, "export": _export, "yunet": _yunet}[args.command](args)
+        return {"dataset": _dataset, "train": _train, "export": _export, "yunet": _yunet,
+                "verifier": _verifier}[args.command](args)
     except (ValueError, OSError) as e:  # FileNotFoundError is an OSError
         print(f"vc_train: {e}", file=sys.stderr)
         return 2
