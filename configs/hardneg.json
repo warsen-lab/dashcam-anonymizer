@@ -20,8 +20,8 @@
     "ask_on": ["no", "unsure"],
     "parallel": 4,
     "image_side": 384,
-    "batch": 8,
-    "tile": 256,
+    "batch": 4,
+    "tile": 384,
     "batch_prompt": "这张图由 {count} 张小图拼成，每张小图来自行车记录仪画面，左上角有黄色编号 1 到 {count}。对每张小图，判断红框里的东西是不是一块{cls_zh}。只回答一个 JSON 数组，每张一项：[{\"n\": 编号, \"verdict\": \"yes\" | \"no\" | \"unsure\"}]。看不清就答 unsure。",
     "prompt": "这张小图来自行车记录仪画面，红框里的东西是不是一块{cls_zh}？只回答一个 JSON：{\"verdict\": \"yes\" | \"no\" | \"unsure\", \"reason\": \"一句话\"}。看不清就答 unsure。"
   }
