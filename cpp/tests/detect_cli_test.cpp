@@ -80,7 +80,7 @@ TEST(DetectCli, RejectsAScoreOutsideTheUnitInterval) {
 }
 
 TEST(DetectCli, RejectsAnUnknownExecutionProvider) {
-  expectUsageError(with({"--ep", "cuda"}), "unknown execution provider 'cuda'");
+  expectUsageError(with({"--ep", "rocm"}), "unknown execution provider 'rocm'");
 }
 
 TEST(DetectCli, UsageMentionsEveryOptionAndTheFixedNmsIou) {

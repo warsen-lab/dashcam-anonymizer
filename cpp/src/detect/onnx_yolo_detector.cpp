@@ -54,7 +54,8 @@ struct OnnxYoloDetector::Impl {
 };
 
 OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider provider,
-                                   const DecodeParams& params, int frameWidth, int frameHeight)
+                                   const DecodeParams& params, int frameWidth, int frameHeight,
+                                   const SessionSettings& settings)
     : impl_(std::make_unique<Impl>()) {
   Impl& s = *impl_;
   const fs::path json = modelDir / "model.json";
@@ -70,9 +71,11 @@ OnnxYoloDetector::OnnxYoloDetector(const fs::path& modelDir, ExecutionProvider p
   const fs::path onnx = modelDir / "model.onnx";
   if (!fs::is_regular_file(onnx)) throw VcError("missing " + onnx.string());
   try {
-    const std::optional<fs::path> cache =
-        provider == ExecutionProvider::CoreML ? coreMlCacheDirectory(onnx) : std::nullopt;
-    CreatedSession created = createOrtSession(onnx, provider, cache);
+    const int inputWidth = s.info.inputWidth;
+    const int inputHeight = s.info.inputHeight;
+    const SessionCaches caches{[&] { return coreMlCacheDirectory(onnx); },
+                               [&] { return tensorRtCacheDirectory(onnx, inputWidth, inputHeight); }};
+    CreatedSession created = createOrtSession(onnx, provider, caches, settings);
     s.session = std::move(created.session);
     s.backend = created.backend;
     s.checkShapes(onnx);  // its VcError is a model problem, never retried

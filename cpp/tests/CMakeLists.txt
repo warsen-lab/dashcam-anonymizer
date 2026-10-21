@@ -10,6 +10,7 @@ add_executable(vc_tests
   bounded_queue_test.cpp
   detect_cli_test.cpp
   detect_images_test.cpp
+  execution_provider_test.cpp
   extract_cli_test.cpp
   extract_job_test.cpp
   fake_detector_test.cpp

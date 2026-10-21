@@ -24,7 +24,7 @@ struct RedactOptions {
   std::optional<std::filesystem::path> faceModelDir;
   RedactConfig config;
   bool detectEveryFrame = false;
-  ExecutionProvider provider = ExecutionProvider::CoreML;
+  ExecutionProvider provider = ExecutionProvider::Auto;  // providerOrder: CoreML then CPU on macOS
   HwAccel hwAccel = HwAccel::None;
   bool preferHardwareEncoder = true;
   bool overwrite = false;
@@ -63,7 +63,8 @@ struct RedactStats {
   // "cpu-frames": frames go through main memory between decode, detection, mosaic and encode (the GPU path of
   // spec 2026-10-20 §4, "gpu", comes with stage 2b).
   std::string pipeline = "cpu-frames";
-  // "student/CoreML", "student/CPU" or "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
+  // "student/<backend>" (providerLabel: "student/CoreML", "student/CPU", on Linux + NVIDIA "student/TensorRT") or
+  // "fake"; with a face model both, e.g. "student/CoreML + yunet/CoreML"
   std::string detector;
   std::vector<std::string> droppedStreams;
   size_t audioStreams = 0;

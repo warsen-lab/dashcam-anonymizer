@@ -288,7 +288,40 @@ TEST(OnnxYoloDetector, RejectsANonFloatModel) {
 TEST(OnnxYoloDetector, ParsesExecutionProviders) {
   EXPECT_EQ(parseExecutionProvider("coreml"), ExecutionProvider::CoreML);
   EXPECT_EQ(parseExecutionProvider("cpu"), ExecutionProvider::Cpu);
-  EXPECT_THROW(parseExecutionProvider("cuda"), std::invalid_argument);
+  EXPECT_EQ(parseExecutionProvider("cuda"), ExecutionProvider::Cuda);
+  EXPECT_THROW(parseExecutionProvider("rocm"), std::invalid_argument);
+}
+
+// ort_intra_threads > 0 sets the session's intra-op thread count; the boxes stay the same.
+TEST(OnnxYoloDetector, RunsWithAFixedIntraOpThreadCount) {
+  OnnxYoloDetector detector(constModel(), ExecutionProvider::Cpu, DecodeParams{}, 128, 128, SessionSettings{1, true});
+  EXPECT_EQ(detector.backend(), "CPU");
+  const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
+  expectConstBoxes(detector.detect(view(frame.get())), 1e-5f);
+}
+
+// An explicit GPU provider is unavailable on this build: one line on stderr, then the CPU.
+TEST(OnnxYoloDetector, AnUnavailableGpuProviderFallsBackToTheCpu) {
+  for (const ExecutionProvider provider : {ExecutionProvider::TensorRT, ExecutionProvider::Cuda}) {
+    testing::internal::CaptureStderr();
+    OnnxYoloDetector detector(constModel(), provider, DecodeParams{}, 128, 128);
+    const std::string log = testing::internal::GetCapturedStderr();
+    if (detector.backend() != "CPU") GTEST_SKIP() << "this build runs " << detector.backend();
+    EXPECT_NE(log.find("vc: " + providerLabel(provider) + " execution provider unavailable ("), std::string::npos) << log;
+    EXPECT_NE(log.find("); using CPU"), std::string::npos) << log;
+    const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
+    expectConstBoxes(detector.detect(view(frame.get())), 1e-5f);
+  }
+}
+
+// Auto is CoreML then the CPU on macOS: the backend is one of the two, never a GPU provider.
+TEST(OnnxYoloDetector, AutoUsesCoreMlOrTheCpuOnMacOs) {
+  if (buildPlatform() != Platform::MacOS) GTEST_SKIP() << "macOS only";
+  const ScopedEnv cache("VC_CACHE", freshCacheRoot("coreml_cache_auto").c_str());
+  OnnxYoloDetector detector(constModel(), ExecutionProvider::Auto, DecodeParams{}, 128, 128);
+  EXPECT_TRUE(detector.backend() == "CoreML" || detector.backend() == "CPU") << detector.backend();
+  const auto frame = test::makeFrame(128, 128, AV_PIX_FMT_YUV420P, 128, 128, 128);
+  expectConstBoxes(detector.detect(view(frame.get())), 1e-3f);
 }
 
 }  // namespace

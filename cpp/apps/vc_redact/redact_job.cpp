@@ -171,14 +171,15 @@ DetectSchedule keyframeSchedule(const RedactOptions& o, const AVStream& stream) 
 }
 
 std::unique_ptr<Detector> makeDetector(const RedactOptions& o, int width, int height) {
+  const SessionSettings settings{o.config.ortIntraThreads, o.config.trtFp16};
   std::unique_ptr<Detector> detector;
   if (o.fakeDetections) {
     detector = std::make_unique<FakeDetector>(*o.fakeDetections);
   } else {
-    detector = std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height);
+    detector = std::make_unique<OnnxYoloDetector>(*o.modelDir, o.provider, o.config.decode, width, height, settings);
   }
   if (!o.faceModelDir) return detector;
-  auto face = std::make_unique<YuNetDetector>(*o.faceModelDir, o.provider, o.config.face, width, height);
+  auto face = std::make_unique<YuNetDetector>(*o.faceModelDir, o.provider, o.config.face, width, height, settings);
   return std::make_unique<MergedDetector>(std::move(detector), std::move(face));
 }
 

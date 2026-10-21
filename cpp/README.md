@@ -54,7 +54,7 @@ cmake --build build/cpp -j 4
 ./build/cpp/tests/vc_tests --gtest_filter='FrameSampler.*:LumaThumb.*:BuildConfig.*'
 ./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
-./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*'
+./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*:ExecutionProvider.*'
 ./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:Mosaic.*:BoundedQueue.*:RedactConfig.*:Records.*'
 ./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectCli.*:DetectImages.*:DetectRate.*'
 ```
@@ -125,7 +125,7 @@ cmake --build build/cpp -j 4
 | `--config <json>` | 内置默认值 | 参数文件，格式见 `configs/redact.json`；省略的键取默认值，未知键、类型不对或越界的值会报错（退出码 2）。内置默认值与仓库里的 `configs/redact.json` 相同，其中检测频率 10 fps、分数阈值 0.05 是 2026-10-18 代理验证选定的（见 `docs/reports/proxy-validation-2026-10-18.md`），外扩、收缩、确认门槛是 2026-10-19 标定的（见 `docs/reports/stable-masks-2026-10-19.md`） |
 | `--detect-fps <n>` | 10 | 每秒检测几次（关键帧），5 到 60，覆盖配置里的 `detect_fps`。关键帧按帧序号每隔 stride = max(1, ⌊视频帧率 / n + 0.5⌋) 帧一个，整段不变（60 fps 视频上 5/10/15/30/60 是每 12/6/4/2/1 帧）；n 达到视频帧率就是逐帧检测，超过时 stderr 多一行 note:。视频帧率取视频流的 avg_frame_rate，读不到退回 r_frame_rate，都没有就报错。缓冲满 120 帧时仍强制出一个关键帧 |
 | `--detect-every-frame` | 关闭 | 每一帧都检测，用来做时间覆盖率评测的对照 |
-| `--ep` | coreml | `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者 |
+| `--ep` | auto | `auto` / `tensorrt` / `cuda` / `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者。`auto` 在 Linux 上依次试 TensorRT、CUDA、CPU，在 macOS 上试 CoreML、CPU（与原来的默认 `coreml` 相同）；显式指定的用不了时退到 CPU。跳过的每一个在 stderr 写一行原因，例如 `vc: TensorRT execution provider unavailable (…); trying CUDA`。TensorRT / CUDA 的会话在 GPU 计划里接上，在那之前它们总是报不可用 |
 | `--hwaccel` | none | 解码方式：`none` / `auto` / `videotoolbox`（与 `vc_extract` 不同，默认不用硬解） |
 | `--encoder` | auto | `auto` 按 `h264_nvenc`（不在 macOS 上）→ `h264_videotoolbox`（只在 macOS 上）→ libx264 的顺序试；`software` 直接用 libx264 |
 | `--overwrite` | 关闭 | 覆盖上一次 `vc_redact` 的输出目录，见下方 |
@@ -146,8 +146,9 @@ cmake --build build/cpp -j 4
 - **音频直接拷贝**（不重编码）；MP4 放不下的音频编码（例如 MOV 里的 `pcm_mulaw`）在打开输入后、加载模型和创建或删除任何输出之前就报错并点名这个编码（退出码 1，加了 `--overwrite` 时上一次的输出也原样保留），不会写出一个没有声音的视频。GPS / 字幕 / 额外视频流等其他流会被丢弃，丢了哪些会列在运行结束的统计行和 `stats.json` 的 `dropped_streams` 里。
 - **画面呈现信息随原片**：像素宽高比（SAR）、色彩范围 / 矩阵 / 原色 / 传输特性这四个标签，以及旋转（显示矩阵）都从输入视频流拷到输出，所以竖拍视频、BT.709 或全范围标签的视频输出后显示不变；原片没有写的项目输出里也不写。需要换像素格式才能编码时，色彩范围和矩阵照原样带过去，不会被悄悄压缩成有限范围。
 - **输出一律 H.264**（设计 2026-10-20 §3，macOS 与 Linux 相同），容器固定为 MP4。编码器按顺序尝试 `h264_nvenc`（不在 macOS 上）→ `h264_videotoolbox`（只在 macOS 上）→ `libx264`，`--encoder software` 只用 libx264；前面的打不开（例如 VideoToolbox 的 H.264 宽或高超过 4096）时 stderr 一行 `vc: video encoder h264_videotoolbox could not be opened (原因); using libx264`，实际用的写在统计行和 `stats.json` 的 `encoder`。码率：H.264 原片取原片视频流的码率，HEVC 等其他编码乘 `output_bitrate_factor_hevc`（默认 1.5），读不到原码率时按 8 Mb/s（再乘系数）；实际目标码率写在 `stats.json` 的 `output_bit_rate`。Level 按 H.264 Table A-1 由分辨率和帧率定（1080p 59.94 fps 要 4.2，4K60 要 5.2）：VideoToolbox 自己选的偏低（这两种分别给 4.0、5.1），所以给它指定 High profile 和这个 Level（它的 Level 选项只有 3.0–5.2）；NVENC 也指定 Level，并用 `nvenc_preset`；libx264 自己选的就够。编码器的输入一律是 8 位 4:2:0（NV12 或 yuv420p）：10 位原片在解码时转成 NV12，4:2:2 / 4:4:4 原片在送进编码器前转换；原片不是 8 位 4:2:0 时，运行结束 stderr 多一行 `vc_redact: note: the source video is yuv420p10le (10-bit 4:2:0); the H.264 output is 8-bit 4:2:0`（退出码仍为 0）。编码器交回的包数必须与送进去的帧数一致，否则整次运行失败。
-- **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或 CoreML 无法使用、已回退，回退时 stderr 会有提示）；`fake` 表示回放。加了 `--face-model` 时两个检测器都列出，例如 `student/CoreML + yunet/CoreML`、`fake + yunet/CPU`。
+- **统计里的 `detector`**：`student/CoreML` 只表示这次会话注册了 CoreML 执行提供者，onnxruntime 仍可能把它不支持的算子放在 CPU 上跑，并不等于整个模型都在神经网络引擎上；`student/CPU` 表示用的是 CPU（显式指定了 `--ep cpu`，或前面的执行提供者无法使用、已回退，回退时 stderr 会有提示）；Linux + NVIDIA 上会是 `student/TensorRT`、`student/CUDA`（GPU 计划）；`fake` 表示回放。加了 `--face-model` 时两个检测器都列出，例如 `student/CoreML + yunet/CoreML`、`fake + yunet/CPU`。
 - **CoreML 编译缓存**：用 CoreML 时，onnxruntime 第一次创建会话要把模型编译成 CoreML 模型（大模型可能要几十秒以上），编译结果放在 `$VC_CACHE/coreml-cache/<model.onnx 的 sha256>/`（`VC_CACHE` 默认 `~/.cache/video-compliance`，所有 checkout 共享，`vc_detect` 也用它），之后同一个模型直接复用；模型文件内容一变，sha256 跟着变，会重新编译到新目录。目录建不了时 stderr 提示一行，照常编译、只是不缓存。缓存是多个进程共享的：同时第一次运行的几个进程会抢着写它（"Error copying compiled model to cache path"），编译到一半被杀掉的进程还会留下加载不了的编译结果；用缓存创建 CoreML 会话失败时，会先不带缓存目录再试一次 CoreML（stderr 一行，写明失败原因和缓存目录，并提示 `delete <目录> to rebuild the cache`；共享的缓存目录原样留着，不删不修，别的进程可能正在写它），这一次还失败才退到 CPU。因此损坏的缓存目录不会被修复：此后每次运行都会先失败一次、再不带缓存重新编译一遍，直到手动删掉这个目录（`~/.cache/video-compliance/coreml-cache/<sha>`，设了 `$VC_CACHE` 时在它下面），下一次运行才会重建缓存。与缓存无关的 CoreML 失败（例如这个模型根本建不起 CoreML 会话）现在在退到 CPU 之前也会多编译一次。旧模型的缓存目录不会自动删除，需要时手动清理。
+- **TensorRT 引擎缓存**（GPU 计划里用上）：`$VC_CACHE/trt-cache/<model.onnx 的 sha256>/<宽>x<高>/`，与 CoreML 缓存同一做法，按模型内容和输入尺寸分目录（学生模型是它的输入尺寸，如 `1920x1088`；YuNet 是补边后的帧尺寸，如 `3840x2176`）。
 - **模型必须是 float32**：`model.onnx` 的输入输出是 float16 或其他类型时会直接报错，不会静默转换。`model.json` 与 ONNX 的输入尺寸、类别数不一致也会报错。
 - **解码错误**：解码器拒绝并跳过的损坏数据包 / 帧的个数写在统计行的 `decode errors` 和 `stats.json` 的 `decode_errors`；大于 0 时 stderr 还会多一行 `vc_redact: warning: …`（退出码仍为 0），这些帧不在输出里。
 - **`--detect-every-frame`** 只是评测对照用的开关，会让检测耗时随帧数线性增长，日常处理不要打开。
@@ -198,7 +199,7 @@ printf '{"video":"basic.mp4","frame":0,"pts_ms":0,"cls":"face","x1":100,"y1":100
 | `--model <dir>` | 必填 | `model.onnx` + `model.json` |
 | `--frames <dir>` | 必填 | `vc_extract` 的输出目录（`frames.csv` 和 `<帧号:06d>.jpg`） |
 | `--out <jsonl>` | 必填 | 要写的检测文件；先写 `.partial` 再改名，失败时不留文件 |
-| `--ep` | cpu | `cpu` / `coreml`；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
+| `--ep` | cpu | `cpu` / `coreml`（也接受 `auto` / `tensorrt` / `cuda`，回退规则同 `vc_redact`）；做一致性比较时建议用 `cpu`，避免 CoreML 带来额外的数值差异 |
 | `--score <x>` | 0.15 | 分数阈值，取值 [0, 1]；比较时应与 Python 端一致 |
 
 检测的 NMS IoU 固定用默认值 0.5（没有对应参数），与 Python 端比较时要用同一个值。参数值以 `--` 开头会被当作漏写了值（退出码 2），与 `vc_redact` 相同。`frames.csv` 里一张图都没有时报错（退出码 1），不会写出一个空的检测文件。

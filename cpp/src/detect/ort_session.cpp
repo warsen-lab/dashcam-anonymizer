@@ -1,5 +1,6 @@
 #include "detect/ort_session.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -79,9 +80,10 @@ std::optional<fs::path> usableCoreMlCache(const std::optional<fs::path>& dir) {
   return dir;
 }
 
-Ort::SessionOptions makeOptions(const SessionConfigurer& configure) {
+Ort::SessionOptions makeOptions(const SessionSettings& settings, const SessionConfigurer& configure) {
   Ort::SessionOptions options;
   options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+  if (settings.intraOpThreads > 0) options.SetIntraOpNumThreads(settings.intraOpThreads);
   if (configure) configure(options);
   return options;
 }
@@ -96,9 +98,9 @@ struct CoreMlAttempt {
 };
 
 CoreMlAttempt attemptCoreMl(const fs::path& onnx, const std::optional<fs::path>& cache,
-                            const SessionConfigurer& configure) {
+                            const SessionSettings& settings, const SessionConfigurer& configure) {
   CoreMlAttempt attempt;
-  Ort::SessionOptions options = makeOptions(configure);
+  Ort::SessionOptions options = makeOptions(settings, configure);
   try {
     std::unordered_map<std::string, std::string> coreMl{
         {"ModelFormat", "MLProgram"}, {"MLComputeUnits", "ALL"}, {"RequireStaticInputShapes", "1"}};
@@ -117,6 +119,36 @@ CoreMlAttempt attemptCoreMl(const fs::path& onnx, const std::optional<fs::path>&
     attempt.error = e.what();
   }
   return attempt;
+}
+
+// CoreML with the compile cache, and once more without it when the session fails with it.
+CoreMlAttempt attemptCoreMlWithRetry(const fs::path& onnx, const std::optional<fs::path>& requestedCache,
+                                     const SessionSettings& settings, const SessionConfigurer& configure) {
+  const std::optional<fs::path> cache = usableCoreMlCache(requestedCache);
+  CoreMlAttempt coreMl = attemptCoreMl(onnx, cache, settings, configure);
+  if (coreMl.attached && !coreMl.ok && cache) {
+    // The cache is shared: processes that compile at the same time race on it ("Error copying
+    // compiled model to cache path"), and a compile that died half-way leaves a model that cannot
+    // be loaded. Another process may be writing the directory, so it is left alone; compile
+    // without it once before giving the CoreML provider up.
+    std::fprintf(stderr,
+                 "vc: CoreML session failed with the compile cache %s (%s); retrying without the cache "
+                 "(delete %s to rebuild the cache)\n",
+                 cache->c_str(), coreMl.error.c_str(), cache->c_str());
+    coreMl = attemptCoreMl(onnx, std::nullopt, settings, configure);
+  }
+  return coreMl;
+}
+
+// $VC_CACHE, or ~/.cache/video-compliance; nullopt when neither VC_CACHE nor HOME is set.
+std::optional<fs::path> cacheRoot() {
+  if (const auto cache = envValue("VC_CACHE")) return fs::path(*cache);
+  if (const auto home = envValue("HOME")) return fs::path(*home) / ".cache" / "video-compliance";
+  return std::nullopt;
+}
+
+const char* ortProviderName(ExecutionProvider provider) {
+  return provider == ExecutionProvider::TensorRT ? "TensorrtExecutionProvider" : "CUDAExecutionProvider";
 }
 
 }  // namespace
@@ -156,53 +188,104 @@ TensorSpec readFloatTensorSpec(const Ort::TypeInfo& info, const std::string& wha
 }
 
 std::optional<fs::path> coreMlCacheDirectory(const fs::path& onnx) {
-  std::optional<fs::path> root;
-  if (const auto cache = envValue("VC_CACHE")) {
-    root = fs::path(*cache);
-  } else if (const auto home = envValue("HOME")) {
-    root = fs::path(*home) / ".cache" / "video-compliance";
-  }
+  const std::optional<fs::path> root = cacheRoot();
   if (!root) return std::nullopt;
   return *root / "coreml-cache" / sha256Hex(onnx);
 }
 
-ExecutionProvider parseExecutionProvider(const std::string& text) {
-  if (text == "coreml") return ExecutionProvider::CoreML;
-  if (text == "cpu") return ExecutionProvider::Cpu;
-  throw std::invalid_argument("unknown execution provider '" + text + "' (coreml|cpu)");
+std::optional<fs::path> tensorRtCacheDirectory(const fs::path& onnx, int width, int height) {
+  const std::optional<fs::path> root = cacheRoot();
+  if (!root) return std::nullopt;
+  return *root / "trt-cache" / sha256Hex(onnx) / (std::to_string(width) + "x" + std::to_string(height));
 }
 
-CreatedSession createOrtSession(const fs::path& onnx, ExecutionProvider provider,
-                                const std::optional<fs::path>& coreMlCache, const SessionConfigurer& configure) {
-  CreatedSession result;
-  if (provider == ExecutionProvider::CoreML) {
-    const std::optional<fs::path> cache = usableCoreMlCache(coreMlCache);
-    CoreMlAttempt coreMl = attemptCoreMl(onnx, cache, configure);
-    if (coreMl.attached && !coreMl.ok && cache) {
-      // The cache is shared: processes that compile at the same time race on it ("Error copying
-      // compiled model to cache path"), and a compile that died half-way leaves a model that cannot
-      // be loaded. Another process may be writing the directory, so it is left alone; compile
-      // without it once before giving the CoreML provider up.
-      std::fprintf(stderr,
-                   "vc: CoreML session failed with the compile cache %s (%s); retrying without the cache "
-                   "(delete %s to rebuild the cache)\n",
-                   cache->c_str(), coreMl.error.c_str(), cache->c_str());
-      coreMl = attemptCoreMl(onnx, std::nullopt, configure);
-    }
-    if (coreMl.ok) {
-      result.session = std::move(coreMl.session);
-      result.backend = "CoreML";
-      return result;
-    }
-    if (coreMl.attached) {
-      std::fprintf(stderr, "vc: CoreML session failed (%s); using CPU\n", coreMl.error.c_str());
-    } else {
-      std::fprintf(stderr, "vc: CoreML execution provider unavailable (%s); using CPU\n", coreMl.error.c_str());
-    }
+ExecutionProvider parseExecutionProvider(const std::string& text) {
+  if (text == "auto") return ExecutionProvider::Auto;
+  if (text == "tensorrt") return ExecutionProvider::TensorRT;
+  if (text == "cuda") return ExecutionProvider::Cuda;
+  if (text == "coreml") return ExecutionProvider::CoreML;
+  if (text == "cpu") return ExecutionProvider::Cpu;
+  throw std::invalid_argument("unknown execution provider '" + text + "' (auto|tensorrt|cuda|coreml|cpu)");
+}
+
+std::string providerLabel(ExecutionProvider provider) {
+  switch (provider) {
+    case ExecutionProvider::Auto: return "auto";
+    case ExecutionProvider::TensorRT: return "TensorRT";
+    case ExecutionProvider::Cuda: return "CUDA";
+    case ExecutionProvider::CoreML: return "CoreML";
+    case ExecutionProvider::Cpu: return "CPU";
   }
-  const Ort::SessionOptions cpuOptions = makeOptions(configure);
-  result.session = Ort::Session(ortEnv(), onnx.c_str(), cpuOptions);
-  result.backend = "CPU";
+  return "unknown";
+}
+
+std::vector<ExecutionProvider> providerOrder(ExecutionProvider requested, Platform platform) {
+  using P = ExecutionProvider;
+  switch (requested) {
+    case P::Auto:
+      if (platform == Platform::Linux) return {P::TensorRT, P::Cuda, P::Cpu};
+      if (platform == Platform::MacOS) return {P::CoreML, P::Cpu};
+      return {P::Cpu};
+    case P::Cpu:
+      return {P::Cpu};
+    default:
+      return {requested, P::Cpu};
+  }
+}
+
+ExecutionProvider tryProviders(const std::vector<ExecutionProvider>& order, const ProviderTry& attempt,
+                               const NoteSink& note) {
+  if (order.empty() || order.back() != ExecutionProvider::Cpu) {
+    throw std::invalid_argument("tryProviders: the providers must end with the CPU");
+  }
+  for (size_t i = 0;; ++i) {
+    const ProviderAttempt tried = attempt(order[i]);
+    if (tried.ok) return order[i];
+    if (i + 1 == order.size()) throw VcError("the CPU session failed: " + tried.error);
+    const std::string what = tried.attached ? " session failed (" : " execution provider unavailable (";
+    const std::string next = (i + 2 == order.size() ? "using " : "trying ") + providerLabel(order[i + 1]);
+    note("vc: " + providerLabel(order[i]) + what + tried.error + "); " + next);
+  }
+}
+
+std::string gpuProviderUnavailableReason(ExecutionProvider provider, const std::vector<std::string>& available,
+                                         bool withCuda) {
+  const std::string name = ortProviderName(provider);
+  if (std::find(available.begin(), available.end(), name) == available.end()) {
+    return name + " is not in this onnxruntime build";
+  }
+  if (!withCuda) return "vc_redact was built without VC_WITH_CUDA";
+  return "the TensorRT / CUDA session set-up comes with stage 1c of the Linux plan";
+}
+
+CreatedSession createOrtSession(const fs::path& onnx, ExecutionProvider provider, const SessionCaches& caches,
+                                const SessionSettings& settings, const SessionConfigurer& configure) {
+  CreatedSession result;
+  const ProviderTry attempt = [&](ExecutionProvider p) -> ProviderAttempt {
+    switch (p) {
+      case ExecutionProvider::CoreML: {
+        CoreMlAttempt coreMl =
+            attemptCoreMlWithRetry(onnx, caches.coreMl ? caches.coreMl() : std::nullopt, settings, configure);
+        if (coreMl.ok) result.session = std::move(coreMl.session);
+        return ProviderAttempt{coreMl.ok, coreMl.attached, coreMl.error};
+      }
+      case ExecutionProvider::TensorRT:
+      case ExecutionProvider::Cuda:
+        return ProviderAttempt{false, false,
+                               gpuProviderUnavailableReason(p, Ort::GetAvailableProviders(), builtWithCuda())};
+      case ExecutionProvider::Cpu: {
+        const Ort::SessionOptions options = makeOptions(settings, configure);
+        result.session = Ort::Session(ortEnv(), onnx.c_str(), options);  // Ort::Exception: nothing left to try
+        return ProviderAttempt{true, true, ""};
+      }
+      case ExecutionProvider::Auto:
+        break;
+    }
+    throw std::logic_error("createOrtSession: auto is an order of providers, not one to try");
+  };
+  const NoteSink note = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
+  const ExecutionProvider used = tryProviders(providerOrder(provider, buildPlatform()), attempt, note);
+  result.backend = providerLabel(used);
   return result;
 }
 

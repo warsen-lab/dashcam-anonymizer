@@ -58,7 +58,7 @@ DetectImagesOptions parseDetectArgs(const std::vector<std::string>& args) {
 }
 
 std::string detectUsage() {
-  return R"(Usage: vc_detect --model <dir> --frames <dir> --out <jsonl> [--ep cpu|coreml] [--score <x>]
+  return R"(Usage: vc_detect --model <dir> --frames <dir> --out <jsonl> [--ep <provider>] [--score <x>]
 
 Runs the ONNX student model on every frame listed in <frames>/frames.csv (a vc_extract output
 directory) and writes detections.jsonl records, for checking C++ against Python inference.
@@ -68,7 +68,7 @@ Options:
   --model <dir>   model.onnx + model.json from vc_train export
   --frames <dir>  directory with frames.csv and the <frame:06d>.jpg files
   --out <jsonl>   detections file to write
-  --ep <provider> cpu | coreml (default cpu)
+  --ep <provider> cpu | coreml | auto | tensorrt | cuda (default cpu; see vc_redact --help)
   --score <x>     score threshold in [0, 1] (default 0.15)
   -h, --help      show this help
 

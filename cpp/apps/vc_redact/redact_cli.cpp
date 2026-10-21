@@ -111,9 +111,12 @@ Options:
                             keyframe every round(video fps / n) frames, every frame once n reaches
                             the video frame rate
   --detect-every-frame      detect on every frame (reference run for temporal coverage)
-  --ep <provider>           coreml | cpu (default coreml, falls back to cpu)
+  --ep <provider>           auto | tensorrt | cuda | coreml | cpu (default auto: TensorRT, CUDA, CPU on
+                            Linux; CoreML, CPU on macOS); a provider that cannot be used falls back
+                            (one line on stderr), an explicit one to cpu
   --hwaccel <mode>          decoder: none | auto | videotoolbox (default none)
-  --encoder <mode>          auto (VideoToolbox, then software) | software (default auto)
+  --encoder <mode>          auto (h264_nvenc on Linux / h264_videotoolbox on macOS, then libx264) |
+                            software (libx264 only) (default auto)
   --overwrite               replace the output directory of a previous vc_redact run (it is removed
                             once the checks pass, before processing starts)
   -h, --help                show this help

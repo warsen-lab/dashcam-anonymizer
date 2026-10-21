@@ -32,7 +32,7 @@ TEST(RedactCli, ParsesAModelRun) {
 
 TEST(RedactCli, AppliesDefaults) {
   const RedactOptions o = parseRedactArgs({"--input", "in.mp4", "--out", "out", "--model", "m"});
-  EXPECT_EQ(o.provider, ExecutionProvider::CoreML);
+  EXPECT_EQ(o.provider, ExecutionProvider::Auto);
   EXPECT_EQ(o.hwAccel, HwAccel::None);
   EXPECT_TRUE(o.preferHardwareEncoder);
   EXPECT_DOUBLE_EQ(o.config.detectFps, RedactConfig{}.detectFps);
@@ -59,6 +59,18 @@ TEST(RedactCli, ParsesHardwareAndFakeDetectionOptions) {
   EXPECT_EQ(o.hwAccel, HwAccel::VideoToolbox);
   EXPECT_TRUE(o.preferHardwareEncoder);
   EXPECT_EQ(o.provider, ExecutionProvider::CoreML);
+}
+
+TEST(RedactCli, ParsesEveryExecutionProvider) {
+  const std::vector<std::pair<std::string, ExecutionProvider>> cases = {
+      {"auto", ExecutionProvider::Auto},     {"tensorrt", ExecutionProvider::TensorRT},
+      {"cuda", ExecutionProvider::Cuda},     {"coreml", ExecutionProvider::CoreML},
+      {"cpu", ExecutionProvider::Cpu}};
+  for (const auto& [name, provider] : cases) {
+    EXPECT_EQ(parseRedactArgs({"--input", "a.mp4", "--out", "o", "--model", "m", "--ep", name}).provider, provider)
+        << name;
+  }
+  EXPECT_THROW(parseRedactArgs({"--input", "a.mp4", "--out", "o", "--model", "m", "--ep", "rocm"}), UsageError);
 }
 
 TEST(RedactCli, DetectFpsOverridesTheDefault) {
@@ -97,7 +109,7 @@ TEST(RedactCli, RejectsBadCommandLines) {
       {"--input", "a.mp4", "--model", "m"},
       {"--input", "a.mp4", "--out", "o"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--fake-detections", "f"},
-      {"--input", "a.mp4", "--out", "o", "--model", "m", "--ep", "cuda"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--ep", "rocm"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--encoder", "nvenc"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--hwaccel", "cuda"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "fast"},
