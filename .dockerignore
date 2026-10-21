@@ -1,0 +1,7 @@
+# The build context is the repository: keep out the videos, models and labels (personal data), builds and caches.
+data/
+build/
+.venv/
+.git/
+.claude/
+**/__pycache__/

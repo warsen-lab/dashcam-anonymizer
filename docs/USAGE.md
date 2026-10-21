@@ -15,7 +15,7 @@ scripts/redact.sh <输出目录> <视频文件或目录>...
 
 ## 1. 环境（本机已就绪，换机器时才需要）
 
-目前只支持 **macOS + Apple Silicon**：检测走 CoreML，编码走 VideoToolbox。Linux 或 NVIDIA 服务器的部署还没做，见文末"还没做的"。
+日常使用的是 **macOS + Apple Silicon**：检测走 CoreML，编码走 VideoToolbox。Linux + NVIDIA 的部署做了一部分，见 §7。
 
 | 组件 | 说明 |
 |---|---|
@@ -144,8 +144,52 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 
 ## 6. 还没做的
 
-- **Linux / NVIDIA 服务器部署：** 生产目标是 1 小时视频 ≤ 10 分钟。onnxruntime 换成 Linux + CUDA 版，编码换成 NVENC，都还没做。
+- **Linux / NVIDIA 服务器部署的 GPU 部分：** 生产目标是 1 小时素材 ≤ 10 分钟，见 §7 的"还要 GPU 机器的部分"。
 - **人工金标准验收**和**补公交、货车车牌数据**，见验证报告的"下一步"。
+
+## 7. Linux + NVIDIA（进行中）
+
+设计见 `docs/superpowers/specs/2026-10-20-linux-nvidia-deployment-design.md`。目标：一台 Linux + NVIDIA 机器上，合计 1 小时 4K60 素材 10 分钟内处理完（约 360 帧/秒，按批量吞吐算）。
+
+**现在已有的（本机验证过的部分）：**
+
+- 输出一律 H.264（两个平台一致），HEVC 原片码率乘 `output_bitrate_factor_hevc`，Level 按分辨率和帧率指定；`vc_eval integrity` 检查 H.264 与 Level。
+- `--ep auto|tensorrt|cuda|coreml|cpu` 与 `--hwaccel cuda`；Linux 上默认 `--ep auto`（TensorRT → CUDA → CPU）和 `--hwaccel auto`（NVDEC，打不开退回软解）。**GPU 部分完成之前，TensorRT / CUDA 总是报不可用并退到 CPU**；NVDEC 与 NVENC 的代码已在，但还没在 NVIDIA 机器上跑过。
+- CMake 开关 `-DVC_WITH_CUDA=ON`（需要 CUDA 12 的 nvcc）。
+- `scripts/redact.sh` 的 `VC_JOBS`、`VC_GPUS` 与 `batch.json`（见 §2"批量"）。
+- 裸机安装脚本 `scripts/setup_linux.sh`（Ubuntu 22.04 / 24.04，驱动 ≥ 550）和 Docker 镜像 `docker/Dockerfile`（用 `docker/build.sh` 构建）。**两者都还没在目标机上跑过**：有几项下载的 sha256 还空着（`scripts/setup_linux.sh --check-pins` 列出），基础镜像的 digest 和 TensorRT 的版本要在目标机上查实后填写；空着时脚本拒绝运行。
+
+**裸机（开发机）：**
+
+```bash
+scripts/setup_linux.sh --check-pins     # 不联网：列出固定的下载和校验和
+VC_ALLOW_DOWNLOAD=1 TENSORRT_VERSION=<apt 版本> scripts/setup_linux.sh
+```
+
+它会联网下载（onnxruntime GPU 包、FFmpeg 8.1.2 源码、nv-codec-headers 12.2.72.0，Ubuntu 22.04 上还有 CMake 3.31.6，以及 apt 包），不设 `VC_ALLOW_DOWNLOAD=1` 直接拒绝；下载放在所有 checkout 共享的 `~/.cache/video-compliance/downloads/`，已有且校验通过就不再下载。装好后可执行文件在 `build/cpp-linux/vc_redact`，FFmpeg 在 `~/.cache/video-compliance/linux/ffmpeg-8.1.2/`（带 NVENC / NVDEC 和 libx264；libx264 是 GPL，整份 FFmpeg 随之是 GPL，与 YOLO 的 AGPL 一起记入"生产许可待定"）。
+
+**Docker（生产）：**
+
+```bash
+VC_ALLOW_DOWNLOAD=1 CUDA_DEVEL_DIGEST=sha256:<…> CUDA_RUNTIME_DIGEST=sha256:<…> TENSORRT_VERSION=<…> docker/build.sh
+docker run --gpus all -v <素材>:/in -v <输出>:/out -v <模型>:/models -v <缓存>:/cache vc-redact /in /out
+```
+
+模型目录挂到 `/models`（里面是 `r3/` 和 `yunet/`），`/cache` 放 TensorRT 引擎缓存（`trt-cache/<model.onnx 的 sha256>/<宽>x<高>/`）。`-e VC_JOBS=4 -e VC_GPUS=0,1` 照常传给 `redact.sh`。构建上下文排除 `data/`、`build/`（`.dockerignore`），视频和模型不会进镜像。
+
+**调参（Linux）：**
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `VC_JOBS` | 每块卡 4 | 每块卡同时几个 `vc_redact`。消费级卡（RTX 4090）的驱动限制同时编码的会话数（约 8 路），每卡的 `VC_JOBS` 不要超过它 |
+| `detect_fps` | 10 | 同 §4 |
+| `nvenc_preset` | `p4` | NVENC 预设，`p1` 最快 |
+| `trt_fp16` | true | TensorRT 用 FP16 |
+| `ort_intra_threads` | 0 | 多个进程时调小（例如 CPU 核数 ÷ 同时运行的进程数），避免会话互相抢 CPU |
+
+实测数字和推荐的 `VC_JOBS` 等 GPU 部分的压测跑完再填。
+
+**还要 GPU 机器的部分（另一份计划）：** TensorRT / CUDA 会话与引擎缓存、NVDEC / NVENC 实测；帧全程留在显存（CUDA 前处理、CUDA 马赛克、硬件帧贯通、显存预算与退路）；压测脚本 `scripts/bench_gpu.sh` 与验收脚本 `scripts/accept_gpu.sh`；查实并填好的 sha256、digest 与 TensorRT 版本。
 
 ## 测完 4K 后请反馈
 

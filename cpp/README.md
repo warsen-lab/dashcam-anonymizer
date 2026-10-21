@@ -33,6 +33,8 @@
 
   这两步会联网（合计约 43MB），只需做一次。**在计费流量的网络上先征得同意再下载**。每个文件都先下载到临时目录，`shasum -a 256 -c` 校验通过后才解压或放进缓存；校验和对不上时脚本在那一步直接失败（退出码非 0），缓存里不会留下没校验过的文件。其他机器或 worktree 直接复用同一份缓存，不必重复下载。
 
+**Linux（NVIDIA）**：`scripts/setup_linux.sh` 在 Ubuntu 22.04 / 24.04 上装齐依赖并以 `-DVC_WITH_CUDA=ON` 构建到 `build/cpp-linux`（会联网，要先设 `VC_ALLOW_DOWNLOAD=1`；下载按脚本里的 sha256 表校验，见 `docs/USAGE.md` §7）。它从源码编 FFmpeg 8.1.2（NVENC / NVDEC + libx264）装到 `~/.cache/video-compliance/linux/ffmpeg-8.1.2/`，CMake 用 `-DCMAKE_PREFIX_PATH=<那个目录>` 找到它；onnxruntime 用 Linux GPU 包 `onnxruntime-linux-x64-gpu-1.30.0`，解压到上面同一个 `third_party` 目录。生产用的 Docker 镜像见 `docker/Dockerfile`。
+
 ## 构建
 
 ```bash
