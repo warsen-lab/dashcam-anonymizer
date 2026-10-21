@@ -158,9 +158,34 @@ TEST(ExecutionProvider, SaysWhyAGpuProviderIsUnavailable) {
   const std::vector<std::string> gpu = {"TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"};
   EXPECT_EQ(gpuProviderUnavailableReason(P::TensorRT, mac, false), "TensorrtExecutionProvider is not in this onnxruntime build");
   EXPECT_EQ(gpuProviderUnavailableReason(P::Cuda, mac, true), "CUDAExecutionProvider is not in this onnxruntime build");
-  EXPECT_EQ(gpuProviderUnavailableReason(P::Cuda, gpu, false), "vc_redact was built without VC_WITH_CUDA");
+  EXPECT_EQ(gpuProviderUnavailableReason(P::Cuda, gpu, false), "this build was made without VC_WITH_CUDA");
   EXPECT_EQ(gpuProviderUnavailableReason(P::TensorRT, gpu, true),
             "the TensorRT / CUDA session set-up comes with stage 1c of the Linux plan");
+}
+
+// The TensorRT / CUDA branch asks onnxruntime for its providers before any session exists; the telemetry (which
+// uploads past proxy settings) must already be off by then. The environment is set once per process, so the first
+// call runs in a fresh process (a "threadsafe" death test re-executes the binary).
+TEST(ExecutionProvider, SwitchesTheTelemetryOffBeforeAskingForGpuProviders) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        unsetenv("ORT_DISABLE_TELEMETRY");
+        const std::vector<std::string> providers = availableOrtProviders();
+        const char* value = std::getenv("ORT_DISABLE_TELEMETRY");
+        std::exit(!providers.empty() && value != nullptr && std::string(value) == "1" ? 0 : 1);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+// The whole path: a CUDA request on a build that has no CUDA falls back to the CPU with the telemetry off.
+TEST(ExecutionProvider, ACudaRequestWithoutCudaRunsOnTheCpuWithTheTelemetryOff) {
+  const fs::path onnx = fs::path(VC_TEST_DATA_DIR) / "const_yolo" / "model.onnx";
+  const CreatedSession created = createOrtSession(onnx, P::Cuda, SessionCaches{}, SessionSettings{});
+  EXPECT_EQ(created.backend, "CPU");  // this build has no CUDA session set-up
+  const char* value = std::getenv("ORT_DISABLE_TELEMETRY");
+  ASSERT_NE(value, nullptr);
+  EXPECT_STREQ(value, "1");
 }
 
 // spec 2026-10-20 §3: $VC_CACHE/trt-cache/<sha256 of model.onnx>/<width>x<height>/, like the CoreML cache.

@@ -19,6 +19,10 @@ namespace vc {
 // The process-wide environment, created with onnxruntime's usage telemetry switched off.
 Ort::Env& ortEnv();
 
+// The execution providers this onnxruntime build has (Ort::GetAvailableProviders()), after ortEnv() has switched
+// the telemetry off: call this, not onnxruntime's function, so that no call comes before that.
+std::vector<std::string> availableOrtProviders();
+
 // Model-specific session options (free dimension overrides, say), applied to every attempt.
 using SessionConfigurer = std::function<void(Ort::SessionOptions&)>;
 
@@ -46,7 +50,7 @@ ExecutionProvider tryProviders(const std::vector<ExecutionProvider>& order, cons
                                const NoteSink& note);
 
 // Why the TensorRT or CUDA provider cannot run a session in this build: not in this onnxruntime (its
-// GetAvailableProviders() is `available`), vc_redact built without VC_WITH_CUDA, or (with it) the GPU session
+// GetAvailableProviders() is `available`), a build made without VC_WITH_CUDA, or (with it) the GPU session
 // set-up of stage 1c not being in this build yet.
 std::string gpuProviderUnavailableReason(ExecutionProvider provider, const std::vector<std::string>& available,
                                          bool withCuda);

@@ -168,6 +168,11 @@ Ort::Env& ortEnv() {
   return env;
 }
 
+std::vector<std::string> availableOrtProviders() {
+  ortEnv();  // the telemetry is off before the first onnxruntime call of any kind
+  return Ort::GetAvailableProviders();
+}
+
 std::string shapeText(const std::vector<int64_t>& shape) {
   std::string text = "[";
   for (size_t i = 0; i < shape.size(); ++i) text += (i ? ", " : "") + std::to_string(shape[i]);
@@ -254,7 +259,7 @@ std::string gpuProviderUnavailableReason(ExecutionProvider provider, const std::
   if (std::find(available.begin(), available.end(), name) == available.end()) {
     return name + " is not in this onnxruntime build";
   }
-  if (!withCuda) return "vc_redact was built without VC_WITH_CUDA";
+  if (!withCuda) return "this build was made without VC_WITH_CUDA";
   return "the TensorRT / CUDA session set-up comes with stage 1c of the Linux plan";
 }
 
@@ -272,7 +277,7 @@ CreatedSession createOrtSession(const fs::path& onnx, ExecutionProvider provider
       case ExecutionProvider::TensorRT:
       case ExecutionProvider::Cuda:
         return ProviderAttempt{false, false,
-                               gpuProviderUnavailableReason(p, Ort::GetAvailableProviders(), builtWithCuda())};
+                               gpuProviderUnavailableReason(p, availableOrtProviders(), builtWithCuda())};
       case ExecutionProvider::Cpu: {
         const Ort::SessionOptions options = makeOptions(settings, configure);
         result.session = Ort::Session(ortEnv(), onnx.c_str(), options);  // Ort::Exception: nothing left to try
