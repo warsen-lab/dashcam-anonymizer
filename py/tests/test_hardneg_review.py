@@ -64,6 +64,24 @@ def test_pilot_sampling_is_stratified_and_reproducible():
     assert stratum(cands[-1]) is None
 
 
+def test_a_stratified_sample_spreads_the_total_over_the_strata_and_skips_the_pilot():
+    from vc_hardneg.pilot import sample_stratified
+
+    cands = [_cand(f"p{i}", score=0.05) for i in range(100)] + [_cand(f"q{i}", score=0.3) for i in range(100)] + \
+            [_cand(f"y{i}", cls="face", src="yunet") for i in range(100)] + \
+            [_cand(f"s{i}", cls="face", src="student") for i in range(10)] + \
+            [_cand(f"b{i}", cls="face", src="student+yunet", score=0.3) for i in range(100)]
+    picked = sample_stratified(cands, 200, seed=1, exclude={"p0", "p1"})
+    assert picked == sample_stratified(cands, 200, seed=1, exclude={"p0", "p1"})
+    by = {}
+    for c in picked:
+        by[stratum(c) or "face_both"] = by.get(stratum(c) or "face_both", 0) + 1
+    assert sum(by.values()) == 200
+    assert by["face_student"] == 10  # all there are; the rest goes to the other four evenly
+    assert sorted(v for k, v in by.items() if k != "face_student") == [47, 47, 48, 48]
+    assert not {"p0", "p1"} & {c.id for c in picked}
+
+
 def test_pilot_report_gates_on_real_targets_judged_no():
     ids = [f"c{i}" for i in range(100)]
     judged = [Judgment(i, "no", "teacher") for i in ids[:60]] + [Judgment(i, "yes", "teacher") for i in ids[60:]]

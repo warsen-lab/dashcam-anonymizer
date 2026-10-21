@@ -27,6 +27,41 @@ def sample_pilot(cands: list[Candidate], per_stratum: int = 25, seed: int = 0) -
     return out
 
 
+def _sample_key(c: Candidate) -> str | None:
+    """The pilot's strata, plus "face_both": faces both detectors found but that score low."""
+    return stratum(c) or ("face_both" if c.cls == "face" else None)
+
+
+def sample_stratified(cands: list[Candidate], total: int, seed: int = 0, exclude: set[str] = frozenset()) -> list[Candidate]:
+    """About `total` candidates spread evenly over the strata (a stratum with fewer gives all it has and the rest
+    goes to the others); ids in `exclude` are left out. Reproducible for a seed."""
+    pools: dict[str, list[Candidate]] = {}
+    for c in sorted(cands, key=lambda c: c.id):
+        key = _sample_key(c)
+        if key is not None and c.id not in exclude:
+            pools.setdefault(key, []).append(c)
+    quota = {k: 0 for k in pools}
+    left = total
+    open_ = sorted(pools, key=lambda k: len(pools[k]))
+    while open_ and left > 0:
+        share = left // len(open_)
+        small = [k for k in open_ if len(pools[k]) - quota[k] <= share]
+        if small:
+            for k in small:
+                left -= len(pools[k]) - quota[k]
+                quota[k] = len(pools[k])
+                open_.remove(k)
+            continue
+        for k in open_:
+            quota[k] += share
+        left -= share * len(open_)
+        for k in sorted(open_)[:left]:  # the remainder, one each
+            quota[k] += 1
+        left = 0
+    rng = random.Random(seed)
+    return [c for k in sorted(pools) for c in rng.sample(pools[k], quota[k])]
+
+
 def _confusion(model: dict[str, Judgment], truth: dict[str, str], ids: list[str]) -> dict:
     rows = {v: {"yes": 0, "no": 0} for v in ("yes", "no", "unsure")}
     for i in ids:

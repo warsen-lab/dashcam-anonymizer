@@ -29,6 +29,9 @@ class LlmConfig:
     ask_on: tuple[str, ...] = ("no", "unsure")  # the model verdicts the LLM is asked about
     parallel: int = 1  # LLM calls at once
     image_side: int = 384  # the crop it sees is enlarged to about this, the box drawn in red
+    batch: int = 1  # crops per call: more than 1 sends them as one numbered grid, with batch_prompt
+    batch_prompt: str = ""  # {count} and {cls_zh} are filled in; it must ask for a JSON array of {n, verdict}
+    tile: int = 256  # a grid cell's side in px
 
 
 @dataclass(frozen=True)
@@ -89,10 +92,13 @@ def load_config(path: Path = DEFAULT_CONFIG) -> HardnegConfig:
         face=_class("face", d["face"]),
         llm=LlmConfig(str(llm["name"]), tuple(str(a) for a in llm["command"]), float(llm["timeout_s"]), str(llm["prompt"]),
                       tuple(str(v) for v in llm.get("ask_on", ("no", "unsure"))), int(llm.get("parallel", 1)),
-                      int(llm.get("image_side", 384))),
+                      int(llm.get("image_side", 384)), int(llm.get("batch", 1)), str(llm.get("batch_prompt", "")),
+                      int(llm.get("tile", 256))),
     )
     if not set(cfg.llm.ask_on) <= {"no", "unsure"} or cfg.llm.parallel < 1 or cfg.llm.image_side < 64 or cfg.tiny_px < 0:
         raise ValueError(f"{path}: llm.ask_on within [no, unsure], llm.parallel >= 1, llm.image_side >= 64, tiny_px >= 0")
+    if cfg.llm.batch < 1 or cfg.llm.tile < 64 or (cfg.llm.batch > 1 and "{count}" not in cfg.llm.batch_prompt):
+        raise ValueError(f"{path}: llm.batch >= 1, llm.tile >= 64, and a batch_prompt holding {{count}} when batch > 1")
     if cfg.crop_factor <= 0 or cfg.min_crop_px < 0 or not 0 <= cfg.pad_value <= 255 or cfg.per_track < 1 or cfg.upscale < 1:
         raise ValueError(f"{path}: crop_factor > 0, min_crop_px >= 0, pad_value in [0, 255], per_track >= 1, upscale >= 1")
     return cfg

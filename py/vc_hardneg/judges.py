@@ -128,34 +128,89 @@ class CommandJudge:
         cv2.imwrite(str(out), img)
         return out
 
-    def judge(self, c: Candidate, image_path: Path) -> Judgment:
-        fields = {"{image}": str(self._shown(c, image_path)), "{cls}": c.cls, "{cls_zh}": CLS_ZH[c.cls]}
-        fields["{prompt}"] = _fill(self.cfg.prompt, fields)
+    def _run(self, image: Path, prompt: str, cls: str) -> tuple[str | None, str]:
+        """The command's stdout, or None and why it did not answer."""
+        fields = {"{image}": str(image), "{cls}": cls, "{cls_zh}": CLS_ZH[cls], "{prompt}": prompt}
         argv = [_fill(a, fields) for a in self.cfg.command]
         try:
             done = subprocess.run(argv, capture_output=True, text=True, timeout=self.cfg.timeout_s,
                                   stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            return Judgment(c.id, "unsure", self.name, None, f"timeout after {self.cfg.timeout_s:g} s")
+            return None, f"timeout after {self.cfg.timeout_s:g} s"
         except OSError as e:
-            return Judgment(c.id, "unsure", self.name, None, f"cannot run: {e}")
-        for text in reversed(re.findall(r"\{[^{}]*\}", done.stdout)):
+            return None, f"cannot run: {e}"
+        return done.stdout, f"exit {done.returncode}"
+
+    def judge(self, c: Candidate, image_path: Path) -> Judgment:
+        fields = {"{image}": "", "{cls}": c.cls, "{cls_zh}": CLS_ZH[c.cls]}
+        out, why = self._run(self._shown(c, image_path), _fill(self.cfg.prompt, fields), c.cls)
+        for text in reversed(re.findall(r"\{[^{}]*\}", out or "")):
             try:
                 answer = json.loads(text)
             except ValueError:
                 continue
             if isinstance(answer, dict) and answer.get("verdict") in ("yes", "no", "unsure"):
                 return Judgment(c.id, answer["verdict"], self.name, None, str(answer.get("reason", ""))[:200])
-        return Judgment(c.id, "unsure", self.name, None, f"no verdict in the output (exit {done.returncode})")
+        return Judgment(c.id, "unsure", self.name, None, why if out is None else f"no verdict in the output ({why})")
+
+    def _grid(self, cands: list[Candidate], image_paths: list[Path]) -> Path:
+        """The crops on one image, 4 per row, each enlarged to fit a tile x tile cell with its box in red and its
+        number (1, 2, ...) in yellow at the top left; written to <crop dir>/llm/batch_<first id>.png."""
+        t = self.cfg.tile
+        cols = min(4, len(cands))
+        rows = (len(cands) + cols - 1) // cols
+        grid = np.full((rows * t, cols * t, 3), 40, np.uint8)
+        for k, (c, path) in enumerate(zip(cands, image_paths)):
+            crop = cv2.imread(str(path))
+            if crop is None:
+                raise FileNotFoundError(f"{path} cannot be read")
+            s = (t - 4) / max(crop.shape[:2])
+            img = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+            ox, oy = c.crop_origin
+            x1, y1, x2, y2 = c.box
+            cv2.rectangle(img, (round((x1 - ox) * s), round((y1 - oy) * s)), (round((x2 - ox) * s), round((y2 - oy) * s)),
+                          (0, 0, 255), 2)
+            r, q = divmod(k, cols)
+            grid[r * t + 2 : r * t + 2 + img.shape[0], q * t + 2 : q * t + 2 + img.shape[1]] = img
+            for color, width in (((0, 0, 0), 5), ((0, 255, 255), 2)):
+                cv2.putText(grid, str(k + 1), (q * t + 8, r * t + 34), cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, width)
+        out = image_paths[0].parent / "llm" / f"batch_{cands[0].id}.png"
+        out.parent.mkdir(exist_ok=True)
+        cv2.imwrite(str(out), grid)
+        return out
+
+    def judge_batch(self, cands: list[Candidate], image_paths: list[Path]) -> list[Judgment]:
+        """One verdict per candidate, in order: one call on a numbered grid when the config's batch is above 1 (and
+        there is more than one), else one call each. A number the answer leaves out is "unsure". Raises ValueError
+        for a batch of several classes."""
+        if self.cfg.batch <= 1 or len(cands) == 1:
+            return [self.judge(c, p) for c, p in zip(cands, image_paths)]
+        if len({c.cls for c in cands}) != 1:
+            raise ValueError("a batch for the LLM judge must hold one class")
+        cls = cands[0].cls
+        prompt = _fill(self.cfg.batch_prompt, {"{count}": str(len(cands)), "{cls_zh}": CLS_ZH[cls], "{cls}": cls})
+        out, why = self._run(self._grid(cands, image_paths), prompt, cls)
+        answers: dict[int, str] = {}
+        for text in reversed(re.findall(r"\[[^\[\]]*\]", out or "")):
+            try:
+                rows = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+                answers = {int(r["n"]): r["verdict"] for r in rows
+                           if isinstance(r.get("n"), int) and r.get("verdict") in ("yes", "no", "unsure")}
+                break
+        detail = f"grid of {len(cands)}" if answers else (why if out is None else f"no verdicts in the output ({why})")
+        return [Judgment(c.id, answers.get(k + 1, "unsure"), self.name, None, detail) for k, c in enumerate(cands)]
 
 
 def run_judges(cands: list[Candidate], judgments_path: Path, crops_root: Path, frame_judge: FrameTeacherJudge,
                teacher_judge: TeacherJudge, llm_judge=None, rejudge: bool = False,
-               ask_on: tuple[str, ...] = ("no", "unsure"), llm_parallel: int = 1) -> Counter:
+               ask_on: tuple[str, ...] = ("no", "unsure"), llm_parallel: int = 1, llm_batch: int = 1) -> Counter:
     """Judges every candidate without a judgment yet (with rejudge every one people did not judge): the frame
-    teacher, else the teacher; then the LLM, llm_parallel calls at once, about those the models judged one of
-    `ask_on` (its verdict, appended last, is the final word). Appends each verdict as it comes, so an interrupted
-    run keeps what it did. Returns counts of "<judge>:<verdict>"."""
+    teacher, else the teacher; then the LLM about those the models judged one of `ask_on`, in batches of up to
+    llm_batch of one class, llm_parallel calls at once (its verdict, appended last, is the final word). Appends
+    the verdicts as they come, so an interrupted run keeps what it did. Returns counts of "<judge>:<verdict>"."""
     done = resolve(read_judgments(judgments_path))
     counts: Counter = Counter()
     ask: list[Candidate] = []
@@ -173,9 +228,12 @@ def run_judges(cands: list[Candidate], judgments_path: Path, crops_root: Path, f
         counts[f"{j.judge}:{j.verdict}"] += 1
         if j.verdict in ask_on and llm_judge is not None:
             ask.append(c)
-    if ask:
+    batches = [same[i : i + llm_batch] for cls in sorted({c.cls for c in ask})
+               for same in [[c for c in ask if c.cls == cls]] for i in range(0, len(same), llm_batch)]
+    if batches:
         with ThreadPoolExecutor(max_workers=llm_parallel) as pool:
-            for k in pool.map(lambda c: llm_judge.judge(c, crops_root / c.image), ask):
-                append_judgments(judgments_path, [k])
-                counts[f"{k.judge}:{k.verdict}"] += 1
+            for done_batch in pool.map(lambda b: llm_judge.judge_batch(b, [crops_root / c.image for c in b]), batches):
+                append_judgments(judgments_path, done_batch)
+                for k in done_batch:
+                    counts[f"{k.judge}:{k.verdict}"] += 1
     return counts

@@ -127,11 +127,9 @@ def test_run_judges_skips_judged_and_asks_the_llm_about_no_and_unsure(tmp_path):
     asked = []
 
     class FakeLlm:
-        name = "llm:fake"
-
-        def judge(self, c, image_path):
-            asked.append(c.id)
-            return Judgment(c.id, "no" if c.id == "b" else "yes", "llm:fake")
+        def judge_batch(self, cs, paths):
+            asked.extend(c.id for c in cs)
+            return [Judgment(c.id, "no" if c.id == "b" else "yes", "llm:fake") for c in cs]
 
     counts = run_judges(cands, path, tmp_path, FrameTeacherJudge(CFG), teacher, FakeLlm())
     assert sorted(asked) == ["b", "d"]
@@ -141,3 +139,50 @@ def test_run_judges_skips_judged_and_asks_the_llm_about_no_and_unsure(tmp_path):
     assert r["d"].verdict == "yes"  # teacher no, LLM yes: the LLM's word stands
     assert counts["frame_teacher:yes"] == 1 and counts["teacher:unsure"] == 1 and counts["llm:fake:no"] == 1
     assert run_judges(cands, path, tmp_path, FrameTeacherJudge(CFG), teacher) == {}  # all judged: nothing to do
+
+
+def _crops_for(tmp_path, cands):
+    (tmp_path / "crops").mkdir(exist_ok=True)
+    for c in cands:
+        cv2.imwrite(str(tmp_path / c.image), np.zeros((50, 50, 3), np.uint8))
+    return [tmp_path / c.image for c in cands]
+
+
+def test_the_llm_judges_a_batch_on_one_numbered_grid(tmp_path):
+    cands = [_cand(f"p{i}", image=f"crops/p{i}.png") for i in range(5)]
+    paths = _crops_for(tmp_path, cands)
+    seen = tmp_path / "seen.txt"
+    # answers 1 and 3 (no, yes), skips the rest: those stay unsure
+    script = (f"import sys; open({str(seen)!r}, 'w').write(sys.argv[1] + '\\n' + sys.argv[2]); "
+              "print('[{\"n\": 1, \"verdict\": \"no\"}, {\"n\": 3, \"verdict\": \"yes\"}]')")
+    cfg = LlmConfig("t", (sys.executable, "-c", script, "{image}", "{prompt}"), 5, "p", batch=8, batch_prompt="{count} 张{cls_zh}")
+    js = CommandJudge(cfg, env={LLM_ENV: "1"}).judge_batch(cands, paths)
+    assert [j.verdict for j in js] == ["no", "unsure", "yes", "unsure", "unsure"]
+    assert [j.id for j in js] == [c.id for c in cands] and all(j.judge == "llm:t" for j in js)
+    image_path, prompt = seen.read_text().split("\n", 1)
+    assert prompt == "5 张车牌"
+    grid = cv2.imread(image_path)
+    assert grid.shape[1] == 4 * cfg.tile and grid.shape[0] == 2 * cfg.tile  # 5 crops: 4 per row, 2 rows
+
+
+def test_a_batch_must_be_one_class(tmp_path):
+    cands = [_cand("a", image="crops/a.png"), _cand("b", cls="face", image="crops/b.png")]
+    cfg = LlmConfig("t", (sys.executable, "-c", "print()"), 5, "p", batch=8, batch_prompt="{count}")
+    with pytest.raises(ValueError):
+        CommandJudge(cfg, env={LLM_ENV: "1"}).judge_batch(cands, _crops_for(tmp_path, cands))
+
+
+def test_run_judges_sends_the_llm_batches_of_one_class(tmp_path):
+    cands = [_cand(f"p{i}", image=f"crops/p{i}.png") for i in range(3)] + \
+            [_cand(f"f{i}", cls="face", image=f"crops/f{i}.png") for i in range(2)]
+    _crops_for(tmp_path, cands)
+    teacher = TeacherJudge(CFG, lambda img: [], lambda img: [])  # every one "no"
+    batches = []
+
+    class FakeLlm:
+        def judge_batch(self, cs, paths):
+            batches.append([c.id for c in cs])
+            return [Judgment(c.id, "no", "llm:fake") for c in cs]
+
+    run_judges(cands, tmp_path / "j.jsonl", tmp_path, FrameTeacherJudge(CFG), teacher, FakeLlm(), llm_batch=2)
+    assert sorted(batches) == [["f0", "f1"], ["p0", "p1"], ["p2"]]

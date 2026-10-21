@@ -35,6 +35,9 @@ def _parser() -> argparse.ArgumentParser:
             j.add_argument("--ids", type=Path, help="only the ids listed in this file, one per line")
             j.add_argument("--rejudge", action="store_true",
                            help="judge again what models judged before (people's verdicts stay)")
+            j.add_argument("--sample", type=int, default=None,
+                           help="judge a stratified sample of about this many not yet judged (spec 2026-10-21 §3)")
+            j.add_argument("--seed", type=int, default=0)
         else:
             j.add_argument("--out", type=Path, required=True)
             j.add_argument("--per-stratum", type=int, default=25)
@@ -95,12 +98,17 @@ def _judge(args) -> int:
     wanted = _ids(args.ids)
     if wanted is not None:
         cands = [c for c in cands if c.id in wanted]
+    if args.sample is not None:
+        from vc_hardneg.pilot import sample_stratified
+
+        cands = sample_stratified(cands, args.sample, args.seed, exclude=set(resolve(read_judgments(args.judgments))))
+        (args.judgments.parent / f"sample_{args.sample}_{args.seed}.txt").write_text("".join(f"{c.id}\n" for c in cands))
     frame, teacher, llm = _judges(args)
     if llm is not None:
         print(f"judge: the LLM judge may send up to {len(cands)} crops to {llm.name}", file=sys.stderr)
     llm_cfg = load_config(args.config).llm
     counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm, args.rejudge,
-                        llm_cfg.ask_on, llm_cfg.parallel)
+                        llm_cfg.ask_on, llm_cfg.parallel, llm_cfg.batch)
     print("judge: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "nothing left to judge"))
     return 0
 
@@ -138,7 +146,7 @@ def _pilot(args) -> int:
     (args.out / "pilot_ids.txt").write_text("".join(f"{c.id}\n" for c in cands))
     llm_cfg = load_config(args.config).llm
     counts = run_judges(cands, args.judgments, args.candidates.parent, frame, teacher, llm,
-                        ask_on=llm_cfg.ask_on, llm_parallel=llm_cfg.parallel)
+                        ask_on=llm_cfg.ask_on, llm_parallel=llm_cfg.parallel, llm_batch=llm_cfg.batch)
     page = write_review_page(cands, args.candidates.parent, args.out, _by_id(read_judgments(args.judgments)), "试判 100 张")
     print(f"pilot: {len(cands)} crops; " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + f"; review {page}")
     return 0
