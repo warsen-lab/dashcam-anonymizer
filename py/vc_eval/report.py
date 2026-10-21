@@ -103,6 +103,7 @@ def _head_lines(summary: dict) -> list[str]:
         "# 代理验证结果",
         "",
         f"- 模型：{summary['model']}；人脸模型：{summary.get('face_model') or '无'}；"
+        f"复核模型：{summary.get('verifier_model') or '无'}；"
         f"检测后端：{first.get('detector', '')}；编码器：{first.get('encoder', '')}",
         _candidate_line(summary),
         _target_line(summary),

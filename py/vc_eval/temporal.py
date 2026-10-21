@@ -18,6 +18,14 @@ class TemporalReport:
     frames: int
     classes: dict[str, Rate]
     misses: list[Miss] = field(default_factory=list)
+    bins: dict[str, Rate] = field(default_factory=dict)  # the same boxes by score_bin
+
+
+def score_bin(cls: str, score: float) -> str:
+    """The score bands of docs/reports/stable-masks-2026-10-19.md (its temporal coverage table)."""
+    if cls == "face":
+        return "face>=0.8" if score >= 0.8 else "face0.5-0.8" if score >= 0.5 else "face<0.5"
+    return "plate>=0.5" if score >= 0.5 else "plate0.2-0.5" if score >= 0.2 else "plate<0.2"
 
 
 def _dense_frame_count(dense_detections: Path) -> int:
@@ -81,6 +89,8 @@ def evaluate_temporal(dense_detections: Path, sparse_masks: Path, frame_height: 
             covered = covered_fraction(box, masks[frame])
             hit = covered >= COVERED_FRACTION
             report.classes[box.cls] = report.classes[box.cls].add(hit)
+            key = score_bin(box.cls, box.score)
+            report.bins[key] = report.bins.get(key, Rate()).add(hit)
             if not hit:
                 report.misses.append(Miss(frame, box, covered))
     return report

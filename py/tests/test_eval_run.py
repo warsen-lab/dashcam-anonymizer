@@ -1385,3 +1385,37 @@ def test_summary_json_lists_every_confident_miss_with_its_box(tmp_path, monkeypa
     misses = summary["runs"][0]["miss_list"]
     assert [m["frame"] for m in misses] == [0, 6, 12, 18, 24]
     assert misses[0] == {"frame": 0, "cls": "plate", "x1": 100.0, "y1": 80.0, "x2": 150.0, "y2": 100.0, "covered": 0.0}
+
+
+def _verifier_model(directory, classes=("plate",)):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.onnx").write_bytes(b"onnx")
+    (directory / "model.json").write_text(json.dumps({"name": directory.name, "kind": "verifier", "classes": list(classes)}))
+    return directory
+
+
+def test_a_verifier_goes_to_the_sparse_runs_only_and_is_named_in_the_summary(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    _python_dets(monkeypatch)
+    verifier = _verifier_model(tmp_path / "verifier")
+    calls = []
+    summary = run_all(_cfg(tmp_path, verifier_model=verifier), runner=_fake_runner(calls))
+    redact = [c for c in calls if c[0].endswith("vc_redact")]
+    dense = [c for c in redact if "--detect-every-frame" in c]
+    sparse = [c for c in redact if "--detect-every-frame" not in c]
+    assert len(dense) == 1 and len(sparse) == 2
+    assert all("--verifier-model" not in c for c in dense)  # the reference sees every box
+    assert all(c[c.index("--verifier-model") + 1] == str(verifier) for c in sparse)
+    assert summary["verifier_model"] == str(verifier)
+    assert f"复核模型：{verifier}" in (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")
+    assert all("temporal_bins" in r for r in summary["runs"])
+
+
+def test_a_verifier_that_is_not_one_is_refused_before_any_run(tmp_path):
+    _setup(tmp_path)
+    bad = _verifier_model(tmp_path / "verifier")
+    (bad / "model.json").write_text(json.dumps({"kind": "detector"}))
+    calls = []
+    with pytest.raises(ValueError, match="verifier"):
+        run_all(_cfg(tmp_path, verifier_model=bad), runner=_fake_runner(calls))
+    assert calls == []
