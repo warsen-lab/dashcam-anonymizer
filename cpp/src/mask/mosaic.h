@@ -60,17 +60,20 @@ class TrackBlocks {
   std::unordered_map<int64_t, int> current_;
 };
 
-// A rect and the block it is pixelated with.
+// A rect, the block it is pixelated with, and whether its edges snap out to the block grid.
 struct MosaicRect {
   PixelRect rect;
   int block = kMosaicBlockLadder[0];
+  bool snap = true;
 };
 
 // Pixelates each rect on the grid of its block size b anchored at the frame's top-left corner (spec §4):
 // the rect's edges move out to multiples of b (x1 = floor(x1 / b) * b, x2 = ceil(x2 / b) * b), are
 // clipped to the frame, and every b x b cell inside becomes the rounded mean of its pixels; a cell the
-// frame's right or bottom edge cuts averages the pixels that are there. Chroma uses (b >> log2_chroma_w)
-// x (b >> log2_chroma_h) cells on the same grid (b / 2 for 4:2:0). Rects are applied largest block first
+// frame's right or bottom edge cuts averages the pixels that are there. A rect with `snap` false keeps its
+// edges: only its pixels change, on the same grid, a cell its edges cut averaging its part inside the
+// rect. Chroma uses (b >> log2_chroma_w) x (b >> log2_chroma_h) cells on the same grid (b / 2 for 4:2:0),
+// over the chroma samples the rect's pixels fall on. Rects are applied largest block first
 // (equal blocks in list order), so where masks overlap the finer mosaic drawn last shows. Supports 8-bit
 // planar YUV and NV12. Throws std::invalid_argument, before any pixel is touched, for a block that is not
 // an even number >= 2 or not a multiple of the frame's chroma subsampling factor (so a whole number of

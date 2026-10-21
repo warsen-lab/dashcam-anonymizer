@@ -7,8 +7,9 @@ it is rounded outwards (by less than one cell on each side).
 Two areas are measured. The area on screen is what the viewer sees pixelated: a box with a `block` is first rounded
 outwards to whole pixels and clipped to the picture, then snapped outwards to multiples of its block counted from the
 picture's top left corner and clipped again, exactly as vc_redact's mosaic does (cpp/src/mask/mosaic.cpp); a box without
-a `block` (an older vc_redact) counts as it is. The flicker uses the area on screen. The box area is the plain union of
-the boxes, without the snapping, which keeps the numbers comparable with runs made before the mosaic grid. One caveat:
+a `block` (an older vc_redact) or with `"snap": false` (a plate, whose mosaic stays inside its box) counts as it is. The
+flicker uses the area on screen. The box area is the plain union of the boxes, without the snapping, which keeps the
+numbers comparable with runs made before the mosaic grid. One caveat:
 masks.jsonl holds coordinates rounded to 0.1 px, vc_redact snapped the unrounded ones, so an edge within 0.05 px of a
 grid line can fall on the other side of it.
 
@@ -83,6 +84,8 @@ def _cells(r: _Rect) -> tuple[slice, slice]:
 def _parse(line: str) -> tuple[str, int, list[tuple[float, float, float, float, int | None]], list[int]]:
     """The video, frame number, boxes (x1, y1, x2, y2, block or None) and track ids of one masks.jsonl line.
 
+    A box with `"snap": false` gets block None: it is not snapped to the grid.
+
     Raises KeyError, TypeError, ValueError or OverflowError for a line that is not a mask record.
     """
     rec = json.loads(line)
@@ -97,6 +100,11 @@ def _parse(line: str) -> tuple[str, int, list[tuple[float, float, float, float, 
         block = int(b["block"]) if "block" in b else None
         if block is not None and block < 1:
             raise ValueError(f"block {block} is not positive")
+        snap = b.get("snap", True)
+        if not isinstance(snap, bool):
+            raise ValueError("snap is not a boolean")
+        if not snap:
+            block = None
         boxes.append((x1, y1, x2, y2, block))
     return name, frame, boxes, [int(b["track"]) for b in rec["boxes"] if "track" in b]
 

@@ -8,12 +8,14 @@ from vc_eval.viewing import FLICKER_FRACTION, RASTER_PX, evaluate_viewing, pool_
 W, H = 160, 120  # a 40 x 30 raster of 4 px cells: 1200 cells
 
 
-def _box(x1, y1, x2, y2, track=None, cls="face", block=None):
+def _box(x1, y1, x2, y2, track=None, cls="face", block=None, snap=None):
     b = {"cls": cls, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "origin": "detected"}
     if track is not None:
         b["track"] = track
     if block is not None:
         b["block"] = block
+    if snap is not None:
+        b["snap"] = snap
     return b
 
 
@@ -90,6 +92,10 @@ def test_a_box_covers_every_raster_cell_it_touches_and_nothing_outside_the_pictu
         (_box(200, 0, 240, 40, block=16), 0, 0),
         # no block (an older vc_redact): the box itself
         (_box(111, 21, 151, 61), 121, 121),
+        # "snap": true is the default
+        (_box(111, 21, 151, 61, block=16, snap=True), 192, 121),
+        # "snap": false (a plate): the mosaic stays inside the box
+        (_box(111, 21, 151, 61, cls="plate", block=16, snap=False), 121, 121),
     ],
 )
 def test_the_area_on_screen_is_the_box_snapped_to_the_mosaic_grid_and_box_area_is_the_box(tmp_path, box, cells, box_cells):
@@ -164,6 +170,7 @@ def test_frames_where_a_track_has_two_boxes_are_counted(tmp_path):
         ([{"video": "a.mp4", "frame": 0, "boxes": [_box(0, 0, 4, 4, block=0)]}], "line 1: bad mask record"),
         ([{"video": "a.mp4", "frame": 0, "boxes": [_box(0, 0, 4, 4, block=-16)]}], "line 1: bad mask record"),
         ([{"video": "a.mp4", "frame": 0, "boxes": [_box(0, 0, 4, 4, block="x")]}], "line 1: bad mask record"),
+        ([{"video": "a.mp4", "frame": 0, "boxes": [_box(0, 0, 4, 4, block=16, snap="no")]}], "line 1: bad mask record"),
         ([{"video": "a.mp4", "frame": 0, "boxes": [_box(0, float("nan"), 4, 4)]}], "line 1: bad mask record"),
         ([], "has no frames"),
     ],

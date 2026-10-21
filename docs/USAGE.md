@@ -58,7 +58,7 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | 文件 | 内容 |
 |---|---|
 | `<视频名>.redacted.mp4` | 打码后的视频。编码跟随原片（HEVC → HEVC，其他 → H.264），码率取原片的，音频原样复制，旋转、色彩信息照搬 |
-| `masks.jsonl` | 每帧打了哪些框（一帧一行）：坐标、轨迹编号 track、来源 origin、马赛克块大小 block |
+| `masks.jsonl` | 每帧打了哪些框（一帧一行）：坐标、轨迹编号 track、来源 origin、马赛克块大小 block、是否向外对齐网格 snap（车牌为 false） |
 | `detections.jsonl` | 关键帧上检测到的框，含来源（student / yunet）；confirmed 为 false 的是只出现一次的低分框，没有打码 |
 | `stats.json` | 帧数、关键帧数、各阶段耗时和吞吐、检测后端、编码器 |
 
