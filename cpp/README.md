@@ -83,7 +83,7 @@ cmake --build build/cpp -j 4
 | `--motion-threshold` | 0.05 | 与上一帧 160×90 缩略图的平均亮度差（0–1） |
 | `--dedup` | 关闭 | 与上一张保留帧差异低于该值时跳过，训练采集建议 0.01 |
 | `--clip S,D` | 关闭 | 导出第 S 秒起 D 秒内的每一帧，用于时间覆盖率评测 |
-| `--hwaccel` | auto | `auto` / `none` / `videotoolbox`；显式指定 `videotoolbox` 时，编码格式不被支持会回退到软解，统计行的 `decoded` 会写明实际用的是 hardware 还是 software |
+| `--hwaccel` | auto | `auto` / `none` / `videotoolbox` / `cuda`（`auto` 与 `cuda` 的含义同 `vc_redact`）；显式指定 `videotoolbox` 时，编码格式不被支持会回退到软解，统计行的 `decoded` 会写明实际用的是 hardware 还是 software |
 | `--jpeg-q` | 2 | MJPEG 量化值，2 最好（约等于质量 95） |
 | `--overwrite` | 关闭 | 覆盖已有输出目录，见下方安全规则 |
 
@@ -126,7 +126,7 @@ cmake --build build/cpp -j 4
 | `--detect-fps <n>` | 10 | 每秒检测几次（关键帧），5 到 60，覆盖配置里的 `detect_fps`。关键帧按帧序号每隔 stride = max(1, ⌊视频帧率 / n + 0.5⌋) 帧一个，整段不变（60 fps 视频上 5/10/15/30/60 是每 12/6/4/2/1 帧）；n 达到视频帧率就是逐帧检测，超过时 stderr 多一行 note:。视频帧率取视频流的 avg_frame_rate，读不到退回 r_frame_rate，都没有就报错。缓冲满 120 帧时仍强制出一个关键帧 |
 | `--detect-every-frame` | 关闭 | 每一帧都检测，用来做时间覆盖率评测的对照 |
 | `--ep` | auto | `auto` / `tensorrt` / `cuda` / `coreml` / `cpu`，检测使用的 onnxruntime 执行提供者。`auto` 在 Linux 上依次试 TensorRT、CUDA、CPU，在 macOS 上试 CoreML、CPU（与原来的默认 `coreml` 相同）；显式指定的用不了时退到 CPU。跳过的每一个在 stderr 写一行原因，例如 `vc: TensorRT execution provider unavailable (…); trying CUDA`。TensorRT / CUDA 的会话在 GPU 计划里接上，在那之前它们总是报不可用 |
-| `--hwaccel` | none | 解码方式：`none` / `auto` / `videotoolbox`（与 `vc_extract` 不同，默认不用硬解） |
+| `--hwaccel` | macOS `none`，Linux `auto` | 解码方式：`none` / `auto` / `videotoolbox` / `cuda`。`auto` 在 Linux 上试 CUDA（NVDEC，解完拷回内存），打不开退回软件解码并在 stderr 写一行；在 macOS 上试 VideoToolbox，打不开悄悄退回软件解码（与 `vc_extract` 不同，macOS 上默认不用硬解，1080p H.264 软解更快）。`cuda` 打不开时退回软件解码并写一行 `vc: CUDA (NVDEC) decoding unavailable (原因); decoding in software`（macOS 上总是这样）；显式的 `videotoolbox` 打不开则报错 |
 | `--encoder` | auto | `auto` 按 `h264_nvenc`（不在 macOS 上）→ `h264_videotoolbox`（只在 macOS 上）→ libx264 的顺序试；`software` 直接用 libx264 |
 | `--overwrite` | 关闭 | 覆盖上一次 `vc_redact` 的输出目录，见下方 |
 

@@ -611,6 +611,8 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
 
 }  // namespace
 
+HwAccel defaultRedactHwAccel(Platform platform) { return platform == Platform::Linux ? HwAccel::Auto : HwAccel::None; }
+
 size_t pipelineQueueCapacity(int width, int height) {
   const uint64_t pixels = width > 0 && height > 0 ? static_cast<uint64_t>(width) * static_cast<uint64_t>(height) : 1;
   const uint64_t frames = kQueueBudgetBytes / (pixels * kBytesPerPixel);

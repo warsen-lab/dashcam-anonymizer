@@ -57,7 +57,7 @@ TEST(ExtractCli, RejectsInvalidArguments) {
       {"--input", "a.mp4", "--out", "o", "--max-fps", "4"},     // below base fps
       {"--input", "a.mp4", "--out", "o", "--clip", "1.5"},      // no duration
       {"--input", "a.mp4", "--out", "o", "--clip", "1,0"},      // empty window
-      {"--input", "a.mp4", "--out", "o", "--hwaccel", "cuda"},  // unsupported here
+      {"--input", "a.mp4", "--out", "o", "--hwaccel", "vulkan"},  // unknown
       {"--input", "a.mp4", "--out", "o", "--jpeg-q", "1"},      // out of range
       {"--input", "a.mp4", "--out", "o", "--bogus", "1"},       // unknown option
       {"--input"},                                              // missing value

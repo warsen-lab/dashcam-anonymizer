@@ -1,6 +1,7 @@
 #include "io/video_reader.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -40,13 +41,39 @@ AVPixelFormat preferVideoToolbox(AVCodecContext* ctx, const AVPixelFormat* forma
   return avcodec_default_get_format(ctx, formats);
 }
 
+AVPixelFormat preferCuda(AVCodecContext* ctx, const AVPixelFormat* formats) {
+  for (const AVPixelFormat* f = formats; *f != AV_PIX_FMT_NONE; ++f) {
+    if (*f == AV_PIX_FMT_CUDA) return *f;
+  }
+  return avcodec_default_get_format(ctx, formats);
+}
+
+bool isHardwareFrame(int format) { return format == AV_PIX_FMT_VIDEOTOOLBOX || format == AV_PIX_FMT_CUDA; }
+
 }  // namespace
 
 HwAccel parseHwAccel(const std::string& text) {
   if (text == "none") return HwAccel::None;
   if (text == "videotoolbox") return HwAccel::VideoToolbox;
+  if (text == "cuda") return HwAccel::Cuda;
   if (text == "auto") return HwAccel::Auto;
-  throw std::invalid_argument("unknown hwaccel '" + text + "' (none|videotoolbox|auto)");
+  throw std::invalid_argument("unknown hwaccel '" + text + "' (none|videotoolbox|cuda|auto)");
+}
+
+HwDecodePlan hwDecodePlan(HwAccel requested, Platform platform) {
+  switch (requested) {
+    case HwAccel::None:
+      return {};
+    case HwAccel::VideoToolbox:
+      return {HwDevice::VideoToolbox, true, false};
+    case HwAccel::Cuda:
+      return {HwDevice::Cuda, false, true};
+    case HwAccel::Auto:
+      if (platform == Platform::Linux) return {HwDevice::Cuda, false, true};
+      if (platform == Platform::MacOS) return {HwDevice::VideoToolbox, false, false};
+      return {};
+  }
+  return {};
 }
 
 LumaPlane VideoFrame::luma() const {
@@ -127,19 +154,23 @@ void VideoReader::Impl::open(const std::string& path, HwAccel hwAccel) {
 }
 
 void VideoReader::Impl::attachHardware(HwAccel hwAccel) {
-  if (hwAccel == HwAccel::None) return;
+  const HwDecodePlan plan = hwDecodePlan(hwAccel, buildPlatform());
+  if (plan.device == HwDevice::None) return;
+  const bool cuda = plan.device == HwDevice::Cuda;
+  const char* name = cuda ? "CUDA (NVDEC)" : "VideoToolbox";
   AVBufferRef* device = nullptr;
-  const int ret =
-      av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nullptr, nullptr, 0);
+  const int ret = av_hwdevice_ctx_create(&device, cuda ? AV_HWDEVICE_TYPE_CUDA : AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                         nullptr, nullptr, 0);
   if (ret < 0) {
-    if (hwAccel == HwAccel::VideoToolbox) {
-      throw VcError("VideoToolbox unavailable: " + avErrorText(ret));
+    if (plan.required) throw VcError(std::string(name) + " unavailable: " + avErrorText(ret));
+    if (plan.noteOnFallback) {
+      std::fprintf(stderr, "vc: %s decoding unavailable (%s); decoding in software\n", name, avErrorText(ret).c_str());
     }
-    return;  // Auto: software decoding
+    return;
   }
   hwDevice.reset(device);
   decoder->hw_device_ctx = av_buffer_ref(device);
-  decoder->get_format = preferVideoToolbox;
+  decoder->get_format = cuda ? preferCuda : preferVideoToolbox;
 }
 
 void VideoReader::Impl::feedDecoder() {
@@ -195,7 +226,7 @@ const VideoFrame* VideoReader::Impl::publish() {
 
 const AVFrame* VideoReader::Impl::toCpu8Bit() {
   const AVFrame* frame = decoded.get();
-  if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+  if (isHardwareFrame(frame->format)) {
     sawHardwareFrame = true;
     av_frame_unref(downloaded.get());
     checkAv(av_hwframe_transfer_data(downloaded.get(), frame, 0), "download hardware frame");

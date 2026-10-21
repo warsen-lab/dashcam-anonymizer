@@ -61,6 +61,18 @@ TEST(RedactCli, ParsesHardwareAndFakeDetectionOptions) {
   EXPECT_EQ(o.provider, ExecutionProvider::CoreML);
 }
 
+// spec 2026-10-20 §3: --hwaccel cuda parses on every platform (on macOS the reader then decodes in software);
+// the default is auto on Linux and none elsewhere.
+TEST(RedactCli, ParsesCudaDecodingAndThePlatformDefault) {
+  EXPECT_EQ(parseRedactArgs({"--input", "a.mp4", "--out", "o", "--model", "m", "--hwaccel", "cuda"}).hwAccel,
+            HwAccel::Cuda);
+  EXPECT_EQ(parseRedactArgs({"--input", "a.mp4", "--out", "o", "--model", "m"}).hwAccel,
+            defaultRedactHwAccel(buildPlatform()));
+  EXPECT_EQ(defaultRedactHwAccel(Platform::Linux), HwAccel::Auto);
+  EXPECT_EQ(defaultRedactHwAccel(Platform::MacOS), HwAccel::None);
+  EXPECT_EQ(defaultRedactHwAccel(Platform::Other), HwAccel::None);
+}
+
 TEST(RedactCli, ParsesEveryExecutionProvider) {
   const std::vector<std::pair<std::string, ExecutionProvider>> cases = {
       {"auto", ExecutionProvider::Auto},     {"tensorrt", ExecutionProvider::TensorRT},
@@ -111,7 +123,7 @@ TEST(RedactCli, RejectsBadCommandLines) {
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--fake-detections", "f"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--ep", "rocm"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--encoder", "nvenc"},
-      {"--input", "a.mp4", "--out", "o", "--model", "m", "--hwaccel", "cuda"},
+      {"--input", "a.mp4", "--out", "o", "--model", "m", "--hwaccel", "vulkan"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "fast"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "2"},
       {"--input", "a.mp4", "--out", "o", "--model", "m", "--detect-fps", "4.9"},

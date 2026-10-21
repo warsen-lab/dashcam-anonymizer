@@ -196,7 +196,38 @@ TEST(VideoReader, ParsesHwAccelNames) {
   EXPECT_EQ(parseHwAccel("none"), HwAccel::None);
   EXPECT_EQ(parseHwAccel("videotoolbox"), HwAccel::VideoToolbox);
   EXPECT_EQ(parseHwAccel("auto"), HwAccel::Auto);
-  EXPECT_THROW(parseHwAccel("cuda"), std::invalid_argument);
+  EXPECT_EQ(parseHwAccel("cuda"), HwAccel::Cuda);
+  EXPECT_THROW(parseHwAccel("vulkan"), std::invalid_argument);
+  EXPECT_THROW(parseHwAccel("nvdec"), std::invalid_argument);
+}
+
+// spec 2026-10-20 §3: auto is NVDEC on Linux (software with a note when it cannot be opened) and VideoToolbox on
+// macOS (silently software otherwise, as before); an explicit cuda falls back with a note, videotoolbox is required.
+TEST(VideoReader, PlansTheHardwareDecoderPerPlatform) {
+  const auto same = [](const HwDecodePlan& a, const HwDecodePlan& b) {
+    return a.device == b.device && a.required == b.required && a.noteOnFallback == b.noteOnFallback;
+  };
+  for (const Platform p : {Platform::Linux, Platform::MacOS, Platform::Other}) {
+    EXPECT_TRUE(same(hwDecodePlan(HwAccel::None, p), HwDecodePlan{}));
+    EXPECT_TRUE(same(hwDecodePlan(HwAccel::VideoToolbox, p), HwDecodePlan{HwDevice::VideoToolbox, true, false}));
+    EXPECT_TRUE(same(hwDecodePlan(HwAccel::Cuda, p), HwDecodePlan{HwDevice::Cuda, false, true}));
+  }
+  EXPECT_TRUE(same(hwDecodePlan(HwAccel::Auto, Platform::Linux), HwDecodePlan{HwDevice::Cuda, false, true}));
+  EXPECT_TRUE(same(hwDecodePlan(HwAccel::Auto, Platform::MacOS), HwDecodePlan{HwDevice::VideoToolbox, false, false}));
+  EXPECT_TRUE(same(hwDecodePlan(HwAccel::Auto, Platform::Other), HwDecodePlan{}));
+}
+
+// Without an NVIDIA GPU (always on macOS) cuda decodes in software and says so on stderr, once.
+TEST(VideoReader, CudaFallsBackToSoftwareWithANote) {
+  testing::internal::CaptureStderr();
+  VideoReader reader(test::basicVideo().string(), HwAccel::Cuda);
+  int frames = 0;
+  while (reader.next() != nullptr) ++frames;
+  const std::string log = testing::internal::GetCapturedStderr();
+  EXPECT_EQ(frames, 60);
+  if (reader.usingHardware()) GTEST_SKIP() << "NVDEC decoded this video";
+  EXPECT_NE(log.find("vc: CUDA (NVDEC) decoding unavailable ("), std::string::npos) << log;
+  EXPECT_NE(log.find("); decoding in software"), std::string::npos) << log;
 }
 
 }  // namespace

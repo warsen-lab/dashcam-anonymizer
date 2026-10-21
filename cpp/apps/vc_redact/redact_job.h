@@ -14,6 +14,10 @@
 
 namespace vc {
 
+// vc_redact's --hwaccel default (spec 2026-10-20 §3): auto on Linux (CUDA, else software), none elsewhere (on macOS
+// software decoding is faster than VideoToolbox for 1080p H.264).
+HwAccel defaultRedactHwAccel(Platform platform);
+
 struct RedactOptions {
   std::filesystem::path input;
   std::filesystem::path outRoot;  // outputs go to outRoot / <input stem>
@@ -25,7 +29,7 @@ struct RedactOptions {
   RedactConfig config;
   bool detectEveryFrame = false;
   ExecutionProvider provider = ExecutionProvider::Auto;  // providerOrder: CoreML then CPU on macOS
-  HwAccel hwAccel = HwAccel::None;
+  HwAccel hwAccel = defaultRedactHwAccel(buildPlatform());
   bool preferHardwareEncoder = true;
   bool overwrite = false;
 };

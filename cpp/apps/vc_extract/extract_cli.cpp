@@ -119,7 +119,7 @@ Options:
   --motion-threshold <x>  mean abs luma diff in [0,1] that counts as motion (default 0.05)
   --dedup <x>             skip frames whose diff to the last kept frame is below x
   --clip <start>,<dur>    keep every frame in [start, start+dur) seconds, nothing else
-  --hwaccel <mode>        auto | none | videotoolbox (default auto)
+  --hwaccel <mode>        auto | none | videotoolbox | cuda (default auto)
   --jpeg-q <n>            MJPEG qscale 2 (best) .. 31 (default 2)
   --overwrite             replace an existing output directory
   -h, --help              show this help
