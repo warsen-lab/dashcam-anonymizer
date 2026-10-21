@@ -6,8 +6,12 @@
 # code is 1 when any video failed. A video whose stem an earlier one already has would share its output
 # directory: it is refused (exit 3) without running. <output dir>/batch.json lists every video's result
 # and the batch throughput (spec 2026-10-20 §5). Ctrl-C (SIGINT) or SIGTERM stops every running vc_redact,
-# prints one line with the videos that did not finish, still writes batch.json and exits 130 / 143. With a
-# single slot (no parallel run) vc_redact runs in the foreground, so Ctrl-C reaches it directly.
+# prints one line with the videos that did not finish, still writes batch.json and exits 130 / 143. A video
+# that had already finished when the signal came keeps its real exit status. With a single slot (no parallel
+# run) vc_redact still runs in the background of the script, with its output going straight to the terminal,
+# and the script waits for it: bash runs a trap only when a foreground command ends, so this is what lets
+# SIGTERM (`docker stop`, where redact.sh is PID 1) stop the batch at once. A background child ignores
+# Ctrl-C, so the script's own INT trap passes SIGTERM on to it.
 #
 # Environment overrides:
 #   VC_REDACT       vc_redact binary              (default build/cpp-release/vc_redact)
@@ -99,12 +103,16 @@ on_gpu=()    # jobs running per index into gpus
 for ((g = 0; g < n_gpus; g++)); do on_gpu[g]=0; done
 running=0
 recorded=0
-fg_job=""    # the job that runs in the foreground (a single slot), while it runs
+fg_job=""    # the job that runs alone (a single slot), while it runs
+fg_pid=""    # its process
+fg_status="" # its exit status, from when it has ended until it is recorded
+done_job=()  # by job number: 1 once the job is recorded (a signal may come between that and the end of its clean-up)
 next_gpu=0
 
 # One line per video for batch.json: input position, exit status, GPU, path.
 record() {
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$tmp/results.tsv"
+  done_job[$1]=1
   recorded=$((recorded + 1))
 }
 
@@ -136,18 +144,25 @@ collect() {
   if [ "${job_slot[job]}" -ge 0 ]; then on_gpu[job_slot[job]]=$((on_gpu[job_slot[job]] - 1)); fi
 }
 
-# With a single slot vc_redact runs in the foreground, so that Ctrl-C reaches it directly.
+# With a single slot vc_redact runs in the background of the script, not as a foreground command, and the script
+# `wait`s for it: a signal interrupts `wait` and its trap runs at once, whereas bash would hold the trap back until
+# a foreground command ended. The output is not captured, so it reaches the terminal as it is written.
 run_foreground() {
-  local job=$1 video=$2 gpu=$3 status
+  local job=$1 video=$2 gpu=$3 status=0
   build_args "$video"
   echo "=== $(date +%T) ${gpu:+[gpu $gpu] }$video"
-  fg_job=$job
-  if (
+  (
     use_gpu "$gpu"
-    ${runner[@]+"${runner[@]}"} "$BIN" "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
-  ); then status=0; else status=$?; fi
-  fg_job=""
+    exec ${runner[@]+"${runner[@]}"} "$BIN" "${ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
+  ) &
+  fg_pid=$!
+  fg_job=$job
+  wait "$fg_pid" || status=$?
+  fg_status=$status
   collect "$job" "$status"
+  fg_job=""
+  fg_pid=""
+  fg_status=""
 }
 
 # Starts vc_redact on `video` in the background; its output goes to a log that is printed when it ends, so
@@ -185,8 +200,8 @@ finish() {
   local job=$1 status
   status="$(cat "$tmp/$job.status")"
   wait "${pids[job]}" || true
-  unset 'pids[job]'
   collect "$job" "$status"
+  unset 'pids[job]'  # after the record: a signal in between still finds the job in abort_batch
 }
 
 # Waits until a background job ends and collects it. A job whose subshell is gone without a status (it was
@@ -208,8 +223,8 @@ reap_one() {
         wait "${pids[job]}" || status=$?
         if [ "$status" = 0 ]; then status=70; fi
         echo "redact.sh: the job for ${job_video[job]} ended without reporting (exit $status)" >&2
-        unset 'pids[job]'
         collect "$job" "$status"
+        unset 'pids[job]'
         return
       fi
     done
@@ -223,8 +238,12 @@ abort_batch() {
   trap '' INT TERM
   inflight=()
   if [ ${#pids[@]} -gt 0 ]; then inflight=("${!pids[@]}"); fi
-  for job in ${inflight[@]+"${inflight[@]}"}; do kill -TERM "${pids[job]}" 2> /dev/null || true; done
   for job in ${inflight[@]+"${inflight[@]}"}; do
+    if [ -z "${done_job[job]:-}" ]; then kill -TERM "${pids[job]}" 2> /dev/null || true; fi
+  done
+  if [ -n "$fg_pid" ] && [ -z "$fg_status" ]; then kill -TERM "$fg_pid" 2> /dev/null || true; fi
+  for job in ${inflight[@]+"${inflight[@]}"}; do
+    if [ -n "${done_job[job]:-}" ]; then continue; fi
     wait "${pids[job]}" 2> /dev/null || true
     status="$code"
     if [ -f "$tmp/$job.status" ]; then status="$(cat "$tmp/$job.status")"; fi
@@ -232,9 +251,16 @@ abort_batch() {
     if [ "$total_slots" -gt 1 ] && [ -f "$tmp/$job.log" ]; then cat "$tmp/$job.log"; fi
     record "$job" "$status" "${job_gpu[job]}" "${job_video[job]}"
   done
-  if [ -n "$fg_job" ]; then
-    names="${names:+$names, }${job_video[fg_job]}"
-    record "$fg_job" "$code" "${job_gpu[fg_job]}" "${job_video[fg_job]}"
+  if [ -n "$fg_job" ] && [ -z "${done_job[fg_job]:-}" ]; then
+    # Its real status: a video that finished before the signal stays a success; the TERM above ends the others.
+    status="$fg_status"
+    if [ -z "$status" ]; then
+      status=0
+      wait "$fg_pid" 2> /dev/null || status=$?
+      if [ "$status" = 127 ]; then status="$code"; fi  # not a child of ours any more
+    fi
+    if [ "$status" != 0 ]; then names="${names:+$names, }${job_video[fg_job]}"; fi
+    record "$fg_job" "$status" "${job_gpu[fg_job]}" "${job_video[fg_job]}"
   fi
   rest="$(( ${#videos[@]} - recorded )) not started"
   echo "=== interrupted: ${names:+did not finish: $names; }$rest" >&2

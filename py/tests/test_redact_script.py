@@ -121,6 +121,12 @@ def _alive(pid):
     return True
 
 
+def _strays(directory):
+    """Command lines of processes still running that mention `directory` (the fake, its sleep, the script)."""
+    listing = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
+    return [line for line in listing.splitlines() if str(directory) in line]
+
+
 def _wait_for(condition, seconds=15):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -299,6 +305,68 @@ def test_sigterm_stops_every_running_vc_redact_and_exits_143(batch):
     assert proc.returncode == 143, stderr
     assert not any(_alive(pid) for pid in pids)
     assert (out / "batch.json").exists() and "=== interrupted:" in stderr
+
+
+def test_sigterm_with_one_job_stops_vc_redact_at_once_and_exits_143(batch):
+    # redact.sh is PID 1 of the Docker image and `docker stop` sends one bare SIGTERM: bash must not hold its trap
+    # back until the (here 60 s) vc_redact is over
+    proc, out, state = batch(["a.mp4", "b.mp4"], start_only=True, FAKE_SLEEP="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists() and len(_pids(state)) == 1)
+        pids = _pids(state)
+        sent = time.monotonic()
+        proc.send_signal(signal.SIGTERM)  # to the script alone
+        stdout, stderr = proc.communicate(timeout=20)
+        took = time.monotonic() - sent
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 143, stderr
+    assert took < 10, f"the script took {took:.1f} s to stop"
+    assert not any(_alive(pid) for pid in pids)
+    assert _wait_for(lambda: not _strays(state.parent), 5), _strays(state.parent)
+    assert "did not finish: " in stderr and "a.mp4" in stderr and "1 not started" in stderr
+    entries = _batch_json(out)["videos"]
+    assert [(Path(v["video"]).name, v["exit_status"]) for v in entries] == [("a.mp4", 143)]
+    assert not (state / "gpus").read_text().count("b ")  # b.mp4 never started
+
+
+def test_a_video_that_finished_before_the_sigterm_keeps_its_exit_status(batch):
+    proc, out, state = batch(["a.mp4", "b.mp4"], start_only=True, FAKE_SLEEP_a="0", FAKE_SLEEP_b="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists() and len(_pids(state)) == 2)
+        proc.send_signal(signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 143, stderr
+    assert _wait_for(lambda: not _strays(state.parent), 5), _strays(state.parent)
+    statuses = {Path(v["video"]).name: v["exit_status"] for v in _batch_json(out)["videos"]}
+    assert statuses == {"a.mp4": 0, "b.mp4": 143}
+    assert "did not finish: " in stderr and "b.mp4" in stderr and "did not finish: a.mp4" not in stderr
+    assert "0 not started" in stderr
+
+
+def test_a_single_slot_run_that_ends_normally_never_records_143(batch):
+    done, out, _ = batch(["a.mp4", "b.mp4"], FAKE_SLEEP="0.3")
+    assert done.returncode == 0, done.stderr
+    assert [v["exit_status"] for v in _batch_json(out)["videos"]] == [0, 0]
+    assert "interrupted" not in done.stderr
+
+
+def test_a_single_slot_run_streams_the_output_as_it_is_written(batch):
+    proc, out, state = batch(["a.mp4"], start_only=True, FAKE_SLEEP="60")
+    try:
+        assert _wait_for(lambda: (state / "pids").exists())
+        first = proc.stdout.readline()  # "=== <time> <video>" is the script's own line
+        second = proc.stdout.readline()  # the fake's line arrives while it is still running
+        assert "=== " in first and second == "fake vc_redact on a\n"
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
 
 
 def test_ctrl_c_with_one_job_reaches_vc_redact_and_exits_130(batch):
