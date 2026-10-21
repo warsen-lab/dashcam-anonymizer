@@ -1,0 +1,19 @@
+{
+  "crop_factor": 2.5,
+  "min_crop_px": 32,
+  "pad_value": 114,
+  "per_track": 3,
+  "frame_teacher_yes": 0.5,
+  "frame_teacher_iou": 0.3,
+  "upscale": 4,
+  "yes_iou": 0.3,
+  "overlap_iou": 0.1,
+  "plate": {"yes_score": 0.3, "no_score": 0.1, "max_side": 960},
+  "face": {"yes_score": 0.7, "no_score": 0.3, "max_side": 640},
+  "llm": {
+    "name": "codex",
+    "command": [],
+    "timeout_s": 120,
+    "prompt": "这张小图来自行车记录仪画面，红框里的东西是不是一块{cls_zh}？只回答一个 JSON：{\"verdict\": \"yes\" | \"no\" | \"unsure\", \"reason\": \"一句话\"}。看不清就答 unsure。"
+  }
+}
