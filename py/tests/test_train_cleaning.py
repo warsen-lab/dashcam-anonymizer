@@ -54,6 +54,18 @@ def test_tall_low_band_plates_are_dropped_unless_judged_real(tmp_path):
     assert [(b.cls, round(b.x1)) for b in kept] == [("plate", 40), ("plate", 90), ("plate", 120), ("face", 10)]
 
 
+
+def test_plates_judged_not_real_but_narrower_than_the_floor_stay(tmp_path):
+    labels = _setup(tmp_path)  # plate a (judged no) is 20 px wide
+    cleaning = LabelCleaning.load(tmp_path / "c.jsonl", tmp_path / "j.jsonl", tmp_path / "labels", ["s"],
+                                  drop_tall_low_plates=True, keep_no_narrower_than=21)
+    kept, dropped = cleaning.clean("s", 0, labels)
+    assert [round(b.x1) for b in dropped] == [70]  # only the tall plate c: the floor does not apply to the shape rule
+    cleaning = LabelCleaning.load(tmp_path / "c.jsonl", tmp_path / "j.jsonl", tmp_path / "labels", ["s"],
+                                  drop_tall_low_plates=False, keep_no_narrower_than=19.9)
+    assert [round(b.x1) for b in cleaning.clean("s", 0, labels)[1]] == [10]
+
+
 def test_unsure_plates_stay(tmp_path):
     labels = _setup(tmp_path)
     append_judgments(tmp_path / "j.jsonl", [Judgment("a", "unsure", "human")])

@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--label-judgments", type=Path, default=None, help="their judgments.jsonl: plates judged no are left out")
     d.add_argument("--drop-tall-low-plates", action="store_true",
                    help="also leave out the low-band plate labels taller than wide (lamps, body corners)")
+    d.add_argument("--keep-no-plates-narrower-than", type=float, default=0.0, metavar="PX",
+                   help="keep plate labels judged no that are narrower than this (the shape rule still applies)")
     d.add_argument("--grey-dropped-labels", action="store_true",
                    help="cover the label boxes left out in grey, so they are learnt as neither plate nor background")
     d.add_argument("--hard-negatives", type=Path, default=None, help="vc_hardneg candidates.jsonl of student false positives")
@@ -109,8 +111,10 @@ def _dataset(args) -> int:
         raise ValueError("--label-candidates and --label-judgments go together")
     if args.drop_tall_low_plates and args.label_candidates is None:
         raise ValueError("--drop-tall-low-plates needs --label-candidates and --label-judgments")
-    if args.grey_dropped_labels and args.label_candidates is None:
-        raise ValueError("--grey-dropped-labels needs --label-candidates and --label-judgments")
+    for flag, used in (("--grey-dropped-labels", args.grey_dropped_labels),
+                       ("--keep-no-plates-narrower-than", args.keep_no_plates_narrower_than > 0)):
+        if used and args.label_candidates is None:
+            raise ValueError(f"{flag} needs --label-candidates and --label-judgments")
     if (args.hard_negatives is None) != (args.hard_negative_judgments is None):
         raise ValueError("--hard-negatives and --hard-negative-judgments go together")
     cleaning, hard = None, []
@@ -118,7 +122,7 @@ def _dataset(args) -> int:
         from vc_train.cleaning import LabelCleaning
 
         cleaning = LabelCleaning.load(args.label_candidates, args.label_judgments, args.labels_root, args.stem,
-                                      args.drop_tall_low_plates)
+                                      args.drop_tall_low_plates, args.keep_no_plates_narrower_than)
     if args.hard_negatives is not None:
         from vc_train.cleaning import load_hard_negatives
 

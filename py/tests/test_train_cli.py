@@ -548,6 +548,7 @@ def test_dataset_command_cleans_plates_and_adds_hard_negatives(tmp_path, capsys)
         "--out", str(tmp_path / "ds"), "--label-candidates", str(tmp_path / "lc.jsonl"),
         "--label-judgments", str(tmp_path / "lj.jsonl"), "--hard-negatives", str(tmp_path / "hc.jsonl"),
         "--hard-negative-judgments", str(tmp_path / "hj.jsonl"), "--hard-negative-share", "1", "--grey-dropped-labels",
+        "--keep-no-plates-narrower-than", "60",  # the 60 px plate is not narrower: still left out
     ])
     assert code == 0
     printed = capsys.readouterr().out
@@ -566,4 +567,5 @@ def test_dataset_command_wants_both_files_of_a_pair(tmp_path, capsys):
     assert main([*base, "--hard-negatives", str(tmp_path / "x")]) == 2
     assert main([*base, "--drop-tall-low-plates"]) == 2
     assert main([*base, "--grey-dropped-labels"]) == 2
+    assert main([*base, "--keep-no-plates-narrower-than", "48"]) == 2
     assert not (tmp_path / "ds").exists()

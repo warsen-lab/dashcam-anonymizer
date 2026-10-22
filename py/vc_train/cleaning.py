@@ -1,8 +1,9 @@
 """Label cleaning for the student (spec 2026-10-21 §5.1, as decided on 2026-10-21): plate label boxes judged not real are
 left out of the dataset, and with drop_tall_low_plates also the low-band plate boxes taller than wide (lamps and body
 corners: 1.1 % of the teachers' confident plates have that shape, 35 % of the false labels people found). A box judged
-real always stays; face labels are never touched (judging them "no" was wrong 8 times in 27). labels/<stem>/yolo is
-never changed."""
+real always stays, and with keep_no_narrower_than so does a plate judged not real that is narrower (r4d, 2026-10-22:
+the teacher's "no" on plates under ~32 px cost the student the small plates it must mask); face labels are never
+touched (judging them "no" was wrong 8 times in 27). labels/<stem>/yolo is never changed."""
 
 from __future__ import annotations
 
@@ -29,10 +30,11 @@ class LabelCleaning:
     yes: dict[tuple[str, int], list[Box]]  # ... judged real
     low_boxes: dict[tuple[str, int], list[Box]] = field(default_factory=dict)  # low-band teacher plate boxes
     drop_tall_low_plates: bool = False
+    keep_no_narrower_than: float = 0.0  # a plate judged no that is narrower (px) stays: too small to judge reliably
 
     @staticmethod
     def load(candidates: Path, judgments: Path, labels_root: Path, stems: list[str],
-             drop_tall_low_plates: bool) -> LabelCleaning:
+             drop_tall_low_plates: bool, keep_no_narrower_than: float = 0.0) -> LabelCleaning:
         final = resolve(read_judgments(judgments))
         no: dict[tuple[str, int], list[Box]] = defaultdict(list)
         yes: dict[tuple[str, int], list[Box]] = defaultdict(list)
@@ -48,12 +50,12 @@ class LabelCleaning:
                 for d in read_jsonl(labels_root / stem / "merged.jsonl"):
                     if d.box.cls == CLEANED and lo <= d.box.score < hi:
                         low[(stem, d.frame)].append(d.box)
-        return LabelCleaning(dict(no), dict(yes), dict(low), drop_tall_low_plates)
+        return LabelCleaning(dict(no), dict(yes), dict(low), drop_tall_low_plates, keep_no_narrower_than)
 
     def _drops(self, key: tuple[str, int], b: Box) -> bool:
         if b.cls != CLEANED or _matches(b, self.yes.get(key, [])):
             return False
-        if _matches(b, self.no.get(key, [])):
+        if b.width >= self.keep_no_narrower_than and _matches(b, self.no.get(key, [])):
             return True
         return self.drop_tall_low_plates and b.width < b.height and _matches(b, self.low_boxes.get(key, []))
 
