@@ -32,6 +32,17 @@ TEST(Records, DetectionLineCarriesTheConfirmationWhenGiven) {
             std::string::npos);
 }
 
+TEST(Records, DetectionLineCarriesTheVerifierScoreAndRejection) {
+  const Box b{0, 1.0f, 2.0f, 3.0f, 4.0f, 0.4f};
+  EXPECT_EQ(detectionRecord("a.mp4", 6, 100.0, b, kClasses, "yunet", false, VerifyResult{0.12341f, false}),
+            R"({"video":"a.mp4","frame":6,"pts_ms":100.0,"cls":"face","x1":1.0,"y1":2.0,"x2":3.0,"y2":4.0,)"
+            R"("score":0.4,"src":"yunet","verify":0.1234,"verified":false,"confirmed":false})"
+            "\n");
+  const std::string passed = detectionRecord("a.mp4", 6, 100.0, b, kClasses, "yunet", true, VerifyResult{0.9f, true});
+  EXPECT_NE(passed.find(R"("verify":0.9,"confirmed":true})"), std::string::npos) << passed;
+  EXPECT_EQ(passed.find("verified"), std::string::npos);
+}
+
 TEST(Records, MaskLineListsBoxesWithTheirTrackAndOrigin) {
   const std::vector<MaskBox> boxes{MaskBox{1, 1.0f, 2.0f, 3.5f, 4.0f, MaskOrigin::Interpolated, 7, 24}};
   EXPECT_EQ(maskRecord("a.mp4", 3, boxes, kClasses),

@@ -29,6 +29,10 @@ add_executable(vc_tests
   redact_config_test.cpp
   redact_job_test.cpp
   video_reader_test.cpp
+  verifier_crop_test.cpp
+  verifier_test.cpp
+  verify_dump_test.cpp
+  verify_policy_test.cpp
   video_writer_test.cpp
   yolo_decode_test.cpp
   yunet_decode_test.cpp

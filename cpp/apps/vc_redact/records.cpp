@@ -40,7 +40,7 @@ const std::string& className(const std::vector<std::string>& classes, int cls) {
 
 std::string detectionRecord(const std::string& video, int64_t frame, double ptsMs, const Box& box,
                             const std::vector<std::string>& classes, const std::string& src,
-                            std::optional<bool> confirmed) {
+                            std::optional<bool> confirmed, std::optional<VerifyResult> verify) {
   nlohmann::ordered_json j;
   j["video"] = video;
   j["frame"] = frame;
@@ -52,6 +52,10 @@ std::string detectionRecord(const std::string& video, int64_t frame, double ptsM
   j["y2"] = round1(box.y2, "y2");
   j["score"] = round4(box.score, "score");
   j["src"] = src;
+  if (verify) {
+    j["verify"] = round4(verify->score, "verify");
+    if (!verify->passed) j["verified"] = false;
+  }
   if (confirmed) j["confirmed"] = *confirmed;
   return jsonLine(j);
 }

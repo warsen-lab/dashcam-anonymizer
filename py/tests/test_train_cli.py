@@ -519,3 +519,53 @@ def test_consistency_report_fails_on_a_corner_difference_of_the_tolerance_or_mor
     assert not _report(max_diff_px=1.0).passed()
     assert _report(max_diff_px=0.99).passed()
     assert _report(max_diff_px=1.5).passed(tol_px=2.0)
+
+
+def test_dataset_command_cleans_plates_and_adds_hard_negatives(tmp_path, capsys):
+    import json
+
+    from vc_hardneg.candidates import Candidate, write_candidates
+    from vc_hardneg.judgments import Judgment, append_judgments
+
+    _segment(tmp_path, "a")
+    lab = tmp_path / "labels" / "a"
+    plate = Box("plate", 900, 500, 960, 520)  # a low-band teacher plate on frame 0, judged not real
+    lines = to_yolo_lines([Box("face", 10, 10, 30, 40), plate], 1920, 1080)
+    (lab / "yolo" / "000000.txt").write_text("".join(f"{line}\n" for line in lines))
+    (lab / "merged.jsonl").write_text(json.dumps({"video": "a.mp4", "frame": 0, "pts_ms": 0, "cls": "plate", "x1": 900,
+                                                  "y1": 500, "x2": 960, "y2": 520, "score": 0.15, "src": "t"}) + "\n")
+
+    def cand(cid, box):
+        return Candidate(id=cid, video="a.mp4", stem="a", frame=0, cls="plate", box=box, score=0.15, src="t", track=-1,
+                         dump_dir="", dump_index=-1, frame_teacher=0.0, image="", crop_origin=(0, 0))
+
+    write_candidates(tmp_path / "lc.jsonl", [cand("p", (900, 500, 960, 520))])
+    append_judgments(tmp_path / "lj.jsonl", [Judgment("p", "no", "llm:codex")])
+    write_candidates(tmp_path / "hc.jsonl", [cand("h", (1500, 700, 1520, 710))])
+    append_judgments(tmp_path / "hj.jsonl", [Judgment("h", "no", "llm:codex")])
+    code = main([
+        "dataset", "--stem", "a", "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
+        "--out", str(tmp_path / "ds"), "--label-candidates", str(tmp_path / "lc.jsonl"),
+        "--label-judgments", str(tmp_path / "lj.jsonl"), "--hard-negatives", str(tmp_path / "hc.jsonl"),
+        "--hard-negative-judgments", str(tmp_path / "hj.jsonl"), "--hard-negative-share", "1", "--grey-dropped-labels",
+        "--keep-no-plates-narrower-than", "60",  # the 60 px plate is not narrower: still left out
+    ])
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "label boxes left out by the cleaning: 1 (covered in grey)" in printed
+    assert "hard-negative samples: 1 (of 1" in printed
+    full = cv2.imread(str(tmp_path / "ds" / "images" / "train" / "a_000000_full.jpg"))
+    assert abs(int(full[510, 930].mean()) - 114) <= 2
+    assert len((tmp_path / "ds" / "labels" / "train" / "a_000000_full.txt").read_text().splitlines()) == 1
+
+
+def test_dataset_command_wants_both_files_of_a_pair(tmp_path, capsys):
+    _segment(tmp_path, "a")
+    base = ["dataset", "--stem", "a", "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
+            "--out", str(tmp_path / "ds")]
+    assert main([*base, "--label-candidates", str(tmp_path / "x")]) == 2
+    assert main([*base, "--hard-negatives", str(tmp_path / "x")]) == 2
+    assert main([*base, "--drop-tall-low-plates"]) == 2
+    assert main([*base, "--grey-dropped-labels"]) == 2
+    assert main([*base, "--keep-no-plates-narrower-than", "48"]) == 2
+    assert not (tmp_path / "ds").exists()

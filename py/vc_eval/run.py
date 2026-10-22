@@ -50,6 +50,8 @@ class RunConfig:
     seed: int = 0
     overwrite: bool = False  # clear a non-empty `out` first instead of refusing it
     face_model: Path | None = None  # vc_train yunet model dir, passed to every vc_redact run as --face-model
+    # vc_train verifier model dir, passed to the sparse vc_redact runs only: the dense reference must see every box
+    verifier_model: Path | None = None
     recall_targets: dict[str, float] | None = None  # P1's bar per class; None: CLASS_PASS for every class
 
 
@@ -72,6 +74,8 @@ def _validate_out(cfg: RunConfig) -> None:
     reads = [cfg.frames_root, cfg.labels_root, cfg.videos, cfg.model, cfg.vc_redact, cfg.vc_detect, cfg.config, cfg.redacted_root]
     if cfg.face_model is not None:
         reads.append(cfg.face_model)
+    if cfg.verifier_model is not None:
+        reads.append(cfg.verifier_model)
     for path in reads:
         if _same_or_below(path, cfg.out):
             raise ValueError(f"{cfg.out} overlaps {path}; --out must be a directory of its own (--overwrite clears it)")
@@ -120,6 +124,20 @@ def _validate_face_model(directory: Path) -> None:
         raise ValueError(f'{meta_file}: classes must be ["face"], got {meta.get("classes")!r}')
 
 
+def _validate_verifier_model(directory: Path) -> None:
+    """A vc_train verifier directory: both files there and a model.json of kind "verifier" (vc_redact checks the rest)."""
+    onnx, meta_file = directory / "model.onnx", directory / "model.json"
+    missing = [f.name for f in (onnx, meta_file) if not f.is_file()]
+    if missing:
+        raise ValueError(f"{directory} has no {' / '.join(missing)}; write the verifier with python -m vc_train verifier")
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise ValueError(f"{meta_file} is not valid JSON ({e}); write the verifier with python -m vc_train verifier") from e
+    if not isinstance(meta, dict) or meta.get("kind") != "verifier":
+        raise ValueError(f'{meta_file}: kind must be "verifier"; write the verifier with python -m vc_train verifier')
+
+
 def _validate(cfg: RunConfig) -> None:
     """Refuses a bad configuration before the first vc_redact run, which takes minutes."""
     if not cfg.stems:
@@ -141,6 +159,8 @@ def _validate(cfg: RunConfig) -> None:
     _validate_out(cfg)
     if cfg.face_model is not None:
         _validate_face_model(cfg.face_model)
+    if cfg.verifier_model is not None:
+        _validate_verifier_model(cfg.verifier_model)
     for stem in cfg.stems:
         for needed in (cfg.videos / f"{stem}.mp4", cfg.frames_root / stem / "frames.csv"):
             if not needed.is_file():
@@ -164,9 +184,12 @@ def _fps_dir(cfg: RunConfig, fps: float) -> Path:
 
 def _redact(cfg: RunConfig, stem: str, out: Path, extra: list[str], runner) -> None:
     face = ["--face-model", str(cfg.face_model)] if cfg.face_model is not None else []
+    # the dense run is the temporal check's reference: it must see every box, verified or not
+    verifier = (["--verifier-model", str(cfg.verifier_model)]
+                if cfg.verifier_model is not None and "--detect-every-frame" not in extra else [])
     command = [
         str(cfg.vc_redact), "--input", str(cfg.videos / f"{stem}.mp4"), "--out", str(out), "--model", str(cfg.model),
-        *face, "--config", str(cfg.config), *extra, "--overwrite",
+        *face, *verifier, "--config", str(cfg.config), *extra, "--overwrite",
     ]
     try:
         runner(command, check=True, capture_output=True, text=True)
@@ -226,6 +249,7 @@ def _evaluate(cfg: RunConfig, stem: str, fps: float) -> tuple[dict, CoverageRepo
         "fps": fps,
         "coverage": coverage_json(coverage),
         "temporal": {cls: rate_json(temporal.classes[cls]) for cls in LABEL_CLASSES},
+        "temporal_bins": {k: rate_json(v) for k, v in sorted(temporal.bins.items())},
         "integrity": {
             "checks": integrity.checks, "details": integrity.details, "passed": integrity.passed,
             "redacted_frames": integrity.redacted_frames,
@@ -439,6 +463,7 @@ def _sweep_and_report(cfg: RunConfig, runner, consistency: dict) -> dict:
     summary = {
         "model": str(cfg.model),
         "face_model": None if cfg.face_model is None else str(cfg.face_model),
+        "verifier_model": None if cfg.verifier_model is None else str(cfg.verifier_model),
         "chosen_fps": chosen,
         "segments": segments,
         "reference": _reference_tiers(pooled[0]["coverage"]),

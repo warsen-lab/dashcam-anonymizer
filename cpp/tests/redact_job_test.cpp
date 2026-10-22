@@ -170,6 +170,76 @@ TEST(RedactJob, MasksEveryFrameAndKeepsTheAudio) {
 
 // A plate's mosaic stays inside its mask (spec 2026-10-19 §4, plates): the same box as above as a plate, mask
 // (85, 88)-(215, 192) in 24 px cells, leaves the rows [72, 88) that the face's mosaic snaps out to as they were.
+fs::path constVerifierDir() { return fs::path(VC_TEST_DATA_DIR) / "const_verifier"; }
+
+// The fake face (src "fake": one detector) is checked; the const verifier gives faces 0.119 < 0.5: nothing is
+// masked, every detection line says why, and the stats count it.
+TEST(RedactJob, TheVerifierRejectsAFaceItDoesNotPass) {
+  RedactOptions o = baseOptions("redact_verifier_face");
+  o.verifierModelDir = constVerifierDir();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.verifier, "const_verifier");
+  EXPECT_EQ(s.verifyChecked, s.keyframes);
+  EXPECT_EQ(s.verifyRejectedFaces, s.keyframes);
+  EXPECT_EQ(s.verifyRejectedPlates, 0);
+  EXPECT_EQ(s.detections, 0);
+  EXPECT_EQ(s.maskedFrames, 0);
+  std::ifstream det(o.outRoot / kStem / "detections.jsonl");
+  size_t lines = 0;
+  for (std::string line; std::getline(det, line); ++lines) {
+    const auto j = nlohmann::json::parse(line);
+    EXPECT_FALSE(j.at("verified").get<bool>()) << line;
+    EXPECT_FALSE(j.at("confirmed").get<bool>()) << line;
+    EXPECT_NEAR(j.at("verify").get<double>(), 0.1192, 1e-4) << line;
+  }
+  EXPECT_EQ(lines, static_cast<size_t>(s.keyframes));
+  std::ifstream statsFile(o.outRoot / kStem / "stats.json");
+  const auto stats = nlohmann::json::parse(statsFile);
+  EXPECT_EQ(stats.at("verifier"), "const_verifier");
+  EXPECT_EQ(stats.at("verify").at("rejected").at("face").get<int64_t>(), s.keyframes);
+  EXPECT_EQ(stats.at("stages").at("verify").at("items").get<int64_t>(), s.keyframes);
+}
+
+// A plate scoring 0.9 is above verify_plate_below: never checked, masked as before.
+TEST(RedactJob, ConfidentPlatesSkipTheVerifier) {
+  RedactOptions o = baseOptions("redact_verifier_plate");
+  o.fakeDetections = fakeFile("redact_verifier_plate.jsonl", 60, "plate");
+  o.verifierModelDir = constVerifierDir();
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.verifyChecked, 0);
+  EXPECT_EQ(s.maskedFrames, 60);
+}
+
+// The dump holds the crop of every checked box on the dumped keyframes, with or without a verifier model: every
+// keyframe with --dump-verify-every 1, only frame 0 of this 60-frame video with 1000.
+TEST(RedactJob, DumpsTheCropsOfEveryNthFrame) {
+  RedactOptions all = baseOptions("redact_verifier_dump_all");
+  all.dumpVerifyCrops = true;
+  const RedactStats a = runRedact(all);
+  EXPECT_EQ(a.verifyDumped, a.keyframes);  // one fake face per keyframe
+  EXPECT_EQ(a.maskedFrames, 60);           // no model: masking is unchanged
+  const fs::path dirA = all.outRoot / kStem;
+  EXPECT_EQ(lineCount(dirA / "verify_crops.jsonl"), static_cast<size_t>(a.verifyDumped));
+  EXPECT_EQ(fs::file_size(dirA / "verify_crops.bin"), static_cast<uintmax_t>(a.verifyDumped) * 64 * 64 * 3);
+
+  RedactOptions sparse = baseOptions("redact_verifier_dump_sparse");
+  sparse.dumpVerifyCrops = true;
+  sparse.dumpVerifyEvery = 1000;
+  const RedactStats s = runRedact(sparse);
+  EXPECT_EQ(s.verifyDumped, 1);
+  std::ifstream jsonl(sparse.outRoot / kStem / "verify_crops.jsonl");
+  std::string line;
+  ASSERT_TRUE(std::getline(jsonl, line));
+  EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int64_t>(), 0);
+}
+
+TEST(RedactJob, ABrokenVerifierModelStopsTheRunBeforeAnyOutput) {
+  RedactOptions o = baseOptions("redact_verifier_broken");
+  o.verifierModelDir = test::tmpDir() / "no_such_verifier";
+  EXPECT_THROW(runRedact(o), VcError);
+  EXPECT_FALSE(fs::exists(o.outRoot / kStem));
+}
+
 TEST(RedactJob, PixelatesAPlateOnlyInsideItsMask) {
   RedactOptions o = baseOptions("redact_plate_clipped");
   o.fakeDetections = fakeFile("redact_plate_clipped.jsonl", 60, "plate");
@@ -435,6 +505,35 @@ TEST(RedactJob, TheLargeFaceRuleCanBeSwitchedOff) {
   EXPECT_EQ(wide.maskedFrames, 6);
 }
 
+// With plate_min_width_px 24, a plate 23.5 px wide is dropped before the timeline like a giant face (not masked, not in
+// detections.jsonl, counted); one exactly 24 px wide and a face 10 px wide stay.
+TEST(RedactJob, DropsPlatesNarrowerThanTheMinimumWidth) {
+  const RedactStats s = runWithBoxesOnOneKeyframe(
+      "redact_narrow_plate",
+      {{"plate", 100, 100, 123.5, 108, 0.9}, {"plate", 300, 100, 324, 108, 0.9}, {"face", 500, 100, 510, 112, 0.9}},
+      [](RedactConfig& c) { c.plateMinWidthPx = 24.0; });
+  EXPECT_EQ(s.narrowPlatesDropped, 1);
+  EXPECT_EQ(s.detections, 2);
+  const std::vector<nlohmann::json> lines = detectionLines(s);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0].at("x1").get<int>(), 300);
+  EXPECT_EQ(lines[1].at("cls").get<std::string>(), "face");
+  EXPECT_EQ(s.maskBoxes, 12);
+  const nlohmann::json stats = statsJson(s);
+  EXPECT_EQ(stats.at("narrow_plates_dropped").get<int>(), 1);
+  EXPECT_DOUBLE_EQ(stats.at("config").at("plate_min_width_px").get<double>(), 24.0);
+}
+
+// plate_min_width_px 0 masks plates of any width.
+TEST(RedactJob, ZeroPlateMinimumWidthKeepsNarrowPlates) {
+  const RedactStats s = runWithBoxesOnOneKeyframe("redact_narrow_plate_off", {{"plate", 100, 100, 110, 108, 0.9}},
+                                                  [](RedactConfig& c) { c.plateMinWidthPx = 0.0; });
+  EXPECT_EQ(s.narrowPlatesDropped, 0);
+  EXPECT_EQ(s.detections, 1);
+  EXPECT_EQ(s.maskedFrames, 6);
+  EXPECT_EQ(statsJson(s).at("narrow_plates_dropped").get<int>(), 0);
+}
+
 TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
   RedactStats s;
   s.frames = 600;
@@ -443,9 +542,10 @@ TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
   s.largeFacesDropped = 3;
   s.maskedFrames = 400;
   s.maskBoxes = 520;
+  s.narrowPlatesDropped = 7;
   const std::string summary = redactSummary(s);
   EXPECT_NE(summary.find("frames:        600 (keyframes 100, detections 250, large faces dropped 3, "
-                         "masked 400 frames / 520 boxes)\n"),
+                         "narrow plates dropped 7, masked 400 frames / 520 boxes)\n"),
             std::string::npos)
       << summary;
   s.largeFacesDropped = 0;

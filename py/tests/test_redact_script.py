@@ -18,6 +18,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "redact.sh"
 # "orphan", fails for stems starting with "bad" and otherwise writes a stats.json with 120 frames in 2 s.
 FAKE = r"""#!/usr/bin/env bash
 set -euo pipefail
+echo "$*" >> "$FAKE_STATE/args"
 while [ $# -gt 0 ]; do
   case "$1" in
     --input) input="$2"; shift 2 ;;
@@ -80,7 +81,8 @@ def batch(tmp_path):
             videos.append(str(path))
         env = {k: v for k, v in os.environ.items() if k not in ("CUDA_VISIBLE_DEVICES", "VC_GPUS", "VC_JOBS")}
         env.update(VC_REDACT=str(fake), VC_MODEL=str(model), VC_FACE_MODEL="", VC_SANDBOX="0",
-                   VC_PYTHON=sys.executable, FAKE_STATE=str(state), **env_extra)
+                   VC_PYTHON=sys.executable, FAKE_STATE=str(state))
+        env.update({"VC_VERIFIER": "", **env_extra})
         command = [str(SCRIPT), str(out), *videos]
         if start_only:  # in a session of its own, so that a test can signal the script's whole process group
             proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -160,6 +162,27 @@ def test_runs_every_video_in_turn_and_writes_batch_json(batch):
     assert (b["succeeded"], b["failed"], b["frames"]) == (3, 0, 360)
     assert b["wall_s"] > 0 and b["throughput_fps"] == pytest.approx(360 / b["wall_s"])
     assert "done: 3 of 3 redacted" in done.stdout and "=== throughput:" in done.stdout
+
+
+def test_vc_verifier_passes_the_verifier_model_and_empty_leaves_it_out(batch, tmp_path):
+    verifier = tmp_path / "verifier"
+    verifier.mkdir()
+    (verifier / "model.onnx").write_text("x")
+    (verifier / "model.json").write_text("{}")
+    done, _, state = batch(["a.mp4"], VC_VERIFIER=str(verifier))
+    assert done.returncode == 0, done.stderr
+    assert f"--verifier-model {verifier}" in (state / "args").read_text()
+    (state / "args").unlink()
+    done, _, state = batch(["b.mp4"])
+    assert done.returncode == 0, done.stderr
+    assert "--verifier-model" not in (state / "args").read_text()
+
+
+def test_a_missing_verifier_model_is_refused_before_running(batch, tmp_path):
+    done, _, state = batch(["a.mp4"], VC_VERIFIER=str(tmp_path / "no_such_verifier"))
+    assert done.returncode == 2
+    assert "model.onnx" in done.stderr
+    assert not (state / "args").exists()
 
 
 def test_a_failed_video_is_reported_and_the_rest_still_run(batch):

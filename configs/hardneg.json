@@ -1,0 +1,28 @@
+{
+  "crop_factor": 2.5,
+  "min_crop_px": 32,
+  "pad_value": 114,
+  "per_track": 3,
+  "frame_teacher_yes": 0.5,
+  "frame_teacher_iou": 0.3,
+  "upscale": 4,
+  "yes_iou": 0.3,
+  "overlap_iou": 0.1,
+  "contain_frac": 0.5,
+  "tiny_px": 16,
+  "plate": {"yes_score": 0.3, "no_score": 0.1, "max_side": 960},
+  "face": {"yes_score": 0.7, "no_score": 0.3, "max_side": 640},
+  "llm": {
+    "name": "codex",
+    "command": ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-c",
+                "model_reasoning_effort=\"low\"", "--image={image}", "{prompt}"],
+    "timeout_s": 180,
+    "ask_on": ["no", "unsure"],
+    "parallel": 4,
+    "image_side": 384,
+    "batch": 4,
+    "tile": 384,
+    "batch_prompt": "这张图由 {count} 张小图拼成，每张小图来自行车记录仪画面，左上角有黄色编号 1 到 {count}。对每张小图，判断红框里的东西是不是一块{cls_zh}。只回答一个 JSON 数组，每张一项：[{\"n\": 编号, \"verdict\": \"yes\" | \"no\" | \"unsure\"}]。看不清就答 unsure。",
+    "prompt": "这张小图来自行车记录仪画面，红框里的东西是不是一块{cls_zh}？只回答一个 JSON：{\"verdict\": \"yes\" | \"no\" | \"unsure\", \"reason\": \"一句话\"}。看不清就答 unsure。"
+  }
+}

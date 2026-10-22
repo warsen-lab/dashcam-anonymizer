@@ -44,6 +44,7 @@ add_library(vc_core STATIC
   src/common/vc_error.cpp
   src/detect/box.cpp
   src/detect/letterbox.cpp
+  src/detect/verifier_crop.cpp
   src/io/frame_file_name.cpp
   src/io/jpeg_writer.cpp
   src/io/video_reader.cpp
@@ -67,6 +68,7 @@ add_library(vc_detect_lib STATIC
   src/detect/yolo_decode.cpp
   src/detect/yunet_decode.cpp
   src/detect/yunet_detector.cpp
+  src/detect/verifier.cpp
 )
 # Only the .cpp files of this library include nlohmann/json; its headers do not.
 target_link_libraries(vc_detect_lib PUBLIC vc_core vc_onnxruntime Threads::Threads PRIVATE vc_nlohmann_json)
@@ -86,6 +88,8 @@ add_library(vc_redact_lib STATIC
   apps/vc_redact/redact_cli.cpp
   apps/vc_redact/redact_config.cpp
   apps/vc_redact/redact_job.cpp
+  apps/vc_redact/verify_dump.cpp
+  apps/vc_redact/verify_policy.cpp
 )
 target_include_directories(vc_redact_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/apps")
 # redact_config.h includes nlohmann/json, so it is part of this library's interface.
