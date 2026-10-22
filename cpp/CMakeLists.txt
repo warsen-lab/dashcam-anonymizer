@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(video_compliance LANGUAGES CXX)
+project(dashcam_anonymizer LANGUAGES CXX)
 
 # Single-config generators (Makefiles, Ninja) default to an unoptimised build otherwise.
 get_property(_vc_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
