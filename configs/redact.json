@@ -17,7 +17,7 @@
   "plate_confirm_score": 0.2,
   "large_face_area_fraction": 0.05,
   "large_face_min_score": 0.6,
-  "plate_min_width_px": 0,
+  "plate_min_width_px": 16,
   "verify_plate_below": 0.5,
   "verify_face_unless_both_above": 0.5,
   "verify_threshold_face": null,

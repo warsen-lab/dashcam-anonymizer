@@ -43,8 +43,10 @@ struct RedactConfig {
   float largeFaceMinScore = 0.6f;
   // A plate box narrower than plateMinWidthPx (its own width, before any margin) is dropped before it reaches the
   // timeline (2026-10-22): at under ~24 px a plate's characters are ~3 px and cannot be read, and such boxes made 78 %
-  // of r3's unexplained plate masks. 0, the default, keeps plates of any width; faces are never affected.
-  double plateMinWidthPx = 0.0;
+  // of r3's unexplained plate masks. 16 keeps r3's plate recall on the held-out segments (98.2 % vs 98.4 %) with 58 %
+  // fewer unexplained plate masks; 20 and 24 cut more but miss plates the student draws narrower than the teacher
+  // (cpp/README.md). 0 keeps plates of any width; faces are never affected.
+  double plateMinWidthPx = 16.0;
   // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
   // detector found or that score below verifyFaceUnlessBothAbove go through the verifier model when one is given
   // (vc_redact --verifier-model). The pass thresholds are the model's (model.json pass_threshold) unless set here.

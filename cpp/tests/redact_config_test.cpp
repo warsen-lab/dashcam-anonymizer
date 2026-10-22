@@ -126,7 +126,7 @@ TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.2f);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, 0.05);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, 0.6f);
-  EXPECT_DOUBLE_EQ(c.plateMinWidthPx, 0.0);
+  EXPECT_DOUBLE_EQ(c.plateMinWidthPx, 16.0);
   EXPECT_FALSE(c.timeline.holdLostGhosts);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
@@ -216,7 +216,7 @@ TEST(RedactConfig, ReadsTheLargeFaceRule) {
   EXPECT_FLOAT_EQ(parseRedactConfig(R"({"large_face_min_score": 1})", "t").largeFaceMinScore, 1.0f);
 }
 
-// Plates narrower than plate_min_width_px are not masked (2026-10-22: too small to read); 0, the default, is off.
+// Plates narrower than plate_min_width_px are not masked (2026-10-22: too small to read); 0 is off.
 TEST(RedactConfig, ReadsThePlateMinimumWidth) {
   EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"plate_min_width_px": 24})", "t").plateMinWidthPx, 24.0);
   EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"plate_min_width_px": 0})", "t").plateMinWidthPx, 0.0);

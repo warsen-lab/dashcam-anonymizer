@@ -524,9 +524,10 @@ TEST(RedactJob, DropsPlatesNarrowerThanTheMinimumWidth) {
   EXPECT_DOUBLE_EQ(stats.at("config").at("plate_min_width_px").get<double>(), 24.0);
 }
 
-// The default 0 masks plates of any width.
-TEST(RedactJob, KeepsNarrowPlatesByDefault) {
-  const RedactStats s = runWithBoxesOnOneKeyframe("redact_narrow_plate_off", {{"plate", 100, 100, 110, 108, 0.9}});
+// plate_min_width_px 0 masks plates of any width.
+TEST(RedactJob, ZeroPlateMinimumWidthKeepsNarrowPlates) {
+  const RedactStats s = runWithBoxesOnOneKeyframe("redact_narrow_plate_off", {{"plate", 100, 100, 110, 108, 0.9}},
+                                                  [](RedactConfig& c) { c.plateMinWidthPx = 0.0; });
   EXPECT_EQ(s.narrowPlatesDropped, 0);
   EXPECT_EQ(s.detections, 1);
   EXPECT_EQ(s.maskedFrames, 6);
