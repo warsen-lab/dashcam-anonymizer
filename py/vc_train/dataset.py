@@ -1,5 +1,6 @@
 """YOLO dataset from teacher labels: native-scale crops plus one full frame per labelled frame (spec §4.2); optionally
-with the labels cleaned and extra crops around judged student false positives (spec 2026-10-21 §5)."""
+with the labels cleaned (the dropped boxes optionally covered in grey) and extra crops around judged student false
+positives (spec 2026-10-21 §5)."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ Window = tuple[int, int, int, int]  # x0, y0, w, h in frame pixels
 MANIFEST = "manifest.csv"
 DATA_YAML = "data.yaml"
 _MANIFEST_FIELDS = ["sample", "split", "video", "frame", "x0", "y0", "w", "h", "scale", "boxes"]
+GREY = 114  # the letterbox padding colour: a covered box teaches the student neither "plate" nor "background"
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class _Frame:
     height: int
     boxes: list[Box]
     split: str
+    greyed: tuple[Box, ...] = ()  # dropped label boxes to cover in every sample of the frame
 
 
 def _round_half_up(x: float) -> int:
@@ -89,6 +92,30 @@ def crop_boxes(boxes: list[Box], window: Window, min_visible: float = 0.3) -> li
     return out
 
 
+def grey_out(image, boxes: list[Box], keep: list[Box]):
+    """A copy of image with the boxes (rounded outward) filled with GREY, except where a box in keep lies."""
+    out = image.copy()
+    height, width = image.shape[:2]
+
+    def pixels(b: Box) -> tuple[slice, slice]:
+        x1, y1 = max(0, math.floor(b.x1)), max(0, math.floor(b.y1))
+        x2, y2 = min(width, math.ceil(b.x2)), min(height, math.ceil(b.y2))
+        return slice(y1, y2), slice(x1, x2)
+
+    for b in boxes:
+        out[pixels(b)] = GREY
+    for b in keep:
+        out[pixels(b)] = image[pixels(b)]
+    return out
+
+
+def _read_frame_image(frame: _Frame):
+    image = cv2.imread(str(frame.ref.image))
+    if image is None:
+        raise ValueError(f"cannot read {frame.ref.image}")
+    return grey_out(image, list(frame.greyed), frame.boxes) if frame.greyed else image
+
+
 def _scaled(box: Box, s: float) -> Box:
     return replace(box, x1=box.x1 * s, y1=box.y1 * s, x2=box.x2 * s, y2=box.y2 * s)
 
@@ -121,7 +148,9 @@ def _check_out_dir(out_dir: Path) -> None:
         raise ValueError(f"dataset dir {out_dir} is not empty; choose a new --out")
 
 
-def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float, cleaning=None) -> tuple[list[_Frame], int]:
+def _plan(
+    segments: list[tuple[Path, Path]], val_tail_ms: float, cleaning=None, grey_dropped: bool = False
+) -> tuple[list[_Frame], int]:
     """Phase 1: reads and checks every segment, writes nothing.
 
     A segment that is missing its labels, or whose frames all fall into the validation tail, is an error: skipping
@@ -155,11 +184,13 @@ def _plan(segments: list[tuple[Path, Path]], val_tail_ms: float, cleaning=None) 
                 raise ValueError(f"{label_file} is missing; run vc_label fuse for {labels_dir} first")
             width, height = image_size(ref.image)
             boxes = from_yolo_lines(label_file.read_text().splitlines(), width, height)
+            left_out: list[Box] = []
             if cleaning is not None:
-                boxes, n = cleaning.clean(stem, ref.frame, boxes)
-                dropped += n
+                boxes, left_out = cleaning.clean(stem, ref.frame, boxes)
+                dropped += len(left_out)
             split = "val" if ref.pts_ms >= val_from else "train"
-            segment_frames.append(_Frame(index, stem, ref, width, height, boxes, split))
+            greyed = tuple(left_out) if grey_dropped else ()
+            segment_frames.append(_Frame(index, stem, ref, width, height, boxes, split, greyed))
         if all(f.split == "val" for f in segment_frames):
             span = max(r.pts_ms for r in used) - min(r.pts_ms for r in used)
             raise ValueError(
@@ -188,9 +219,7 @@ def _manifest_row(
 
 
 def _write_frame(out_dir: Path, frame: _Frame, in_width: int, in_height: int, crop: int) -> list[dict]:
-    image = cv2.imread(str(frame.ref.image))
-    if image is None:
-        raise ValueError(f"cannot read {frame.ref.image}")
+    image = _read_frame_image(frame)
     s = letterbox_scale(frame.width, frame.height, in_width, in_height)
     rows = []
     for i, (x0, y0, w, h) in enumerate(crop_windows(frame.width, frame.height, s, crop)):
@@ -203,9 +232,12 @@ def _write_frame(out_dir: Path, frame: _Frame, in_width: int, in_height: int, cr
         _write_sample(out_dir, frame.split, name, part, part_boxes)
         rows.append(_manifest_row(name, frame, x0, y0, w, h, s, len(part_boxes)))
     full = f"{frame.stem}_{frame.ref.frame:06d}_full"
-    _link_full_frame(frame.ref.image, out_dir / "images" / frame.split / f"{full}.jpg")
-    lines = to_yolo_lines(frame.boxes, frame.width, frame.height)
-    (out_dir / "labels" / frame.split / f"{full}.txt").write_text("".join(f"{line}\n" for line in lines))
+    if frame.greyed:
+        _write_sample(out_dir, frame.split, full, image, frame.boxes)
+    else:
+        _link_full_frame(frame.ref.image, out_dir / "images" / frame.split / f"{full}.jpg")
+        lines = to_yolo_lines(frame.boxes, frame.width, frame.height)
+        (out_dir / "labels" / frame.split / f"{full}.txt").write_text("".join(f"{line}\n" for line in lines))
     rows.append(_manifest_row(full, frame, 0, 0, frame.width, frame.height, 1.0, len(frame.boxes)))
     return rows
 
@@ -221,9 +253,7 @@ def _write_hard_negatives(out_dir: Path, frames: list[_Frame], hard_negatives, c
     for hn in taken:
         frame = by_frame[(hn.stem, hn.frame)]
         if image_of != frame.ref.image:
-            image, image_of = cv2.imread(str(frame.ref.image)), frame.ref.image
-            if image is None:
-                raise ValueError(f"cannot read {frame.ref.image}")
+            image, image_of = _read_frame_image(frame), frame.ref.image
         x0, y0, w, h = hard_negative_window(hn.box, frame.width, frame.height)
         k = per_frame.get((hn.stem, hn.frame), 0)
         per_frame[(hn.stem, hn.frame)] = k + 1
@@ -293,6 +323,7 @@ def build_dataset(
     cleaning=None,
     hard_negatives=(),
     hard_negative_share: float = 0.10,
+    grey_dropped: bool = False,
 ) -> DatasetSummary:
     """segments: (frames_dir, labels_dir) pairs; only frames in processed.txt are used.
 
@@ -300,14 +331,18 @@ def build_dataset(
     yet) or without any frame older than the validation tail raises ValueError instead of being skipped. If writing fails, the output dir is removed
     (or emptied, when it existed empty), so the same --out can be used again after the fix.
 
-    `cleaning` (vc_train.cleaning.LabelCleaning) leaves label boxes out of every sample of their frame. `hard_negatives`
+    `cleaning` (vc_train.cleaning.LabelCleaning) leaves label boxes out of every sample of their frame; with
+    `grey_dropped` those boxes are also covered in grey, so the student does not learn them as background (kept boxes
+    overlapping them stay visible, and such a frame's full sample is a written copy, not a link). `hard_negatives`
     (vc_train.cleaning.HardNegative, in the order to take them) add up to hard_negative_share times the other samples.
     """
     check_input_size(in_width, in_height)
     if not 0 <= hard_negative_share <= 1:
         raise ValueError(f"hard_negative_share must be in [0, 1], got {hard_negative_share}")
+    if grey_dropped and cleaning is None:
+        raise ValueError("grey_dropped needs a cleaning: there are no dropped label boxes to cover")
     _check_out_dir(out_dir)
-    frames, dropped = _plan(segments, val_tail_ms, cleaning)
+    frames, dropped = _plan(segments, val_tail_ms, cleaning, grey_dropped)
     created = not out_dir.exists()
     try:
         summary = _write_dataset(out_dir, segments, frames, in_width, in_height, crop, hard_negatives, hard_negative_share)

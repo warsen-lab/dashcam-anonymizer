@@ -547,11 +547,14 @@ def test_dataset_command_cleans_plates_and_adds_hard_negatives(tmp_path, capsys)
         "dataset", "--stem", "a", "--frames-root", str(tmp_path / "frames"), "--labels-root", str(tmp_path / "labels"),
         "--out", str(tmp_path / "ds"), "--label-candidates", str(tmp_path / "lc.jsonl"),
         "--label-judgments", str(tmp_path / "lj.jsonl"), "--hard-negatives", str(tmp_path / "hc.jsonl"),
-        "--hard-negative-judgments", str(tmp_path / "hj.jsonl"), "--hard-negative-share", "1",
+        "--hard-negative-judgments", str(tmp_path / "hj.jsonl"), "--hard-negative-share", "1", "--grey-dropped-labels",
     ])
     assert code == 0
     printed = capsys.readouterr().out
-    assert "label boxes left out by the cleaning: 1" in printed and "hard-negative samples: 1 (of 1" in printed
+    assert "label boxes left out by the cleaning: 1 (covered in grey)" in printed
+    assert "hard-negative samples: 1 (of 1" in printed
+    full = cv2.imread(str(tmp_path / "ds" / "images" / "train" / "a_000000_full.jpg"))
+    assert abs(int(full[510, 930].mean()) - 114) <= 2
     assert len((tmp_path / "ds" / "labels" / "train" / "a_000000_full.txt").read_text().splitlines()) == 1
 
 
@@ -562,4 +565,5 @@ def test_dataset_command_wants_both_files_of_a_pair(tmp_path, capsys):
     assert main([*base, "--label-candidates", str(tmp_path / "x")]) == 2
     assert main([*base, "--hard-negatives", str(tmp_path / "x")]) == 2
     assert main([*base, "--drop-tall-low-plates"]) == 2
+    assert main([*base, "--grey-dropped-labels"]) == 2
     assert not (tmp_path / "ds").exists()

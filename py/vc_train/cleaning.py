@@ -50,19 +50,17 @@ class LabelCleaning:
                         low[(stem, d.frame)].append(d.box)
         return LabelCleaning(dict(no), dict(yes), dict(low), drop_tall_low_plates)
 
-    def clean(self, stem: str, frame: int, boxes: list[Box]) -> tuple[list[Box], int]:
-        """The boxes to keep, and how many were left out."""
-        key = (stem, frame)
-        no, yes, low = self.no.get(key, []), self.yes.get(key, []), self.low_boxes.get(key, [])
-        kept = []
-        for b in boxes:
-            if b.cls == CLEANED and not _matches(b, yes):
-                if _matches(b, no):
-                    continue
-                if self.drop_tall_low_plates and b.width < b.height and _matches(b, low):
-                    continue
-            kept.append(b)
-        return kept, len(boxes) - len(kept)
+    def _drops(self, key: tuple[str, int], b: Box) -> bool:
+        if b.cls != CLEANED or _matches(b, self.yes.get(key, [])):
+            return False
+        if _matches(b, self.no.get(key, [])):
+            return True
+        return self.drop_tall_low_plates and b.width < b.height and _matches(b, self.low_boxes.get(key, []))
+
+    def clean(self, stem: str, frame: int, boxes: list[Box]) -> tuple[list[Box], list[Box]]:
+        """The boxes to keep, and the boxes left out."""
+        drop = [self._drops((stem, frame), b) for b in boxes]
+        return [b for b, d in zip(boxes, drop) if not d], [b for b, d in zip(boxes, drop) if d]
 
 
 @dataclass(frozen=True)

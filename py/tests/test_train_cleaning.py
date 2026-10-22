@@ -41,23 +41,23 @@ def _load(tmp_path, tall):
 def test_plates_judged_not_real_are_dropped_and_faces_are_never_touched(tmp_path):
     labels = _setup(tmp_path)
     kept, dropped = _load(tmp_path, tall=False).clean("s", 0, labels)
-    assert dropped == 1  # plate a; the face judged no stays
+    assert [round(b.x1) for b in dropped] == [10]  # plate a; the face judged no stays
     assert [(b.cls, round(b.x1)) for b in kept] == [("plate", 40), ("plate", 70), ("plate", 90), ("plate", 120), ("face", 10)]
-    assert _load(tmp_path, tall=False).clean("s", 12, labels) == (labels, 0)  # nothing known about frame 12
+    assert _load(tmp_path, tall=False).clean("s", 12, labels) == (labels, [])  # nothing known about frame 12
 
 
 def test_tall_low_band_plates_are_dropped_unless_judged_real(tmp_path):
     labels = _setup(tmp_path)
     kept, dropped = _load(tmp_path, tall=True).clean("s", 0, labels)
     # a: judged no; c (10 x 20, low band, never judged): tall; d: tall but judged real; the 0.8 plate is not low band
-    assert dropped == 2
+    assert [round(b.x1) for b in dropped] == [10, 70]
     assert [(b.cls, round(b.x1)) for b in kept] == [("plate", 40), ("plate", 90), ("plate", 120), ("face", 10)]
 
 
 def test_unsure_plates_stay(tmp_path):
     labels = _setup(tmp_path)
     append_judgments(tmp_path / "j.jsonl", [Judgment("a", "unsure", "human")])
-    assert _load(tmp_path, tall=False).clean("s", 0, labels)[1] == 0
+    assert _load(tmp_path, tall=False).clean("s", 0, labels)[1] == []
 
 
 def test_hard_negatives_are_the_candidates_judged_not_real(tmp_path):

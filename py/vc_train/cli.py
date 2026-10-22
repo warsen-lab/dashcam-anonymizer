@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--label-judgments", type=Path, default=None, help="their judgments.jsonl: plates judged no are left out")
     d.add_argument("--drop-tall-low-plates", action="store_true",
                    help="also leave out the low-band plate labels taller than wide (lamps, body corners)")
+    d.add_argument("--grey-dropped-labels", action="store_true",
+                   help="cover the label boxes left out in grey, so they are learnt as neither plate nor background")
     d.add_argument("--hard-negatives", type=Path, default=None, help="vc_hardneg candidates.jsonl of student false positives")
     d.add_argument("--hard-negative-judgments", type=Path, default=None, help="their judgments.jsonl")
     d.add_argument("--hard-negative-share", type=float, default=0.10, help="extra samples, as a share of the others")
@@ -107,6 +109,8 @@ def _dataset(args) -> int:
         raise ValueError("--label-candidates and --label-judgments go together")
     if args.drop_tall_low_plates and args.label_candidates is None:
         raise ValueError("--drop-tall-low-plates needs --label-candidates and --label-judgments")
+    if args.grey_dropped_labels and args.label_candidates is None:
+        raise ValueError("--grey-dropped-labels needs --label-candidates and --label-judgments")
     if (args.hard_negatives is None) != (args.hard_negative_judgments is None):
         raise ValueError("--hard-negatives and --hard-negative-judgments go together")
     cleaning, hard = None, []
@@ -120,7 +124,8 @@ def _dataset(args) -> int:
 
         hard = load_hard_negatives(args.hard_negatives, args.hard_negative_judgments)
     s = build_dataset(segments, args.out, args.width, args.height, args.val_tail_ms, cleaning=cleaning,
-                      hard_negatives=hard, hard_negative_share=args.hard_negative_share)
+                      hard_negatives=hard, hard_negative_share=args.hard_negative_share,
+                      grey_dropped=args.grey_dropped_labels)
     print(
         f"dataset: {s.train_samples} train / {s.val_samples} val samples from "
         f"{s.train_frames} / {s.val_frames} frames, {s.boxes} boxes in {args.out}"
@@ -128,7 +133,8 @@ def _dataset(args) -> int:
     for segment in s.segments:
         print(f"  {segment.name}: {segment.train_frames} train / {segment.val_frames} val frames")
     if cleaning is not None:
-        print(f"  label boxes left out by the cleaning: {s.labels_dropped}")
+        grey = " (covered in grey)" if args.grey_dropped_labels else ""
+        print(f"  label boxes left out by the cleaning: {s.labels_dropped}{grey}")
     if args.hard_negatives is not None:
         print(f"  hard-negative samples: {s.hard_negatives} (of {len(hard)} judged false positives)")
     return 0
