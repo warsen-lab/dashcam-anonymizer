@@ -505,6 +505,34 @@ TEST(RedactJob, TheLargeFaceRuleCanBeSwitchedOff) {
   EXPECT_EQ(wide.maskedFrames, 6);
 }
 
+// With plate_min_width_px 24, a plate 23.5 px wide is dropped before the timeline like a giant face (not masked, not in
+// detections.jsonl, counted); one exactly 24 px wide and a face 10 px wide stay.
+TEST(RedactJob, DropsPlatesNarrowerThanTheMinimumWidth) {
+  const RedactStats s = runWithBoxesOnOneKeyframe(
+      "redact_narrow_plate",
+      {{"plate", 100, 100, 123.5, 108, 0.9}, {"plate", 300, 100, 324, 108, 0.9}, {"face", 500, 100, 510, 112, 0.9}},
+      [](RedactConfig& c) { c.plateMinWidthPx = 24.0; });
+  EXPECT_EQ(s.narrowPlatesDropped, 1);
+  EXPECT_EQ(s.detections, 2);
+  const std::vector<nlohmann::json> lines = detectionLines(s);
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_EQ(lines[0].at("x1").get<int>(), 300);
+  EXPECT_EQ(lines[1].at("cls").get<std::string>(), "face");
+  EXPECT_EQ(s.maskBoxes, 12);
+  const nlohmann::json stats = statsJson(s);
+  EXPECT_EQ(stats.at("narrow_plates_dropped").get<int>(), 1);
+  EXPECT_DOUBLE_EQ(stats.at("config").at("plate_min_width_px").get<double>(), 24.0);
+}
+
+// The default 0 masks plates of any width.
+TEST(RedactJob, KeepsNarrowPlatesByDefault) {
+  const RedactStats s = runWithBoxesOnOneKeyframe("redact_narrow_plate_off", {{"plate", 100, 100, 110, 108, 0.9}});
+  EXPECT_EQ(s.narrowPlatesDropped, 0);
+  EXPECT_EQ(s.detections, 1);
+  EXPECT_EQ(s.maskedFrames, 6);
+  EXPECT_EQ(statsJson(s).at("narrow_plates_dropped").get<int>(), 0);
+}
+
 TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
   RedactStats s;
   s.frames = 600;
@@ -513,9 +541,10 @@ TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
   s.largeFacesDropped = 3;
   s.maskedFrames = 400;
   s.maskBoxes = 520;
+  s.narrowPlatesDropped = 7;
   const std::string summary = redactSummary(s);
   EXPECT_NE(summary.find("frames:        600 (keyframes 100, detections 250, large faces dropped 3, "
-                         "masked 400 frames / 520 boxes)\n"),
+                         "narrow plates dropped 7, masked 400 frames / 520 boxes)\n"),
             std::string::npos)
       << summary;
   s.largeFacesDropped = 0;

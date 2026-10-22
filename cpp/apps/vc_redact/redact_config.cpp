@@ -14,7 +14,7 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 28> kKeys = {
+constexpr std::array<std::string_view, 29> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
@@ -24,7 +24,7 @@ constexpr std::array<std::string_view, 28> kKeys = {
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
     "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
     "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
-    "verify_threshold_plate"};
+    "verify_threshold_plate", "plate_min_width_px"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -147,6 +147,7 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::isfinite(c.plateConfirmScore), "plate_confirm_score must be finite");
   require(std::isfinite(c.largeFaceAreaFraction), "large_face_area_fraction must be finite");
   require(std::isfinite(c.largeFaceMinScore), "large_face_min_score must be finite");
+  require(std::isfinite(c.plateMinWidthPx), "plate_min_width_px must be finite");
   require(std::isfinite(c.outputBitrateFactorHevc), "output_bitrate_factor_hevc must be finite");
   require(c.detectFps >= kMinDetectFps && c.detectFps <= kMaxDetectFps,
           "detect_fps must be in [" + plainNumber(kMinDetectFps) + ", " + plainNumber(kMaxDetectFps) + "]");
@@ -169,6 +170,7 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.plateConfirmScore >= 0 && c.plateConfirmScore <= 1, "plate_confirm_score must be in [0, 1]");
   require(c.largeFaceAreaFraction > 0 && c.largeFaceAreaFraction <= 1, "large_face_area_fraction must be in (0, 1]");
   require(c.largeFaceMinScore >= 0 && c.largeFaceMinScore <= 1, "large_face_min_score must be in [0, 1]");
+  require(c.plateMinWidthPx >= 0, "plate_min_width_px must be >= 0");
   require(c.verifyPlateBelow >= 0 && c.verifyPlateBelow <= 1, "verify_plate_below must be in [0, 1]");
   require(c.verifyFaceUnlessBothAbove >= 0 && c.verifyFaceUnlessBothAbove <= 1,
           "verify_face_unless_both_above must be in [0, 1]");
@@ -226,6 +228,7 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   }
   c.largeFaceAreaFraction = numberSetting(j, "large_face_area_fraction", c.largeFaceAreaFraction, origin);
   c.largeFaceMinScore = floatSetting(j, "large_face_min_score", c.largeFaceMinScore, origin);
+  c.plateMinWidthPx = numberSetting(j, "plate_min_width_px", c.plateMinWidthPx, origin);
   c.verifyPlateBelow = floatSetting(j, "verify_plate_below", c.verifyPlateBelow, origin);
   c.verifyFaceUnlessBothAbove = floatSetting(j, "verify_face_unless_both_above", c.verifyFaceUnlessBothAbove, origin);
   c.verifyThresholdFace = optionalFloatSetting(j, "verify_threshold_face", origin);
@@ -271,6 +274,7 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["plate_confirm_score"] = jsonFloat(c.plateConfirmScore);
   j["large_face_area_fraction"] = c.largeFaceAreaFraction;
   j["large_face_min_score"] = jsonFloat(c.largeFaceMinScore);
+  j["plate_min_width_px"] = c.plateMinWidthPx;
   j["verify_plate_below"] = jsonFloat(c.verifyPlateBelow);
   j["verify_face_unless_both_above"] = jsonFloat(c.verifyFaceUnlessBothAbove);
   j["verify_threshold_face"] =

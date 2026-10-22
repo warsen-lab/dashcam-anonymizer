@@ -205,32 +205,32 @@ std::vector<int> verifierClassesFor(const std::vector<std::string>& classes, con
   return out;
 }
 
-// A keyframe's detections after the large-face rule, and how many it dropped.
-struct LargeFaceFilter {
+// A keyframe's detections after the large-face and narrow-plate rules, and how many each dropped.
+struct KeyframeFilter {
   std::vector<SourcedBox> kept;
-  int64_t dropped = 0;
+  int64_t largeFaces = 0;
+  int64_t narrowPlates = 0;
 };
 
 // Drops every face box whose own area exceeds config.largeFaceAreaFraction of the width x height frame and whose
-// score is below config.largeFaceMinScore (spec 2026-10-19 §3.6: giant false positives on road and buildings). Faces
-// are the boxes whose class name in `classes` is "face", whichever detector found them; other classes, smaller or
-// higher-scoring faces are all kept, in order. "Exceeds" and "below" are strict.
-LargeFaceFilter dropLargeLowScoreFaces(std::vector<SourcedBox> found, const std::vector<std::string>& classes,
-                                       const RedactConfig& config, int width, int height) {
-  const auto faceClass = std::find(classes.begin(), classes.end(), "face");
-  if (faceClass == classes.end()) return {std::move(found), 0};
-  const auto face = static_cast<int>(faceClass - classes.begin());
+// score is below config.largeFaceMinScore (spec 2026-10-19 §3.6: giant false positives on road and buildings), and
+// every plate box whose own width is below config.plateMinWidthPx (too small to read). Faces and plates are the boxes
+// whose class name in `classes` is "face" or "plate", whichever detector found them; everything else is kept, in
+// order. "Exceeds" and "below" are strict.
+KeyframeFilter filterKeyframe(std::vector<SourcedBox> found, const std::vector<std::string>& classes,
+                              const RedactConfig& config, int width, int height) {
+  const int face = classIndex(classes, "face");
+  const int plate = classIndex(classes, "plate");
   const double limit = config.largeFaceAreaFraction * static_cast<double>(width) * static_cast<double>(height);
-  const auto isDropped = [&](const SourcedBox& b) {
-    const double w = std::max(0.0, static_cast<double>(b.box.x2) - static_cast<double>(b.box.x1));
-    const double h = std::max(0.0, static_cast<double>(b.box.y2) - static_cast<double>(b.box.y1));
-    return b.box.cls == face && w * h > limit && b.box.score < config.largeFaceMinScore;
-  };
-  LargeFaceFilter out;
+  KeyframeFilter out;
   out.kept.reserve(found.size());
   for (SourcedBox& b : found) {
-    if (isDropped(b)) {
-      ++out.dropped;
+    const double w = std::max(0.0, static_cast<double>(b.box.x2) - static_cast<double>(b.box.x1));
+    const double h = std::max(0.0, static_cast<double>(b.box.y2) - static_cast<double>(b.box.y1));
+    if (face >= 0 && b.box.cls == face && w * h > limit && b.box.score < config.largeFaceMinScore) {
+      ++out.largeFaces;
+    } else if (plate >= 0 && b.box.cls == plate && w < config.plateMinWidthPx) {
+      ++out.narrowPlates;
     } else {
       out.kept.push_back(std::move(b));
     }
@@ -281,9 +281,10 @@ class Processor {
     stats_.detect.busySec += secondsSince(detectStarted);
     ++stats_.detect.items;
     ++stats_.keyframes;
-    // Giant low-score faces never reach the timeline, detections.jsonl or the masks (spec 2026-10-19 §3.6).
-    const LargeFaceFilter filtered =
-        dropLargeLowScoreFaces(std::move(detected), detector_.classes(), options_.config, width_, height_);
+    // Giant low-score faces (spec 2026-10-19 §3.6) and plates too narrow to read never reach the timeline,
+    // detections.jsonl or the masks.
+    const KeyframeFilter filtered =
+        filterKeyframe(std::move(detected), detector_.classes(), options_.config, width_, height_);
     const std::vector<SourcedBox>& found = filtered.kept;
     // Boxes the verifier rejects never reach the timeline (spec 2026-10-21 §4.3).
     std::vector<std::optional<VerifyResult>> verified = verify(view, found);
@@ -293,7 +294,8 @@ class Processor {
       if (!verified[i] || verified[i]->passed) boxes.push_back(found[i].box);
     }
     stats_.detections += static_cast<int64_t>(boxes.size());
-    stats_.largeFacesDropped += filtered.dropped;
+    stats_.largeFacesDropped += filtered.largeFaces;
+    stats_.narrowPlatesDropped += filtered.narrowPlates;
 
     const Clock::time_point trackStarted = Clock::now();
     const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
@@ -686,6 +688,7 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["keyframes"] = s.keyframes;
   j["detections"] = s.detections;
   j["large_faces_dropped"] = s.largeFacesDropped;
+  j["narrow_plates_dropped"] = s.narrowPlatesDropped;
   j["verifier"] = s.verifier.empty() ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(s.verifier);
   j["verify"]["checked"] = s.verifyChecked;
   j["verify"]["rejected"]["face"] = s.verifyRejectedFaces;
@@ -758,10 +761,11 @@ std::string redactSummary(const RedactStats& s) {
   const double fps = s.elapsedSec > 0 ? static_cast<double>(s.frames) / s.elapsedSec : 0;
   std::string out = "output:        " + s.video.string() + "\n";
   out += formatted(
-      "frames:        %lld (keyframes %lld, detections %lld, large faces dropped %lld, "
+      "frames:        %lld (keyframes %lld, detections %lld, large faces dropped %lld, narrow plates dropped %lld, "
       "masked %lld frames / %lld boxes)\n",
       static_cast<long long>(s.frames), static_cast<long long>(s.keyframes), static_cast<long long>(s.detections),
-      static_cast<long long>(s.largeFacesDropped), static_cast<long long>(s.maskedFrames),
+      static_cast<long long>(s.largeFacesDropped), static_cast<long long>(s.narrowPlatesDropped),
+      static_cast<long long>(s.maskedFrames),
       static_cast<long long>(s.maskBoxes));
   out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,
                    static_cast<long long>(s.keyframeStride), s.videoFps);

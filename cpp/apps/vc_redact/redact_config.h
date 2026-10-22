@@ -41,6 +41,10 @@ struct RedactConfig {
   // positives on road and buildings. largeFaceMinScore 0 switches the rule off.
   double largeFaceAreaFraction = 0.05;
   float largeFaceMinScore = 0.6f;
+  // A plate box narrower than plateMinWidthPx (its own width, before any margin) is dropped before it reaches the
+  // timeline (2026-10-22): at under ~24 px a plate's characters are ~3 px and cannot be read, and such boxes made 78 %
+  // of r3's unexplained plate masks. 0, the default, keeps plates of any width; faces are never affected.
+  double plateMinWidthPx = 0.0;
   // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
   // detector found or that score below verifyFaceUnlessBothAbove go through the verifier model when one is given
   // (vc_redact --verifier-model). The pass thresholds are the model's (model.json pass_threshold) unless set here.
@@ -72,7 +76,7 @@ inline constexpr std::array<std::string_view, 7> kNvencPresets = {"p1", "p2", "p
 // [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans,
 // nvenc_preset one of the strings "p1" to "p7", rate_control the string "quality" or "bitrate"; every other value must be a finite number.
 // face_score_threshold, face_confirm_score, plate_confirm_score and large_face_min_score are in [0, 1],
-// face_nms_iou and large_face_area_fraction in (0, 1], output_bitrate_factor_hevc in [1, 4].
+// face_nms_iou and large_face_area_fraction in (0, 1], output_bitrate_factor_hevc in [1, 4], plate_min_width_px >= 0.
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
 RedactConfig readRedactConfig(const std::filesystem::path& path);
 void validateRedactConfig(const RedactConfig& config, const std::string& origin);

@@ -28,7 +28,7 @@ const std::set<std::string> kAllKeys = {
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
     "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
     "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
-    "verify_threshold_plate"};
+    "verify_threshold_plate", "plate_min_width_px"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -51,6 +51,7 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, d.plateConfirmScore);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, d.largeFaceAreaFraction);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, d.largeFaceMinScore);
+  EXPECT_DOUBLE_EQ(c.plateMinWidthPx, d.plateMinWidthPx);
   EXPECT_FLOAT_EQ(c.verifyPlateBelow, d.verifyPlateBelow);
   EXPECT_FLOAT_EQ(c.verifyFaceUnlessBothAbove, d.verifyFaceUnlessBothAbove);
   EXPECT_EQ(c.verifyThresholdFace, d.verifyThresholdFace);
@@ -87,6 +88,7 @@ RedactConfig nonDefaultConfig() {
   c.plateConfirmScore = 0.0625f;
   c.largeFaceAreaFraction = 0.25;
   c.largeFaceMinScore = 0.75f;
+  c.plateMinWidthPx = 20.5;
   c.verifyPlateBelow = 0.375f;
   c.verifyFaceUnlessBothAbove = 0.625f;
   c.verifyThresholdFace = 0.25f;
@@ -124,6 +126,7 @@ TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   EXPECT_FLOAT_EQ(c.plateConfirmScore, 0.2f);
   EXPECT_DOUBLE_EQ(c.largeFaceAreaFraction, 0.05);
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, 0.6f);
+  EXPECT_DOUBLE_EQ(c.plateMinWidthPx, 0.0);
   EXPECT_FALSE(c.timeline.holdLostGhosts);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
@@ -211,6 +214,25 @@ TEST(RedactConfig, ReadsTheLargeFaceRule) {
   EXPECT_DOUBLE_EQ(edges.largeFaceAreaFraction, 1.0);
   EXPECT_FLOAT_EQ(edges.largeFaceMinScore, 0.0f);
   EXPECT_FLOAT_EQ(parseRedactConfig(R"({"large_face_min_score": 1})", "t").largeFaceMinScore, 1.0f);
+}
+
+// Plates narrower than plate_min_width_px are not masked (2026-10-22: too small to read); 0, the default, is off.
+TEST(RedactConfig, ReadsThePlateMinimumWidth) {
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"plate_min_width_px": 24})", "t").plateMinWidthPx, 24.0);
+  EXPECT_DOUBLE_EQ(parseRedactConfig(R"({"plate_min_width_px": 0})", "t").plateMinWidthPx, 0.0);
+  for (const std::string value : {"-1", R"("24")", "null", "true"}) {
+    const std::string text = R"({"plate_min_width_px": )" + value + "}";
+    SCOPED_TRACE(text);
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted";
+    } catch (const VcError& e) {
+      EXPECT_NE(std::string(e.what()).find("plate_min_width_px"), std::string::npos) << e.what();
+    }
+  }
+  RedactConfig c;
+  c.plateMinWidthPx = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
 }
 
 // Each refusal starts with the origin and names the key.
@@ -426,7 +448,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 28u);
+  EXPECT_EQ(j.size(), 29u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);

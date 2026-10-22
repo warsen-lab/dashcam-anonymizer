@@ -53,8 +53,9 @@ struct RedactStats {
   std::filesystem::path video;  // the redacted file
   int64_t frames = 0;
   int64_t keyframes = 0;
-  int64_t detections = 0;  // the boxes passed to the timeline: not counting largeFacesDropped or verifier rejections
+  int64_t detections = 0;  // the boxes passed to the timeline: not counting the dropped ones or verifier rejections
   int64_t largeFacesDropped = 0;  // large faces scoring below large_face_min_score (spec 2026-10-19 §3.6)
+  int64_t narrowPlatesDropped = 0;  // plates narrower than plate_min_width_px (2026-10-22)
   std::string verifier;             // the verifier model's name; empty without one
   int64_t verifyChecked = 0;        // boxes the verifier scored
   int64_t verifyRejectedFaces = 0;  // ... and rejected, by class
