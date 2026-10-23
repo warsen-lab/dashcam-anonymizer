@@ -95,6 +95,18 @@ def test_judge_objects_skips_tracks_that_never_reach_must_mask_size(tmp_path):
     assert runner.calls == [] and not (gt / OBJECTS).exists()
 
 
+def test_judge_frames_asks_only_about_unmasked_frames_at_must_mask_size(tmp_path):
+    images, _ = _segment(tmp_path)
+    boxes = (Box("plate", 100, 100, 140, 112, 0.9), Box("plate", 100, 100, 120, 106, 0.9),  # 40 px, then 20 px
+             Box("plate", 100, 100, 140, 112, 0.9))
+    track = Track(0, "plate", (0, 6, 12), boxes)
+    gt = tmp_path / "gt"
+    gt.mkdir()
+    judge_objects(gt, [track], images, load_config(), _Runner('[{"n": 1, "verdict": "real_readable"}]'), "llm:fake")
+    judge_frames(gt, [track], images, {}, load_config(), _Runner('[{"n": 1, "verdict": "readable"}]'), "llm:fake")
+    assert sorted(resolve(read_judgments(gt / FRAMES))) == [frame_id(0, 0), frame_id(0, 12)]  # not the 20 px frame 6
+
+
 def test_judge_objects_skips_tracks_no_detector_scored_high_enough(tmp_path):
     images, tracks = _segment(tmp_path, score=0.29)  # judge_min_score is 0.3
     gt = tmp_path / "gt"

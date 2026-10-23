@@ -19,7 +19,7 @@ import numpy as np
 
 from vc_eval.metrics import must_mask
 from vc_gt.config import GtConfig
-from vc_gt.crops import (CROPS_INDEX, Crop, append_crop_index, read_crop_index, unmasked_frames, write_frame_crop,
+from vc_gt.crops import (CROPS_INDEX, Crop, append_crop_index, leak_frames, read_crop_index, write_frame_crop,
                          write_object_crops)
 from vc_gt.tracks import Track
 from vc_hardneg.judges import CLS_ZH, CommandJudge, _fill
@@ -151,8 +151,12 @@ def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cf
 
 def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], masks_by_frame: dict[int, list[Box]],
                  cfg: GtConfig, runner: Runner, judge: str) -> Counter:
-    """Question B about every unmasked frame of every track judged real (by the latest verdict) not judged yet."""
+    """Question B about every unmasked frame at must-mask size (crops.leak_frames) of every track judged real (by the
+    latest verdict) not judged yet."""
     gt_dir = Path(gt_dir)
+    if not tracks:
+        return Counter()
+    frame_height = image_size(next(iter(images.values())))[1]
     objects = resolve(read_judgments(gt_dir / OBJECTS))
     known = resolve(read_judgments(gt_dir / FRAMES))
     index = read_crop_index(gt_dir / CROPS_INDEX)
@@ -161,7 +165,7 @@ def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], mas
         j = objects.get(object_id(t.id))
         if j is None or j.verdict not in REAL:
             continue
-        for f in unmasked_frames(t, masks_by_frame):
+        for f in leak_frames(t, masks_by_frame, frame_height):
             fid = frame_id(t.id, f)
             if fid not in known:
                 crops = _cached(index, gt_dir, fid,

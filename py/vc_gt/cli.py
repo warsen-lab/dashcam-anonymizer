@@ -14,7 +14,7 @@ from vc_gt.audit import (AUDIT, AUDIT_FRAMES, FRAME_CHOICES, H2_SAMPLE, OBJECT_C
                          write_annotate_page, write_audit, write_choice_page)
 from vc_gt.candidates import TRACKS, read_persons
 from vc_gt.config import DEFAULT_CONFIG, load_config
-from vc_gt.crops import CROPS_INDEX, read_crop_index, unmasked_frames
+from vc_gt.crops import CROPS_INDEX, leak_frames, read_crop_index
 from vc_gt.judge import (FRAME_VERDICTS, FRAMES, OBJECT_VERDICTS, OBJECTS, REAL, frame_id, judge_frames,
                          judge_objects, make_runner, object_id)
 from vc_gt.tracks import Track, read_tracks
@@ -91,15 +91,15 @@ def _judge(args) -> int:
     return 0
 
 
-def _unmasked_ids(gt: Path, masks_path: Path, tracks: list[Track]) -> set[str]:
-    """Frame ids of every frame the masks leave a real object (by the latest verdict) uncovered."""
+def _unmasked_ids(gt: Path, masks_path: Path, tracks: list[Track], frame_height: int) -> set[str]:
+    """Frame ids of every frame the masks leave a real object (by the latest verdict) uncovered at must-mask size."""
     from vc_eval.records import read_masks
 
     _, masks = read_masks(masks_path)
     objects = resolve(read_judgments(gt / OBJECTS))
     return {frame_id(t.id, f) for t in tracks
             if (j := objects.get(object_id(t.id))) is not None and j.verdict in REAL
-            for f in unmasked_frames(t, masks)}
+            for f in leak_frames(t, masks, frame_height)}
 
 
 def _model_ids(judgments: list[Judgment]) -> list[str]:
@@ -115,7 +115,10 @@ def _review(args) -> int:
     index = read_crop_index(args.gt / CROPS_INDEX)
     if args.set == "h1":
         object_ids = h1_object_ids(objects)
-        frame_ids = h1_frame_ids(frames, _unmasked_ids(args.gt, args.masks, tracks))
+        from vc_label.review import image_size
+
+        height = image_size(read_frames_csv(args.frames)[0].image)[1]
+        frame_ids = h1_frame_ids(frames, _unmasked_ids(args.gt, args.masks, tracks, height))
     else:
         path = args.gt / H2_SAMPLE
         if not path.exists():

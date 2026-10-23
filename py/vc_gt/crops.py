@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from vc_eval.metrics import COVERED_FRACTION, covered_fraction
+from vc_eval.metrics import COVERED_FRACTION, covered_fraction, must_mask
 from vc_gt.config import GtConfig
 from vc_gt.tracks import Track
 from vc_label.contracts import Box
@@ -69,6 +69,12 @@ def unmasked_frames(track: Track, masks_by_frame: dict[int, list[Box]]) -> list[
     """The track's frames where the masks cover less than COVERED_FRACTION of its box (vc_eval's covered test)."""
     return [f for f, b in zip(track.frames, track.boxes)
             if covered_fraction(b, masks_by_frame.get(f, [])) < COVERED_FRACTION]
+
+
+def leak_frames(track: Track, masks_by_frame: dict[int, list[Box]], frame_height: int) -> list[int]:
+    """The unmasked frames where the box has the must-mask size: the only frames on which the object can leak (a
+    smaller one cannot be read; spec §9)."""
+    return [f for f in unmasked_frames(track, masks_by_frame) if must_mask(track.box_at(f), frame_height)]
 
 
 def _read(images: dict[int, Path], frame: int) -> np.ndarray:

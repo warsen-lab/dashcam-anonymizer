@@ -11,7 +11,7 @@ from pathlib import Path
 
 from vc_eval.metrics import COVERED_FRACTION, Rate, covered_fraction, must_mask
 from vc_gt.audit import AuditBox
-from vc_gt.crops import unmasked_frames, write_crop
+from vc_gt.crops import leak_frames, write_crop
 from vc_gt.judge import REAL, frame_id, object_id
 from vc_gt.tracks import Track
 from vc_hardneg.judgments import HUMAN, Judgment, resolve
@@ -98,7 +98,8 @@ def evaluate_objects(tracks: list[Track], objects: dict[str, str], frames: dict[
             for f, b in zip(t.frames, t.boxes):
                 if must_mask(b, frame_height):
                     recall = recall.add(covered_fraction(b, masks_by_frame.get(f, [])) >= COVERED_FRACTION)
-            leaked = tuple(f for f in unmasked_frames(t, masks_by_frame) if frames.get(frame_id(t.id, f)) == "readable")
+            leaked = tuple(f for f in leak_frames(t, masks_by_frame, frame_height)
+                           if frames.get(frame_id(t.id, f)) == "readable")
             if objects[object_id(t.id)] == "real_readable" or leaked:
                 readable += 1
             if leaked:
