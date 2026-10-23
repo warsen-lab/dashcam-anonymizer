@@ -12,8 +12,9 @@ from vc_hardneg.config import LlmConfig
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "gt.json"  # the repository's, wherever this runs
 _KEYS = {"owlv2_score", "tile_grid", "tile_overlap", "retinaface_score", "yunet_score", "coco_score", "student_score",
-         "merge_iou", "track", "crops_per_object", "crop_factor", "min_crop_px", "audit", "llm"}
-_TRACK_KEYS = {"min_iou", "max_center_dist", "max_gap"}
+         "merge_iou", "plate_min_aspect", "plate_max_width_px", "track", "judge_min_score", "crops_per_object",
+         "crop_factor", "min_crop_px", "audit", "llm"}
+_TRACK_KEYS = {"min_iou", "max_size_ratio", "max_gap"}
 _AUDIT_KEYS = {"objects", "frames", "frames_per_class", "seed"}
 _LLM_KEYS = {"name", "command", "timeout_s", "parallel", "batch", "tile", "object_prompt", "frame_prompt"}
 
@@ -52,7 +53,10 @@ class GtConfig:
     coco_score: float
     student_score: float
     merge_iou: float  # boxes of one class overlapping this much on a frame are one candidate
+    plate_min_aspect: float  # a plate box narrower than this many heights is not linked (lamps, signs)
+    plate_max_width_px: float  # nor one wider than this (the back of a bus)
     track: TrackParams
+    judge_min_score: float  # only tracks some detector scored this much on some frame are judged (spec §8)
     crops_per_object: int
     crop_factor: float  # a crop's side in target sizes
     min_crop_px: float
@@ -77,13 +81,17 @@ def load_config(path: Path = DEFAULT_CONFIG) -> GtConfig:
     t = _keys(d["track"], _TRACK_KEYS, path, "track")
     a = _keys(d["audit"], _AUDIT_KEYS, path, "audit")
     m = _keys(d["llm"], _LLM_KEYS, path, "llm")
-    for k in ("owlv2_score", "retinaface_score", "yunet_score", "coco_score", "student_score", "merge_iou"):
+    for k in ("owlv2_score", "retinaface_score", "yunet_score", "coco_score", "student_score", "merge_iou",
+              "judge_min_score"):
         _check(0 <= d[k] <= 1, path, f"{k} must be in [0, 1]")
     _check(int(d["tile_grid"]) >= 1, path, "tile_grid must be >= 1")
     _check(0 <= d["tile_overlap"] < 0.5, path, "tile_overlap must be in [0, 0.5)")
     _check(int(d["crops_per_object"]) >= 1, path, "crops_per_object must be >= 1")
     _check(d["crop_factor"] >= 1 and d["min_crop_px"] >= 16, path, "crop_factor must be >= 1 and min_crop_px >= 16")
-    _check(0 <= t["min_iou"] <= 1 and t["max_center_dist"] > 0, path, "track.min_iou in [0, 1], max_center_dist > 0")
+    _check(0 <= t["min_iou"] <= 1, path, "track.min_iou must be in [0, 1]")
+    _check(t["max_size_ratio"] >= 1, path, "track.max_size_ratio must be >= 1")
+    _check(d["plate_min_aspect"] > 0 and d["plate_max_width_px"] > 0, path,
+           "plate_min_aspect and plate_max_width_px must be > 0")
     _check(int(t["max_gap"]) >= 0, path, "track.max_gap must be >= 0")
     _check(all(int(a[k]) >= 0 for k in ("objects", "frames", "frames_per_class")), path, "audit sizes must be >= 0")
     _check(int(m["parallel"]) >= 1, path, "llm.parallel must be >= 1")
@@ -95,7 +103,9 @@ def load_config(path: Path = DEFAULT_CONFIG) -> GtConfig:
         owlv2_score=float(d["owlv2_score"]), tile_grid=int(d["tile_grid"]), tile_overlap=float(d["tile_overlap"]),
         retinaface_score=float(d["retinaface_score"]), yunet_score=float(d["yunet_score"]),
         coco_score=float(d["coco_score"]), student_score=float(d["student_score"]), merge_iou=float(d["merge_iou"]),
-        track=TrackParams(float(t["min_iou"]), float(t["max_center_dist"]), int(t["max_gap"])),
+        plate_min_aspect=float(d["plate_min_aspect"]), plate_max_width_px=float(d["plate_max_width_px"]),
+        track=TrackParams(float(t["min_iou"]), float(t["max_size_ratio"]), int(t["max_gap"])),
+        judge_min_score=float(d["judge_min_score"]),
         crops_per_object=int(d["crops_per_object"]), crop_factor=float(d["crop_factor"]),
         min_crop_px=float(d["min_crop_px"]),
         audit=AuditConfig(int(a["objects"]), int(a["frames"]), int(a["frames_per_class"]), int(a["seed"])),

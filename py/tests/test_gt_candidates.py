@@ -3,8 +3,8 @@ import csv
 import cv2
 import numpy as np
 
-from vc_gt.candidates import (BOXES, PROCESSED, TRACKS, FrameFinds, build_candidates, merge_duplicates,
-                              read_persons, tile_windows)
+from vc_gt.candidates import (BOXES, PROCESSED, TRACKS, FrameFinds, build_candidates, linkable, merge_duplicates,
+                              read_persons, relink, tile_windows)
 from vc_gt.config import load_config
 from vc_gt.tracks import read_tracks
 from vc_label.contracts import Box
@@ -71,3 +71,21 @@ def test_boxes_of_a_frame_a_crash_never_marked_done_are_dropped_on_resume(tmp_pa
     build_candidates(frames, out, _Finder(), {}, cfg)
     assert (out / PROCESSED).read_text().split("\n")[:2] == ["0 0", "6 0"]
     assert [t.boxes[-1].x1 for t in read_tracks(out / TRACKS)] == [100]  # one box per frame, no stray 1..9
+
+
+def test_linkable_drops_plates_of_no_plate_shape():
+    cfg = load_config()  # plates at least 1.2 times as wide as tall, at most 400 px wide
+    assert linkable(Box("plate", 0, 0, 60, 20), cfg)
+    assert not linkable(Box("plate", 0, 0, 20, 20), cfg)  # square: a lamp, a sign
+    assert not linkable(Box("plate", 0, 0, 500, 200), cfg)  # the back of a bus
+    assert linkable(Box("face", 0, 0, 20, 30), cfg)  # faces are not shape-checked
+
+
+def test_relink_rebuilds_tracks_from_the_boxes_without_detecting_again(tmp_path):
+    frames, out, cfg = _frames(tmp_path), tmp_path / "gt", load_config()
+    build_candidates(frames, out, _Finder(), {}, cfg)
+    with (out / BOXES).open("a") as f:  # a square "plate" on frame 0: dropped by the shape check when linking
+        f.write('{"video": "v.mp4", "frame": 0, "pts_ms": 0.0, "cls": "plate", "x1": 10, "y1": 10, "x2": 30, '
+                '"y2": 30, "score": 0.9, "src": "teacher_owlv2"}\n')
+    assert relink(frames, out, cfg) == 1
+    assert [t.frames for t in read_tracks(out / TRACKS)] == [(0, 6, 12)]

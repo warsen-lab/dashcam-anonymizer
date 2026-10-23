@@ -2308,6 +2308,10 @@ git commit -m "feat: python -m vc_gt builds a segment's answer key step by step"
 
 ---
 
+### Addendum (2026-10-23, spec §9): after the pilot's candidate search
+
+Done before Task 10 Step 4, test-first: linking by overlap only with a width ratio cap (`track.max_size_ratio` 2.0 replaces `max_center_dist`); plate boxes linked only with `plate_min_aspect` 1.2 and `plate_max_width_px` 400 (`candidates.linkable`, `candidates.relink`); `judge_objects` also needs `judge_min_score` 0.3 on some frame; LLM grids are JPEG; `vc_eval objects` counts an audit box held only by an unjudged track as missed by all; `vc_gt candidates` on a finished segment only relinks.
+
 ### Task 10: Pilot on sg_drive_60s (stops for the user twice)
 
 This task runs the real pipeline; it writes no code unless the pilot shows a bug (then fix it test-first in the module concerned and commit before going on).

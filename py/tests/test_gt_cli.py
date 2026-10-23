@@ -90,3 +90,17 @@ def test_vc_eval_objects_reports_a_leak_from_the_answer_key(tmp_path, capsys):
                       "--out", str(tmp_path / "report")]) == 0
     assert "plate: 1 readable real objects, 1 leaked, frame recall 1/2" in capsys.readouterr().out
     assert (tmp_path / "report" / "leaks" / "o0@000006.jpg").exists()
+
+
+def test_candidates_on_a_finished_segment_only_relinks(tmp_path, capsys):
+    from vc_gt.candidates import BOXES
+    from vc_gt.tracks import read_tracks
+
+    frames, gt, _ = _setup(tmp_path)
+    (gt / BOXES).write_text("".join(json.dumps({"video": "v.mp4", "frame": f, "pts_ms": 0.0, "cls": "plate", "x1": 100,
+                                                "y1": 100, "x2": 140, "y2": 112, "score": 0.5, "src": "student"}) + "\n"
+                                    for f in (0, 6)))
+    assert main(["candidates", "--frames", str(frames), "--out", str(gt),
+                 "--vc-detect", str(tmp_path / "no_vc_detect")]) == 0  # neither vc_detect nor a teacher is loaded
+    assert "relinked: 1 tracks" in capsys.readouterr().out
+    assert [t.frames for t in read_tracks(gt / TRACKS)] == [(0, 6)]

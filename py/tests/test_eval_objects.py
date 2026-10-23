@@ -39,11 +39,11 @@ def test_leaks_readable_objects_and_frame_recall():
     assert r.missed_by_all is None and not r.passed
 
 
-def test_missed_by_all_counts_audit_boxes_no_track_holds():
-    tracks = [Track(0, "plate", (6,), (plate(100),))]
-    audit = [AuditBox(6, plate(102)), AuditBox(6, plate(900))]
+def test_missed_by_all_counts_audit_boxes_no_judged_track_holds():
+    tracks = [Track(0, "plate", (6,), (plate(100),)), Track(1, "plate", (6,), (plate(500),))]  # o1 never judged
+    audit = [AuditBox(6, plate(102)), AuditBox(6, plate(900)), AuditBox(6, plate(502))]
     r = evaluate_objects(tracks, {"o0": "real_readable"}, {}, {6: [plate(100)]}, 1080, audit)["plate"]
-    assert (r.missed_by_all.hits, r.missed_by_all.total) == (1, 2)
+    assert (r.missed_by_all.hits, r.missed_by_all.total) == (2, 3)  # 900: no track; 502: only an unjudged one
 
 
 def test_passing_needs_every_bar():

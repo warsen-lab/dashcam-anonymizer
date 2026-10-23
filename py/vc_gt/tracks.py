@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +13,7 @@ from vc_label.contracts import Box
 @dataclass(frozen=True)
 class TrackParams:
     min_iou: float = 0.3
-    max_center_dist: float = 1.5  # in widths of the wider of the two boxes
+    max_size_ratio: float = 2.0  # a box more than this much wider or narrower than the track's last one never continues it
     max_gap: int = 3  # sampled frames a track may go without a box and still continue
 
 
@@ -30,15 +29,13 @@ class Track:
 
 
 def _match(a: Box, b: Box, p: TrackParams) -> float | None:
-    """How well b continues a track whose last box is a (higher is better), None when it cannot. Any overlap match
-    (> 1) beats any distance match (<= 1)."""
+    """How well b continues a track whose last box is a (its IoU), None when it cannot: too little overlap or a width
+    change beyond max_size_ratio. Overlap only: the 2026-10-23 pilot's centre-distance matches let tracks hop from a
+    plate to a tail light or a barrier."""
+    if a.width <= 0 or not 1 / p.max_size_ratio <= b.width / a.width <= p.max_size_ratio:
+        return None
     overlap = iou(a, b)
-    if overlap >= p.min_iou:
-        return 1.0 + overlap
-    (ax, ay), (bx, by) = a.center, b.center
-    limit = p.max_center_dist * max(a.width, b.width)
-    dist = math.hypot(ax - bx, ay - by)
-    return 1.0 - dist / limit if limit > 0 and dist < limit else None
+    return overlap if overlap >= p.min_iou else None
 
 
 def link_tracks(by_frame: dict[int, list[Box]], order: list[int], p: TrackParams = TrackParams()) -> list[Track]:

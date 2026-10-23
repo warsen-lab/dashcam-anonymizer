@@ -112,6 +112,25 @@ def _drop_unfinished(out_dir: Path, done: set[int]) -> None:
     path.write_text("".join(f"{line}\n" for line in keep), encoding="utf-8")
 
 
+def linkable(box: Box, cfg: GtConfig) -> bool:
+    """Whether a box takes part in linking: every face; a plate only of plate shape (spec §8: the pilot's square lamps
+    and whole bus backs)."""
+    return box.cls != "plate" or (box.width >= cfg.plate_min_aspect * box.height
+                                  and box.width <= cfg.plate_max_width_px)
+
+
+def relink(frames_dir: Path, out_dir: Path, cfg: GtConfig) -> int:
+    """Links the linkable boxes of boxes.jsonl into tracks.jsonl again (no detection); returns the number of tracks."""
+    refs = read_frames_csv(frames_dir)
+    by_frame: dict[int, list[Box]] = defaultdict(list)
+    for d in read_jsonl(Path(out_dir) / BOXES):
+        if linkable(d.box, cfg):
+            by_frame[d.frame].append(d.box)
+    tracks = link_tracks(by_frame, [r.frame for r in refs], cfg.track)
+    write_tracks(Path(out_dir) / TRACKS, refs[0].video, tracks)
+    return len(tracks)
+
+
 def build_candidates(frames_dir: Path, out_dir: Path, finder: Finder, student: dict[int, list[Box]], cfg: GtConfig,
                      limit: int | None = None) -> int:
     """Runs `finder` on every frame of frames.csv not finished yet (at most `limit` in this call), merges its boxes
@@ -140,8 +159,5 @@ def build_candidates(frames_dir: Path, out_dir: Path, finder: Finder, student: d
         done.add(ref.frame)
         count += 1
     if refs and all(r.frame in done for r in refs):
-        by_frame: dict[int, list[Box]] = defaultdict(list)
-        for d in read_jsonl(out_dir / BOXES):
-            by_frame[d.frame].append(d.box)
-        write_tracks(out_dir / TRACKS, refs[0].video, link_tracks(by_frame, [r.frame for r in refs], cfg.track))
+        relink(frames_dir, out_dir, cfg)
     return count

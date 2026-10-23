@@ -61,12 +61,12 @@ def test_a_command_that_does_not_answer_leaves_its_items_unsure(tmp_path):
     assert (j.verdict, j.detail) == ("unsure", "no answer")
 
 
-def _segment(tmp_path, width=40):
+def _segment(tmp_path, width=40, score=0.9):
     images = {}
     for f in (0, 6, 12):
         images[f] = tmp_path / f"{f:06d}.jpg"
         cv2.imwrite(str(images[f]), np.zeros((1080, 1920, 3), np.uint8))
-    boxes = tuple(Box("plate", 100, 100, 100 + width, 112) for _ in range(3))
+    boxes = tuple(Box("plate", 100, 100, 100 + width, 112, score) for _ in range(3))
     return images, [Track(0, "plate", (0, 6, 12), boxes), Track(1, "plate", (0, 6, 12), boxes)]
 
 
@@ -93,6 +93,20 @@ def test_judge_objects_skips_tracks_that_never_reach_must_mask_size(tmp_path):
     runner = _Runner('[{"n": 1, "verdict": "real_readable"}]')
     assert judge_objects(gt, tracks, images, load_config(), runner, "llm:fake") == {}
     assert runner.calls == [] and not (gt / OBJECTS).exists()
+
+
+def test_judge_objects_skips_tracks_no_detector_scored_high_enough(tmp_path):
+    images, tracks = _segment(tmp_path, score=0.29)  # judge_min_score is 0.3
+    gt = tmp_path / "gt"
+    gt.mkdir()
+    runner = _Runner('[{"n": 1, "verdict": "real_readable"}]')
+    assert judge_objects(gt, tracks, images, load_config(), runner, "llm:fake") == {}
+    assert runner.calls == []
+
+
+def test_grids_go_out_as_jpeg(tmp_path):
+    out = grid_image([Item("o0", "plate", (_crop(tmp_path, "a.jpg"),))], 64, tmp_path / "g.jpg")
+    assert out.read_bytes()[:2] == b"\xff\xd8"
 
 
 def test_make_runner_refuses_without_the_llm_switch(monkeypatch):

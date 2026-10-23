@@ -79,7 +79,7 @@ class ClassResult:
 
 
 def _held(a: AuditBox, tracks: list[Track]) -> bool:
-    """Whether some track of the audit box's class has a box on its frame overlapping it by AUDIT_IOU."""
+    """Whether some of these tracks of the audit box's class has a box on its frame overlapping it by AUDIT_IOU."""
     for t in tracks:
         b = t.box_at(a.frame) if t.cls == a.box.cls else None
         if b is not None and iou(b, a.box) >= AUDIT_IOU:
@@ -106,7 +106,8 @@ def evaluate_objects(tracks: list[Track], objects: dict[str, str], frames: dict[
         missed = None
         if audit is not None:
             mine = [a for a in audit if a.box.cls == cls]
-            missed = Rate(sum(not _held(a, tracks) for a in mine), len(mine))
+            judged = [t for t in tracks if object_id(t.id) in objects]  # an unjudged track holds nothing (spec §8)
+            missed = Rate(sum(not _held(a, judged) for a in mine), len(mine))
         out[cls] = ClassResult(cls, readable, tuple(leaks), recall, missed)
     return out
 

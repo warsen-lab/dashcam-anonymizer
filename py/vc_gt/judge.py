@@ -1,7 +1,8 @@
 """The LLM's two questions (spec 2026-10-22 §2 step 4): A, per object, real or not and readable at its best; B, per
 frame vc_redact left a real object unmasked, readable there or not. Verdicts go to objects.jsonl and frames.jsonl in
-vc_hardneg's judgment format, so people's verdicts (judge "human") override them. Objects that never reach the
-must-mask size are not asked about (spec §8): too small to read, they cannot leak."""
+vc_hardneg's judgment format, so people's verdicts (judge "human") override them. Only objects that reach the
+must-mask size and that some detector scored judge_min_score on are asked about (spec §8): the rest are too small to
+read or almost surely not plates and faces; the H3 audit counts any real one among them as missed by all."""
 
 from __future__ import annotations
 
@@ -107,7 +108,7 @@ def ask(items: list[Item], prompt: str, allowed: tuple[str, ...], runner: Runner
 
     def one(b: list[Item]) -> list[Judgment]:
         cls = b[0].cls
-        image = grid_image(b, tile, Path(work_dir) / f"batch_{b[0].id}.png")
+        image = grid_image(b, tile, Path(work_dir) / f"batch_{b[0].id}.jpg")  # JPEG: a seventh of the PNG upload
         out = runner(image, _fill(prompt, {"{count}": str(len(b)), "{cls_zh}": CLS_ZH[cls], "{cls}": cls}), cls)
         answers = parse_answers(out, allowed)
         detail = f"grid of {len(b)}" if answers else ("no answer" if out is None else "no verdicts in the output")
@@ -131,7 +132,8 @@ def _cached(index: dict[str, tuple[Crop, ...]], gt_dir: Path, item_id: str, make
 
 def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cfg: GtConfig, runner: Runner,
                   judge: str) -> Counter:
-    """Question A about every track not judged yet that reaches the must-mask size somewhere."""
+    """Question A about every track not judged yet that reaches the must-mask size somewhere and scores
+    cfg.judge_min_score on some frame."""
     gt_dir = Path(gt_dir)
     if not tracks:
         return Counter()
@@ -141,7 +143,8 @@ def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cf
     items = [Item(object_id(t.id), t.cls,
                   _cached(index, gt_dir, object_id(t.id),
                           lambda t=t: write_object_crops(t, images, gt_dir / "crops" / "objects", cfg)))
-             for t in tracks if object_id(t.id) not in known and ever_must_mask(t, frame_height)]
+             for t in tracks if object_id(t.id) not in known and ever_must_mask(t, frame_height)
+             and max(b.score for b in t.boxes) >= cfg.judge_min_score]
     return ask(items, cfg.llm.object_prompt, OBJECT_VERDICTS, runner, judge, gt_dir / OBJECTS, gt_dir / "llm",
                cfg.llm.batch, cfg.llm.tile, cfg.llm.parallel)
 

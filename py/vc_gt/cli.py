@@ -62,10 +62,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def _candidates(args) -> int:
     from vc_eval.consistency import run_vc_detect
-    from vc_gt.candidates import TeacherFinder, build_candidates
+    from vc_gt.candidates import TeacherFinder, build_candidates, relink
 
     cfg = load_config(args.config)
     refs = read_frames_csv(args.frames)
+    if refs and set(read_persons(args.out)) >= {r.frame for r in refs}:  # every frame found: link again only
+        print(f"relinked: {relink(args.frames, args.out, cfg)} tracks")
+        return 0
     student = run_vc_detect(args.vc_detect, args.student_model, refs, args.out / "student", score=cfg.student_score)
     n = build_candidates(args.frames, args.out, TeacherFinder(cfg, args.device), student, cfg, args.limit)
     done = (args.out / TRACKS).exists()

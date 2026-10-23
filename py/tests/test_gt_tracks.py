@@ -25,13 +25,21 @@ def test_a_gap_of_max_gap_frames_continues_and_one_more_splits():
     assert len(link_tracks(by_frame, order, TrackParams(max_gap=2))) == 2
 
 
-def test_a_fast_small_plate_links_by_centre_distance():
-    assert len(link_tracks({0: [plate(100, w=20)], 1: [plate(125, w=20)]}, [0, 1])) == 1  # 25 px < 1.5 x 20
-    assert len(link_tracks({0: [plate(100, w=20)], 1: [plate(140, w=20)]}, [0, 1])) == 2  # 40 px > 30
+def test_boxes_that_do_not_overlap_enough_never_link():
+    # the 2026-10-23 pilot: linking by centre distance let tracks hop from a plate to a tail light or a barrier
+    assert len(link_tracks({0: [plate(100, w=20)], 1: [plate(115, w=20)]}, [0, 1])) == 2  # IoU 0.14
+    assert len(link_tracks({0: [plate(100, w=20)], 1: [plate(104, w=20)]}, [0, 1])) == 1  # IoU 0.67
 
 
-def test_an_overlapping_box_wins_over_a_merely_close_one():
-    by_frame = {0: [plate(100)], 1: [plate(130), plate(102)]}  # 102 overlaps, 130 is only close
+def test_a_box_more_than_twice_as_wide_or_narrow_starts_a_new_track():
+    by_frame = {0: [Box("plate", 100, 500, 300, 560, 0.9)], 1: [Box("plate", 100, 500, 199, 530, 0.9)]}  # IoU 0.25
+    assert len(link_tracks(by_frame, [0, 1], TrackParams(min_iou=0.2))) == 2  # 99 px is under half of 200 px
+    by_frame = {0: [Box("plate", 100, 500, 300, 560, 0.9)], 1: [Box("plate", 100, 500, 201, 530, 0.9)]}
+    assert len(link_tracks(by_frame, [0, 1], TrackParams(min_iou=0.2))) == 1
+
+
+def test_the_better_overlap_wins():
+    by_frame = {0: [plate(100)], 1: [plate(110), plate(102)]}
     tracks = link_tracks(by_frame, [0, 1])
     assert [b.x1 for b in tracks[0].boxes] == [100, 102]
 
