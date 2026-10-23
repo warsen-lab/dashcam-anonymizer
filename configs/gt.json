@@ -1,0 +1,26 @@
+{
+  "owlv2_score": 0.05,
+  "tile_grid": 2,
+  "tile_overlap": 0.2,
+  "retinaface_score": 0.2,
+  "yunet_score": 0.3,
+  "coco_score": 0.3,
+  "student_score": 0.01,
+  "merge_iou": 0.5,
+  "track": {"min_iou": 0.3, "max_center_dist": 1.5, "max_gap": 3},
+  "crops_per_object": 3,
+  "crop_factor": 3.0,
+  "min_crop_px": 96,
+  "audit": {"objects": 50, "frames": 50, "frames_per_class": 150, "seed": 20261022},
+  "llm": {
+    "name": "codex",
+    "command": ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-c",
+                "model_reasoning_effort=\"low\"", "--image={image}", "{prompt}"],
+    "timeout_s": 180,
+    "parallel": 4,
+    "batch": 4,
+    "tile": 384,
+    "object_prompt": "这张图由 {count} 组小图拼成，每组左上角有黄色编号 1 到 {count}；同一组的几张小图是行车记录仪画面里同一个目标在不同时刻的截图，红框是目标。对每一组判断：红框里是不是真实的{cls_zh}；如果是，其中最清楚的一张，暂停并放大后能不能认出（车牌：能读出大部分字符；人脸：认识这个人的人能认出是谁）。只回答一个 JSON 数组，每组一项：[{\"n\": 编号, \"verdict\": \"real_readable\" | \"real_unreadable\" | \"not_real\" | \"unsure\"}]。拿不准就答 unsure。",
+    "frame_prompt": "这张图由 {count} 张小图拼成，每张左上角有黄色编号 1 到 {count}；每张来自行车记录仪画面，红框里是一块真实的{cls_zh}。对每张判断：暂停并放大这张画面，能不能认出这个{cls_zh}（车牌：能读出大部分字符；人脸：认识这个人的人能认出是谁）。只回答一个 JSON 数组，每张一项：[{\"n\": 编号, \"verdict\": \"readable\" | \"unreadable\" | \"unsure\"}]。拿不准就答 unsure。"
+  }
+}
