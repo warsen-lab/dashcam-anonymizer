@@ -1262,10 +1262,12 @@ def make_runner(cfg: GtConfig) -> tuple[Runner, str]:
     return (lambda image, prompt, cls: command.run(image, prompt, cls)[0]), command.name
 ```
 
+Addendum (2026-10-23, spec §8): `judge_objects` only asks about tracks whose box reaches `vc_eval.metrics.must_mask` size on at least one frame (frame height read from the first image); smaller tracks get no question A and therefore never count. Add `test_judge_objects_skips_tracks_that_never_reach_must_mask_size` (a 10 px wide plate track gets no judgment).
+
 - [ ] **Step 4: Run the tests**
 
 Run: `cd py && ../.venv/bin/python -m pytest -q tests/test_gt_judge.py`
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Step 5: Commit**
 
