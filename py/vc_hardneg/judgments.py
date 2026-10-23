@@ -20,12 +20,13 @@ class Judgment:
     detail: str = ""
 
 
-def append_judgments(path: Path, items: Iterable[Judgment]) -> None:
-    """Appends every item, or none when one has a verdict outside VERDICTS (ValueError)."""
+def append_judgments(path: Path, items: Iterable[Judgment], verdicts: tuple[str, ...] = VERDICTS) -> None:
+    """Appends every item, or none when one has a verdict outside `verdicts` (ValueError). vc_gt passes its own
+    verdict sets (spec 2026-10-22 §2)."""
     items = list(items)
     for j in items:
-        if j.verdict not in VERDICTS:
-            raise ValueError(f"verdict must be one of {VERDICTS}, got {j.verdict!r} for {j.id}")
+        if j.verdict not in verdicts:
+            raise ValueError(f"verdict must be one of {verdicts}, got {j.verdict!r} for {j.id}")
     with Path(path).open("a", encoding="utf-8") as f:
         for j in items:
             f.write(json.dumps(asdict(j), ensure_ascii=False) + "\n")
