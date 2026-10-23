@@ -1,6 +1,7 @@
-"""Per-object leaks and per-frame recall against the vc_gt answer key (spec 2026-10-22 §4): an object leaks when a
-sampled frame shows it readable and the masks leave it uncovered; the bars are 99.9 % without a leak over at least
-3,000 readable real objects, 99.5 % per-frame recall, at most 0.1 % of the people's audit boxes outside every track."""
+"""Per-object and per-frame leaks against the vc_gt answer key (spec 2026-10-22 §4, §10): an object leaks on a sampled
+frame where the masks leave its must-mask-size box uncovered and the redacted frame still shows it readable; the bars
+are 99.9 % without a leak over at least 3,000 readable real objects, 99.5 % of must-mask-size frames without a leak, at
+most 0.1 % of the people's audit boxes outside every judged track."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from vc_eval.metrics import COVERED_FRACTION, Rate, covered_fraction, must_mask
+from vc_eval.metrics import Rate, covered_fraction, must_mask
 from vc_gt.audit import AuditBox
 from vc_gt.crops import leak_frames, write_crop
 from vc_gt.judge import REAL, frame_id, object_id
@@ -21,7 +22,7 @@ from vc_label.contracts import LABEL_CLASSES, Box
 ALPHA = 0.05
 NEEDED_OBJECTS = 3000
 NO_LEAK_PASS = 0.999
-FRAME_RECALL_PASS = 0.995
+FRAME_NO_LEAK_PASS = 0.995
 MISSED_BY_ALL_MAX = 0.001
 AUDIT_IOU = 0.3
 NEIGHBOURS = 5  # original-rate frames either side of a leak whose cover the report shows
@@ -64,7 +65,7 @@ class ClassResult:
     cls: str
     readable: int  # real objects readable on at least one frame
     leaks: tuple[Leak, ...]
-    frame_recall: Rate  # must-mask boxes of real objects on sampled frames, covered
+    frame_no_leak: Rate  # must-mask-size frames of real objects without a leak
     missed_by_all: Rate | None  # hits: audit boxes no track holds; None without an audit
 
     @property
@@ -74,7 +75,7 @@ class ClassResult:
     @property
     def passed(self) -> bool:
         return (self.readable >= NEEDED_OBJECTS and self.no_leak.value >= NO_LEAK_PASS
-                and self.frame_recall.value >= FRAME_RECALL_PASS and self.missed_by_all is not None
+                and self.frame_no_leak.value >= FRAME_NO_LEAK_PASS and self.missed_by_all is not None
                 and self.missed_by_all.total > 0 and self.missed_by_all.value <= MISSED_BY_ALL_MAX)
 
 
@@ -93,13 +94,13 @@ def evaluate_objects(tracks: list[Track], objects: dict[str, str], frames: dict[
     """objects: object id -> final verdict of question A; frames: frame id -> final verdict of question B."""
     out = {}
     for cls in LABEL_CLASSES:
-        readable, leaks, recall = 0, [], Rate()
+        readable, leaks, no_leak = 0, [], Rate()
         for t in (t for t in tracks if t.cls == cls and objects.get(object_id(t.id)) in REAL):
-            for f, b in zip(t.frames, t.boxes):
-                if must_mask(b, frame_height):
-                    recall = recall.add(covered_fraction(b, masks_by_frame.get(f, [])) >= COVERED_FRACTION)
             leaked = tuple(f for f in leak_frames(t, masks_by_frame, frame_height)
                            if frames.get(frame_id(t.id, f)) == "readable")
+            for f, b in zip(t.frames, t.boxes):
+                if must_mask(b, frame_height):
+                    no_leak = no_leak.add(f not in leaked)
             if objects[object_id(t.id)] == "real_readable" or leaked:
                 readable += 1
             if leaked:
@@ -109,7 +110,7 @@ def evaluate_objects(tracks: list[Track], objects: dict[str, str], frames: dict[
             mine = [a for a in audit if a.box.cls == cls]
             judged = [t for t in tracks if object_id(t.id) in objects]  # an unjudged track holds nothing (spec §8)
             missed = Rate(sum(not _held(a, judged) for a in mine), len(mine))
-        out[cls] = ClassResult(cls, readable, tuple(leaks), recall, missed)
+        out[cls] = ClassResult(cls, readable, tuple(leaks), no_leak, missed)
     return out
 
 
@@ -135,15 +136,15 @@ def _pct(rate: Rate) -> str:
 
 def write_report(results: dict[str, ClassResult], error_rates: dict[str, Rate], out_dir: Path, tracks: list[Track],
                  images: dict[int, Path], masks_by_frame: dict[int, list[Box]]) -> Path:
-    """out_dir/summary.md with the table, the model error rates and every leak; a crop per leaked frame in
-    out_dir/leaks/."""
+    """out_dir/summary.md with the table, the model error rates and every leak; a crop per leaked frame (from `images`,
+    the redacted frames: what a viewer sees) in out_dir/leaks/."""
     import cv2
 
     out_dir = Path(out_dir)
     (out_dir / "leaks").mkdir(parents=True, exist_ok=True)
     by_id = {t.id: t for t in tracks}
-    lines = ["# 按目标泄露与按帧召回", "",
-             "| 类别 | 看得清的真目标 | 泄露 | 不泄露率（95% 区间） | 按帧召回（95% 区间） | 大家一起漏 | 达标 |",
+    lines = ["# 按目标与按帧泄露（在打码后的画面上判断）", "",
+             "| 类别 | 看得清的真目标 | 泄露 | 按目标不泄露率（95% 区间） | 按帧不泄露率（95% 区间） | 大家一起漏 | 达标 |",
              "|---|---|---|---|---|---|---|"]
     for cls, r in results.items():
         missed = _pct(r.missed_by_all) if r.missed_by_all is not None else "未抽查"
@@ -151,7 +152,7 @@ def write_report(results: dict[str, ClassResult], error_rates: dict[str, Rate], 
         flag = " ⚠ 高于 0.1%，主指标会被高估" if high else ""
         verdict = ("是" if r.passed else "否") if r.readable >= NEEDED_OBJECTS else \
             f"不下结论（差 {NEEDED_OBJECTS - r.readable} 个目标）"
-        lines.append(f"| {cls} | {r.readable} | {len(r.leaks)} | {_pct(r.no_leak)} | {_pct(r.frame_recall)} | "
+        lines.append(f"| {cls} | {r.readable} | {len(r.leaks)} | {_pct(r.no_leak)} | {_pct(r.frame_no_leak)} | "
                      f"{missed}{flag} | {verdict} |")
     lines += ["", "## 模型出错率（H2 抽核里被人工推翻的比例）", ""]
     lines += [f"- {name}：{_pct(rate)}" for name, rate in error_rates.items()]

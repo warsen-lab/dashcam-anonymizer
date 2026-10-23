@@ -39,6 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     j.add_argument("--gt", type=Path, required=True)
     j.add_argument("--frames", type=Path, required=True)
     j.add_argument("--masks", type=Path, required=True, help="masks.jsonl of the vc_redact run under test")
+    j.add_argument("--redacted-frames", type=Path, help="the same frames of that run's redacted video (question B)")
     j.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     j.add_argument("--stage", choices=["objects", "frames", "both"], default="both")
     r = sub.add_parser("review", help="local pages for people: h1 (leaks and unsure) or h2 (sample of model verdicts)")
@@ -81,13 +82,16 @@ def _judge(args) -> int:
 
     cfg = load_config(args.config)
     runner, name = make_runner(cfg)
+    if args.stage in ("frames", "both") and args.redacted_frames is None:
+        raise ValueError("question B needs --redacted-frames: it is asked on what the redacted video shows")
     tracks = read_tracks(args.gt / TRACKS)
     images = {r.frame: r.image for r in read_frames_csv(args.frames)}
     if args.stage in ("objects", "both"):
         print(f"question A: {dict(judge_objects(args.gt, tracks, images, cfg, runner, name))}")
     if args.stage in ("frames", "both"):
         _, masks = read_masks(args.masks)
-        print(f"question B: {dict(judge_frames(args.gt, tracks, images, masks, cfg, runner, name))}")
+        redacted = {r.frame: r.image for r in read_frames_csv(args.redacted_frames)}
+        print(f"question B: {dict(judge_frames(args.gt, tracks, redacted, masks, cfg, runner, name))}")
     return 0
 
 

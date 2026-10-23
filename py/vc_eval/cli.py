@@ -46,9 +46,10 @@ def _parser() -> argparse.ArgumentParser:
     n.add_argument("--candidate", type=Path, required=True, help="masks.jsonl")
     n.add_argument("--out", type=Path, required=True, help="crops of the new misses go here")
     n.add_argument("--recall-target", default="")
-    o = sub.add_parser("objects", help="per-object leaks and per-frame recall against a vc_gt answer key")
+    o = sub.add_parser("objects", help="per-object and per-frame leaks against a vc_gt answer key")
     o.add_argument("--gt", type=Path, required=True, help="data/gt/<stem>")
     o.add_argument("--frames", type=Path, required=True, help="the 10 fps frames the answer key was built on")
+    o.add_argument("--redacted-frames", type=Path, required=True, help="the same frames of the redacted video")
     o.add_argument("--masks", type=Path, required=True, help="masks.jsonl of the vc_redact run under test")
     o.add_argument("--out", type=Path, required=True)
     r = sub.add_parser("run", help="detection-rate sweep, summary and spot-check page")
@@ -209,10 +210,11 @@ def _objects(args) -> int:
     sample = json.loads((args.gt / H2_SAMPLE).read_text()) if (args.gt / H2_SAMPLE).exists() else {}
     errors = {"问题 A（真不真、认不认得出）": model_error_rate(objects_j, set(sample.get("objects", []))),
               "问题 B（未打码帧认不认得出）": model_error_rate(frames_j, set(sample.get("frames", [])))}
-    page = write_report(results, errors, args.out, tracks, images, masks)
+    redacted = {r.frame: r.image for r in read_frames_csv(args.redacted_frames)}
+    page = write_report(results, errors, args.out, tracks, redacted, masks)
     for cls, r in results.items():
-        print(f"{cls}: {r.readable} readable real objects, {len(r.leaks)} leaked, frame recall "
-              f"{r.frame_recall.hits}/{r.frame_recall.total}, passed {r.passed}")
+        print(f"{cls}: {r.readable} readable real objects, {len(r.leaks)} leaked, frames without a leak "
+              f"{r.frame_no_leak.hits}/{r.frame_no_leak.total}, passed {r.passed}")
     print(f"report: {page}")
     return 0
 

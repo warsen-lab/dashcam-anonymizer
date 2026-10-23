@@ -46,6 +46,13 @@ def test_judge_refuses_without_the_llm_switch(tmp_path, monkeypatch, capsys):
     assert "VC_HARDNEG_ALLOW_LLM" in capsys.readouterr().err
 
 
+def test_judge_frames_needs_the_redacted_frames(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VC_HARDNEG_ALLOW_LLM", "1")
+    frames, gt, masks = _setup(tmp_path)
+    assert main(["judge", "--stage", "frames", "--gt", str(gt), "--frames", str(frames), "--masks", str(masks)]) == 2
+    assert "--redacted-frames" in capsys.readouterr().err
+
+
 def test_review_h1_then_import_people_verdicts(tmp_path):
     frames, gt, masks = _setup(tmp_path)
     append_judgments(gt / OBJECTS, [Judgment("o0", "unsure", "llm:x")], verdicts=OBJECT_VERDICTS)
@@ -86,9 +93,9 @@ def test_vc_eval_objects_reports_a_leak_from_the_answer_key(tmp_path, capsys):
     frames, gt, masks = _setup(tmp_path)
     append_judgments(gt / OBJECTS, [Judgment("o0", "real_readable", "llm:x")], verdicts=OBJECT_VERDICTS)
     append_judgments(gt / FRAMES, [Judgment("o0@6", "readable", "llm:x")], verdicts=FRAME_VERDICTS)
-    assert eval_main(["objects", "--gt", str(gt), "--frames", str(frames), "--masks", str(masks),
-                      "--out", str(tmp_path / "report")]) == 0
-    assert "plate: 1 readable real objects, 1 leaked, frame recall 1/2" in capsys.readouterr().out
+    assert eval_main(["objects", "--gt", str(gt), "--frames", str(frames), "--redacted-frames", str(frames),
+                      "--masks", str(masks), "--out", str(tmp_path / "report")]) == 0
+    assert "plate: 1 readable real objects, 1 leaked, frames without a leak 1/2" in capsys.readouterr().out
     assert (tmp_path / "report" / "leaks" / "o0@000006.jpg").exists()
 
 

@@ -14,6 +14,7 @@ def test_the_repository_config_holds_the_spec_values():
     assert c.crops_per_object == 3
     assert (c.audit.objects, c.audit.frames, c.audit.frames_per_class) == (50, 50, 150)
     assert "{count}" in c.llm.object_prompt and "{cls_zh}" in c.llm.frame_prompt
+    assert "马赛克" in c.llm.frame_prompt  # question B is asked on the redacted frame (spec §10)
     assert c.llm.command_config().command == c.llm.command
 
 

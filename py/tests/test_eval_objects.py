@@ -20,7 +20,7 @@ def plate(x, w=40):
     return Box("plate", x, 500, x + w, 512)
 
 
-def test_leaks_readable_objects_and_frame_recall():
+def test_leaks_readable_objects_and_frames_without_a_leak():
     tracks = [Track(0, "plate", (0, 6, 12), (plate(100), plate(100), plate(100))),  # real, frame 6 unmasked, readable
               Track(1, "plate", (0, 6), (plate(300), plate(300))),  # real_unreadable, all masked
               Track(2, "plate", (0,), (plate(600),)),  # not real
@@ -35,7 +35,7 @@ def test_leaks_readable_objects_and_frame_recall():
     r = evaluate_objects(tracks, objects, frames, masks, 1080)["plate"]
     assert r.readable == 1 and r.leaks == (Leak(0, (6,)),)
     assert (r.no_leak.hits, r.no_leak.total) == (0, 1)
-    assert (r.frame_recall.hits, r.frame_recall.total) == (4, 5)  # tracks 0 and 1; track 3 is under 24 px wide
+    assert (r.frame_no_leak.hits, r.frame_no_leak.total) == (4, 5)  # tracks 0 and 1; track 3 is under 24 px wide
     assert r.missed_by_all is None and not r.passed
 
 

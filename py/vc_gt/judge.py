@@ -152,7 +152,8 @@ def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cf
 def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], masks_by_frame: dict[int, list[Box]],
                  cfg: GtConfig, runner: Runner, judge: str) -> Counter:
     """Question B about every unmasked frame at must-mask size (crops.leak_frames) of every track judged real (by the
-    latest verdict) not judged yet."""
+    latest verdict) not judged yet. `images` are the redacted video's frames: the question is whether the mosaic left
+    the object readable (spec §10), so a loose candidate box around a masked plate is no leak."""
     gt_dir = Path(gt_dir)
     if not tracks:
         return Counter()

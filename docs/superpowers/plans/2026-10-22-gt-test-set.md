@@ -2312,6 +2312,10 @@ git commit -m "feat: python -m vc_gt builds a segment's answer key step by step"
 
 Done before Task 10 Step 4, test-first: linking by overlap only with a width ratio cap (`track.max_size_ratio` 2.0 replaces `max_center_dist`); plate boxes linked only with `plate_min_aspect` 1.2 and `plate_max_width_px` 400 (`candidates.linkable`, `candidates.relink`); `judge_objects` also needs `judge_min_score` 0.3 on some frame; LLM grids are JPEG; `vc_eval objects` counts an audit box held only by an unjudged track as missed by all; `vc_gt candidates` on a finished segment only relinks.
 
+### Addendum (2026-10-23, spec §10): question B on the redacted frames
+
+Done test-first before resending question B: `vc_gt judge --redacted-frames` (needed for question B) crops the redacted video's frames; the frame prompt asks whether the object is still readable under the mosaic; `vc_eval objects` reports frames without a leak (`ClassResult.frame_no_leak`, bar 99.5 %) instead of per-frame recall and takes `--redacted-frames` for its leak crops. Extract the redacted frames with `build/cpp-release/vc_extract --input <redacted mp4> --out data/gt-frames-redacted --fps 10 --max-fps 10` and check the frame numbers equal the original extract's.
+
 ### Task 10: Pilot on sg_drive_60s (stops for the user twice)
 
 This task runs the real pipeline; it writes no code unless the pilot shows a bug (then fix it test-first in the module concerned and commit before going on).
