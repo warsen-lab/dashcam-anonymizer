@@ -1,5 +1,5 @@
-"""python -m vc_eval coverage | temporal | integrity | viewing | run | falsepos | newmisses (proxy-validation spec §6,
-spec 2026-10-19 §5, spec 2026-10-21 §6)."""
+"""python -m vc_eval coverage | temporal | integrity | viewing | run | falsepos | newmisses | objects (proxy-validation
+spec §6, spec 2026-10-19 §5, spec 2026-10-21 §6, spec 2026-10-22 §4)."""
 
 from __future__ import annotations
 
@@ -46,6 +46,11 @@ def _parser() -> argparse.ArgumentParser:
     n.add_argument("--candidate", type=Path, required=True, help="masks.jsonl")
     n.add_argument("--out", type=Path, required=True, help="crops of the new misses go here")
     n.add_argument("--recall-target", default="")
+    o = sub.add_parser("objects", help="per-object leaks and per-frame recall against a vc_gt answer key")
+    o.add_argument("--gt", type=Path, required=True, help="data/gt/<stem>")
+    o.add_argument("--frames", type=Path, required=True, help="the 10 fps frames the answer key was built on")
+    o.add_argument("--masks", type=Path, required=True, help="masks.jsonl of the vc_redact run under test")
+    o.add_argument("--out", type=Path, required=True)
     r = sub.add_parser("run", help="detection-rate sweep, summary and spot-check page")
     r.add_argument("--stems", required=True, help="comma-separated held-out stems")
     r.add_argument("--model", type=Path, required=True)
@@ -181,11 +186,42 @@ def _newmisses(args) -> int:
     return 0 if not misses else 1
 
 
+def _objects(args) -> int:
+    from vc_eval.objects import evaluate_objects, model_error_rate, write_report
+    from vc_eval.records import read_masks
+    from vc_gt.audit import AUDIT, H2_SAMPLE, read_audit
+    from vc_gt.candidates import TRACKS
+    from vc_gt.judge import FRAMES, OBJECTS
+    from vc_gt.tracks import read_tracks
+    from vc_hardneg.judgments import read_judgments, resolve
+    from vc_label.contracts import read_frames_csv
+    from vc_label.review import image_size
+
+    tracks = read_tracks(args.gt / TRACKS)
+    refs = read_frames_csv(args.frames)
+    images = {r.frame: r.image for r in refs}
+    _, masks = read_masks(args.masks)
+    objects_j, frames_j = read_judgments(args.gt / OBJECTS), read_judgments(args.gt / FRAMES)
+    objects = {i: j.verdict for i, j in resolve(objects_j).items()}
+    frames = {i: j.verdict for i, j in resolve(frames_j).items()}
+    audit = read_audit(args.gt / AUDIT)[1] if (args.gt / AUDIT).exists() else None
+    results = evaluate_objects(tracks, objects, frames, masks, image_size(refs[0].image)[1], audit)
+    sample = json.loads((args.gt / H2_SAMPLE).read_text()) if (args.gt / H2_SAMPLE).exists() else {}
+    errors = {"问题 A（真不真、认不认得出）": model_error_rate(objects_j, set(sample.get("objects", []))),
+              "问题 B（未打码帧认不认得出）": model_error_rate(frames_j, set(sample.get("frames", [])))}
+    page = write_report(results, errors, args.out, tracks, images, masks)
+    for cls, r in results.items():
+        print(f"{cls}: {r.readable} readable real objects, {len(r.leaks)} leaked, frame recall "
+              f"{r.frame_recall.hits}/{r.frame_recall.total}, passed {r.passed}")
+    print(f"report: {page}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         handlers = {"coverage": _coverage, "temporal": _temporal, "integrity": _integrity, "viewing": _viewing, "run": _run,
-                    "falsepos": _falsepos, "newmisses": _newmisses}
+                    "falsepos": _falsepos, "newmisses": _newmisses, "objects": _objects}
         return handlers[args.command](args)
     except (ValueError, OSError, subprocess.CalledProcessError) as e:
         print(f"vc_eval: {e}", file=sys.stderr)
