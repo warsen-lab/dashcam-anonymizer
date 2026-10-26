@@ -111,3 +111,10 @@ def test_candidates_on_a_finished_segment_only_relinks(tmp_path, capsys):
                  "--vc-detect", str(tmp_path / "no_vc_detect")]) == 0  # neither vc_detect nor a teacher is loaded
     assert "relinked: 1 tracks" in capsys.readouterr().out
     assert [t.frames for t in read_tracks(gt / TRACKS)] == [(0, 6)]
+
+
+def test_calibrate_refuses_without_the_llm_switch(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("VC_HARDNEG_ALLOW_LLM", raising=False)
+    _, gt, _ = _setup(tmp_path)
+    assert main(["calibrate", "--gt", str(gt), "--sample", "10", "--out", str(tmp_path / "c")]) == 2
+    assert "VC_HARDNEG_ALLOW_LLM" in capsys.readouterr().err and not (tmp_path / "c").exists()

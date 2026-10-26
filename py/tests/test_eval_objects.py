@@ -45,6 +45,12 @@ def test_an_unmasked_frame_under_must_mask_size_is_no_leak_even_if_judged_readab
     assert r.leaks == () and r.readable == 0
 
 
+def test_a_frame_whose_box_holds_no_plate_is_no_leak():
+    tracks = [Track(0, "plate", (0, 6), (plate(100), plate(100)))]
+    r = evaluate_objects(tracks, {"o0": "real_readable"}, {"o0@6": "not_target"}, {0: [plate(100)]}, 1080)["plate"]
+    assert r.leaks == () and (r.frame_no_leak.hits, r.frame_no_leak.total) == (2, 2)
+
+
 def test_missed_by_all_counts_audit_boxes_no_judged_track_holds():
     tracks = [Track(0, "plate", (6,), (plate(100),)), Track(1, "plate", (6,), (plate(500),))]  # o1 never judged
     audit = [AuditBox(6, plate(102)), AuditBox(6, plate(900)), AuditBox(6, plate(502))]

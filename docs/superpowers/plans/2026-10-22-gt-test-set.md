@@ -2316,6 +2316,10 @@ Done before Task 10 Step 4, test-first: linking by overlap only with a width rat
 
 Done test-first before resending question B: `vc_gt judge --redacted-frames` (needed for question B) crops the redacted video's frames; the frame prompt asks whether the object is still readable under the mosaic; `vc_eval objects` reports frames without a leak (`ClassResult.frame_no_leak`, bar 99.5 %) instead of per-frame recall and takes `--redacted-frames` for its leak crops. Extract the redacted frames with `build/cpp-release/vc_extract --input <redacted mp4> --out data/gt-frames-redacted --fps 10 --max-fps 10` and check the frame numbers equal the original extract's.
 
+### Addendum (2026-10-26, spec §11): per-crop question A, not_target, calibration
+
+Done test-first after the pilot's people review: `FRAME_VERDICTS` and the frame page gain `not_target`; `judge_objects` asks about each crop on its own (`object_crops.jsonl`) and appends each object's `aggregate` to `objects.jsonl`; `vc_gt calibrate --gt <dir> --config <variant> --sample N --out <new dir>` compares a way of asking with the people's verdicts (`vc_gt/calibrate.py`, pass at <= 2 % overturned among answered). Scaling up waits for a variant that passes.
+
 ### Task 10: Pilot on sg_drive_60s (stops for the user twice)
 
 This task runs the real pipeline; it writes no code unless the pilot shows a bug (then fix it test-first in the module concerned and commit before going on).

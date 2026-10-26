@@ -19,7 +19,7 @@ H2_SAMPLE = "h2_sample.json"
 AUDIT_FRAMES = "audit_frames.json"
 AUDIT = "audit.jsonl"
 OBJECT_CHOICES = [("real_readable", "真的，能认出"), ("real_unreadable", "真的，认不出"), ("not_real", "不是")]
-FRAME_CHOICES = [("readable", "能认出"), ("unreadable", "认不出")]
+FRAME_CHOICES = [("readable", "能认出"), ("unreadable", "认不出"), ("not_target", "框里不是车牌/人脸")]
 
 
 @dataclass(frozen=True)

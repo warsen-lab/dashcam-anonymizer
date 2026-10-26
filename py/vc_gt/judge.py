@@ -28,15 +28,29 @@ from vc_label.contracts import Box
 from vc_label.review import image_size
 
 OBJECT_VERDICTS = ("real_readable", "real_unreadable", "not_real", "unsure")
-FRAME_VERDICTS = ("readable", "unreadable", "unsure")
+FRAME_VERDICTS = ("readable", "unreadable", "not_target", "unsure")  # not_target: the box holds no plate / face (§11)
 REAL = ("real_readable", "real_unreadable")
 OBJECTS = "objects.jsonl"
+OBJECT_CROPS = "object_crops.jsonl"  # question A per crop (spec §11); objects.jsonl holds what they add up to
 FRAMES = "frames.jsonl"
 Runner = Callable[[Path, str, str], "str | None"]  # (grid image, prompt, class) -> the command's stdout
 
 
 def object_id(track_id: int) -> str:
     return f"o{track_id}"
+
+
+def crop_id(object_id_: str, k: int) -> str:
+    return f"{object_id_}#{k}"
+
+
+def aggregate(verdicts: list[str]) -> str:
+    """One object's verdict from its crops' (spec §11): a track may hold other things too, so any real crop makes it
+    real (readable over unreadable); it is not real only when every crop says so; else unsure."""
+    for v in ("real_readable", "real_unreadable"):
+        if v in verdicts:
+            return v
+    return "not_real" if verdicts and all(v == "not_real" for v in verdicts) else "unsure"
 
 
 def frame_id(track_id: int, frame: int) -> str:
@@ -133,20 +147,38 @@ def _cached(index: dict[str, tuple[Crop, ...]], gt_dir: Path, item_id: str, make
 def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cfg: GtConfig, runner: Runner,
                   judge: str) -> Counter:
     """Question A about every track not judged yet that reaches the must-mask size somewhere and scores
-    cfg.judge_min_score on some frame."""
+    cfg.judge_min_score on some frame: each of its crops on its own (object_crops.jsonl, resumable), then the
+    aggregate per object to objects.jsonl. Returns counts of the objects' verdicts."""
     gt_dir = Path(gt_dir)
     if not tracks:
         return Counter()
     frame_height = image_size(next(iter(images.values())))[1]
     known = resolve(read_judgments(gt_dir / OBJECTS))
     index = read_crop_index(gt_dir / CROPS_INDEX)
-    items = [Item(object_id(t.id), t.cls,
-                  _cached(index, gt_dir, object_id(t.id),
-                          lambda t=t: write_object_crops(t, images, gt_dir / "crops" / "objects", cfg)))
-             for t in tracks if object_id(t.id) not in known and ever_must_mask(t, frame_height)
-             and max(b.score for b in t.boxes) >= cfg.judge_min_score]
-    return ask(items, cfg.llm.object_prompt, OBJECT_VERDICTS, runner, judge, gt_dir / OBJECTS, gt_dir / "llm",
-               cfg.llm.batch, cfg.llm.tile, cfg.llm.parallel)
+    pending = {object_id(t.id): (t.cls, _cached(index, gt_dir, object_id(t.id),
+                                               lambda t=t: write_object_crops(t, images, gt_dir / "crops" / "objects",
+                                                                              cfg)))
+               for t in tracks if object_id(t.id) not in known and ever_must_mask(t, frame_height)
+               and max(b.score for b in t.boxes) >= cfg.judge_min_score}
+    return ask_per_crop(gt_dir, pending, cfg, runner, judge)
+
+
+def ask_per_crop(gt_dir: Path, pending: dict[str, tuple[str, tuple[Crop, ...]]], cfg: GtConfig, runner: Runner,
+                  judge: str, objects_path: Path | None = None) -> Counter:
+    """Asks question A about every crop of the pending objects (object id -> class, crops) on its own, then appends
+    each object's aggregate to objects_path (default gt_dir/objects.jsonl)."""
+    items = [Item(crop_id(oid, k), cls, (crop,)) for oid, (cls, crops) in pending.items() for k, crop in enumerate(crops)]
+    ask(items, cfg.llm.object_prompt, OBJECT_VERDICTS, runner, judge, gt_dir / OBJECT_CROPS, gt_dir / "llm",
+        cfg.llm.batch, cfg.llm.tile, cfg.llm.parallel)
+    per_crop = resolve(read_judgments(gt_dir / OBJECT_CROPS))
+    done = []
+    for oid, (_, crops) in pending.items():
+        answers = [per_crop[crop_id(oid, k)].verdict for k in range(len(crops)) if crop_id(oid, k) in per_crop]
+        if len(answers) == len(crops):
+            done.append(Judgment(oid, aggregate(answers), judge, None, "per crop: " + ",".join(answers)))
+    if done:
+        append_judgments(objects_path or gt_dir / OBJECTS, done, verdicts=OBJECT_VERDICTS)
+    return Counter(j.verdict for j in done)
 
 
 def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], masks_by_frame: dict[int, list[Box]],

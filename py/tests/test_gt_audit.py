@@ -42,6 +42,12 @@ def test_choice_page_copies_crops_and_holds_the_choices(tmp_path):
     assert '"o3"' in text and "real_readable" in text and "img/o3_0.jpg" in text and "H1 车牌" in text
 
 
+def test_people_can_say_a_frame_holds_no_plate_or_face():
+    from vc_gt.audit import FRAME_CHOICES
+
+    assert "not_target" in [v for v, _ in FRAME_CHOICES]
+
+
 def test_import_choices_refuses_unknown_ids_and_verdicts(tmp_path):
     f = tmp_path / "e.json"
     f.write_text(json.dumps([{"id": "o1", "verdict": "readable"}]))

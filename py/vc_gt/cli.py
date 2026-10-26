@@ -1,5 +1,6 @@
-"""python -m vc_gt candidates | judge | review | annotate | import-human (spec 2026-10-22 §2): build the answer key of
-one held-out segment in data/gt/<stem>/; `python -m vc_eval objects` measures a vc_redact run against it."""
+"""python -m vc_gt candidates | judge | review | annotate | import-human | calibrate (spec 2026-10-22 §2, §11): build
+the answer key of one held-out segment in data/gt/<stem>/; `python -m vc_eval objects` measures a vc_redact run
+against it."""
 
 from __future__ import annotations
 
@@ -54,6 +55,12 @@ def _parser() -> argparse.ArgumentParser:
     a.add_argument("--frames", type=Path, required=True)
     a.add_argument("--out", type=Path, required=True)
     a.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    k = sub.add_parser("calibrate", help="question A on a sample of the objects people judged, vs their verdicts")
+    k.add_argument("--gt", type=Path, required=True)
+    k.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="the way of asking to try")
+    k.add_argument("--sample", type=int, required=True)
+    k.add_argument("--seed", type=int, default=20261026)
+    k.add_argument("--out", type=Path, required=True, help="a new directory for this try")
     i = sub.add_parser("import-human", help="append a page's export as people's verdicts (or the audit boxes)")
     i.add_argument("--gt", type=Path, required=True)
     i.add_argument("--file", type=Path, required=True)
@@ -175,10 +182,24 @@ def _import(args) -> int:
     return 0
 
 
+def _calibrate(args) -> int:
+    from vc_gt.calibrate import calibrate
+
+    cfg = load_config(args.config)
+    runner, name = make_runner(cfg)
+    cls_of = {object_id(t.id): t.cls for t in read_tracks(args.gt / TRACKS)}
+    r = calibrate(args.gt, cls_of, cfg, runner, name, args.sample, args.seed, args.out)
+    rate = "n/a" if r["overturn_rate"] is None else f"{r['overturn_rate']:.1%}"
+    print(f"calibrate: {r['overturned']}/{r['answered']} answered overturned ({rate}), {r['unsure']} unsure, "
+          f"real called not real {r['real_called_not_real']}, readable called unreadable "
+          f"{r['readable_called_unreadable']}; passed {r['passed']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {"candidates": _candidates, "judge": _judge, "review": _review, "annotate": _annotate,
-                "import-human": _import}
+                "import-human": _import, "calibrate": _calibrate}
     try:
         return handlers[args.command](args)
     except (ValueError, OSError, subprocess.CalledProcessError) as e:  # OSError covers PermissionError (no LLM switch)
