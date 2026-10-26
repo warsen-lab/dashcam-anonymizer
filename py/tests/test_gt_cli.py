@@ -8,7 +8,7 @@ from vc_gt.audit import AUDIT, AUDIT_FRAMES, H2_SAMPLE
 from vc_gt.candidates import PROCESSED, TRACKS
 from vc_gt.cli import main
 from vc_gt.config import load_config
-from vc_gt.crops import CROPS_INDEX, append_crop_index, write_object_crops
+from vc_gt.crops import CROPS_INDEX, append_crop_index, read_crop_index, write_object_crops
 from vc_gt.judge import FRAME_VERDICTS, FRAMES, OBJECT_VERDICTS, OBJECTS
 from vc_gt.tracks import Track, write_tracks
 from vc_hardneg.judgments import Judgment, append_judgments, read_judgments
@@ -118,3 +118,25 @@ def test_calibrate_refuses_without_the_llm_switch(tmp_path, monkeypatch, capsys)
     _, gt, _ = _setup(tmp_path)
     assert main(["calibrate", "--gt", str(gt), "--sample", "10", "--out", str(tmp_path / "c")]) == 2
     assert "VC_HARDNEG_ALLOW_LLM" in capsys.readouterr().err and not (tmp_path / "c").exists()
+
+
+def test_h1_shows_a_readable_frame_even_of_an_object_question_a_called_not_real(tmp_path):
+    frames, gt, masks = _setup(tmp_path)
+    append_judgments(gt / OBJECTS, [Judgment("o0", "not_real", "llm:x")], verdicts=OBJECT_VERDICTS)
+    append_judgments(gt / FRAMES, [Judgment("o0@6", "readable", "llm:x")], verdicts=FRAME_VERDICTS)
+    append_crop_index(gt / CROPS_INDEX, "o0@6", read_crop_index(gt / CROPS_INDEX)["o0"][:1])
+    assert main(["review", "--gt", str(gt), "--frames", str(frames), "--masks", str(masks), "--set", "h1",
+                 "--out", str(tmp_path / "page")]) == 0
+    assert '"o0@6"' in (tmp_path / "page" / "frames" / "index.html").read_text(encoding="utf-8")
+
+
+def test_vc_eval_objects_lists_leaks_of_any_track(tmp_path, capsys):
+    from vc_eval.cli import main as eval_main
+
+    frames, gt, masks = _setup(tmp_path)
+    append_judgments(gt / OBJECTS, [Judgment("o0", "not_real", "llm:x")], verdicts=OBJECT_VERDICTS)
+    append_judgments(gt / FRAMES, [Judgment("o0@6", "readable", "human")], verdicts=FRAME_VERDICTS)
+    assert eval_main(["objects", "--gt", str(gt), "--frames", str(frames), "--redacted-frames", str(frames),
+                      "--masks", str(masks), "--out", str(tmp_path / "report")]) == 0
+    assert "leaks found on any candidate: plate 1, face 0" in capsys.readouterr().out
+    assert "o0 第 6 帧" in (tmp_path / "report" / "summary.md").read_text(encoding="utf-8")

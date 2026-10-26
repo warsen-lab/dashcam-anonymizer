@@ -103,7 +103,7 @@ def _segment(tmp_path, width=40, score=0.9):
     return images, [Track(0, "plate", (0, 6, 12), boxes), Track(1, "plate", (0, 6, 12), boxes)]
 
 
-def test_judge_objects_then_frames_asks_only_about_unmasked_frames_of_real_objects(tmp_path):
+def test_judge_objects_then_frames_asks_about_the_unmasked_frames(tmp_path):
     images, tracks = _segment(tmp_path)
     gt, cfg = tmp_path / "gt", load_config()
     gt.mkdir()
@@ -117,7 +117,8 @@ def test_judge_objects_then_frames_asks_only_about_unmasked_frames_of_real_objec
     runner = _Runner('[{"n": 1, "verdict": "readable"}, {"n": 2, "verdict": "unreadable"}]')
     judge_frames(gt, tracks, images, masks, cfg, runner, "llm:fake")
     assert {k: v.verdict for k, v in resolve(read_judgments(gt / FRAMES)).items()} == {
-        frame_id(0, 6): "readable", frame_id(0, 12): "unreadable"}
+        frame_id(0, 6): "readable", frame_id(0, 12): "unreadable",  # o1 (not real) too: answers 3, 4 missing
+        frame_id(1, 6): "unsure", frame_id(1, 12): "unsure"}
     assert (gt / "crops" / "frames" / "o0@000006.jpg").exists()
 
 
@@ -172,3 +173,24 @@ def test_an_interrupted_object_is_finished_without_asking_its_judged_crops_again
     runner = _PerObject({"o0": "real_unreadable", "o1": "not_real"})
     judge_objects(gt, tracks[:1], images, _one_per_call(load_config()), runner, "llm:fake")
     assert len(runner.calls) == 2 and resolve(read_judgments(gt / OBJECTS))["o0"].verdict == "real_unreadable"
+
+
+def test_question_b_is_asked_about_every_candidate_whatever_question_a_said(tmp_path):
+    from vc_hardneg.judgments import Judgment, append_judgments
+
+    images, tracks = _segment(tmp_path)
+    gt = tmp_path / "gt"
+    gt.mkdir()
+    append_judgments(gt / OBJECTS, [Judgment("o0", "not_real", "llm:x")], verdicts=OBJECT_VERDICTS)  # o1 never asked
+    runner = _PerObject({"o0": "readable", "o1": "unreadable"})
+    judge_frames(gt, tracks, images, {}, _one_per_call(load_config()), runner, "llm:fake")
+    assert {k: v.verdict for k, v in resolve(read_judgments(gt / FRAMES)).items()} == {
+        frame_id(0, f): "readable" for f in (0, 6, 12)} | {frame_id(1, f): "unreadable" for f in (0, 6, 12)}
+
+
+def test_question_b_skips_candidates_question_a_would_skip(tmp_path):
+    images, tracks = _segment(tmp_path, score=0.29)
+    gt = tmp_path / "gt"
+    gt.mkdir()
+    runner = _PerObject({"o0": "readable", "o1": "readable"})
+    assert judge_frames(gt, tracks, images, {}, _one_per_call(load_config()), runner, "llm:fake") == {}

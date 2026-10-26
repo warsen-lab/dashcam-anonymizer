@@ -1,7 +1,7 @@
 import pytest
 
 from vc_eval.metrics import Rate
-from vc_eval.objects import ClassResult, Leak, clopper_pearson, evaluate_objects, model_error_rate
+from vc_eval.objects import ClassResult, Leak, clopper_pearson, evaluate_objects, find_leaks, model_error_rate
 from vc_gt.audit import AuditBox
 from vc_gt.tracks import Track
 from vc_hardneg.judgments import Judgment
@@ -90,3 +90,11 @@ def test_the_report_lists_the_table_the_error_rates_and_each_leak_with_its_crop(
     text = page.read_text(encoding="utf-8")
     assert "不下结论（差 2999 个目标）" in text and "未抽查" in text and "问题 A：2.00%" in text
     assert "leaks/o0@000006.jpg" in text and (tmp_path / "out" / "leaks" / "o0@000006.jpg").exists()
+
+
+def test_find_leaks_needs_no_question_a():
+    tracks = [Track(0, "plate", (0, 6), (plate(100), plate(100))), Track(1, "plate", (6,), (plate(500, w=10),)),
+              Track(2, "face", (6,), (Box("face", 10, 10, 40, 50),))]
+    frames = {"o0@6": "readable", "o1@6": "readable", "o2@6": "not_target"}
+    leaks = find_leaks(tracks, frames, {0: [plate(100)]}, 1080)
+    assert leaks == {"plate": (Leak(0, (6,)),), "face": ()}  # o1 is under must-mask size, o2 is no face

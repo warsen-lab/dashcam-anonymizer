@@ -62,6 +62,12 @@ def ever_must_mask(track: Track, frame_height: int) -> bool:
     return any(must_mask(b, frame_height) for b in track.boxes)
 
 
+def is_candidate(track: Track, frame_height: int, cfg: GtConfig) -> bool:
+    """Whether the questions are asked about the track at all: it reaches the must-mask size and some detector scored
+    it cfg.judge_min_score (spec §8, §9)."""
+    return ever_must_mask(track, frame_height) and max(b.score for b in track.boxes) >= cfg.judge_min_score
+
+
 @dataclass(frozen=True)
 class Item:
     id: str
@@ -158,8 +164,7 @@ def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cf
     pending = {object_id(t.id): (t.cls, _cached(index, gt_dir, object_id(t.id),
                                                lambda t=t: write_object_crops(t, images, gt_dir / "crops" / "objects",
                                                                               cfg)))
-               for t in tracks if object_id(t.id) not in known and ever_must_mask(t, frame_height)
-               and max(b.score for b in t.boxes) >= cfg.judge_min_score}
+               for t in tracks if object_id(t.id) not in known and is_candidate(t, frame_height, cfg)}
     return ask_per_crop(gt_dir, pending, cfg, runner, judge)
 
 
@@ -183,21 +188,19 @@ def ask_per_crop(gt_dir: Path, pending: dict[str, tuple[str, tuple[Crop, ...]]],
 
 def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], masks_by_frame: dict[int, list[Box]],
                  cfg: GtConfig, runner: Runner, judge: str) -> Counter:
-    """Question B about every unmasked frame at must-mask size (crops.leak_frames) of every track judged real (by the
-    latest verdict) not judged yet. `images` are the redacted video's frames: the question is whether the mosaic left
-    the object readable (spec §10), so a loose candidate box around a masked plate is no leak."""
+    """Question B about every unmasked frame at must-mask size (crops.leak_frames) of every candidate track
+    (is_candidate) not judged yet, whatever question A said (spec §12: question A is too unreliable to decide which
+    tracks can leak). `images` are the redacted video's frames: the question is whether the mosaic left the object
+    readable (spec §10), so a loose candidate box around a masked plate is no leak; "not_target" when the box holds
+    no plate or face."""
     gt_dir = Path(gt_dir)
     if not tracks:
         return Counter()
     frame_height = image_size(next(iter(images.values())))[1]
-    objects = resolve(read_judgments(gt_dir / OBJECTS))
     known = resolve(read_judgments(gt_dir / FRAMES))
     index = read_crop_index(gt_dir / CROPS_INDEX)
     items = []
-    for t in tracks:
-        j = objects.get(object_id(t.id))
-        if j is None or j.verdict not in REAL:
-            continue
+    for t in (t for t in tracks if is_candidate(t, frame_height, cfg)):
         for f in leak_frames(t, masks_by_frame, frame_height):
             fid = frame_id(t.id, f)
             if fid not in known:

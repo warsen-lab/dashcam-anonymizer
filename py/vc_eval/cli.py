@@ -188,7 +188,7 @@ def _newmisses(args) -> int:
 
 
 def _objects(args) -> int:
-    from vc_eval.objects import evaluate_objects, model_error_rate, write_report
+    from vc_eval.objects import evaluate_objects, find_leaks, model_error_rate, write_report
     from vc_eval.records import read_masks
     from vc_gt.audit import AUDIT, H2_SAMPLE, read_audit
     from vc_gt.candidates import TRACKS
@@ -206,12 +206,16 @@ def _objects(args) -> int:
     objects = {i: j.verdict for i, j in resolve(objects_j).items()}
     frames = {i: j.verdict for i, j in resolve(frames_j).items()}
     audit = read_audit(args.gt / AUDIT)[1] if (args.gt / AUDIT).exists() else None
-    results = evaluate_objects(tracks, objects, frames, masks, image_size(refs[0].image)[1], audit)
+    height = image_size(refs[0].image)[1]
+    results = evaluate_objects(tracks, objects, frames, masks, height, audit)
+    found = find_leaks(tracks, frames, masks, height)
     sample = json.loads((args.gt / H2_SAMPLE).read_text()) if (args.gt / H2_SAMPLE).exists() else {}
     errors = {"问题 A（真不真、认不认得出）": model_error_rate(objects_j, set(sample.get("objects", []))),
               "问题 B（未打码帧认不认得出）": model_error_rate(frames_j, set(sample.get("frames", [])))}
     redacted = {r.frame: r.image for r in read_frames_csv(args.redacted_frames)}
-    page = write_report(results, errors, args.out, tracks, redacted, masks)
+    page = write_report(results, errors, args.out, tracks, redacted, masks, found)
+    print("leaks found on any candidate: " + ", ".join(f"{cls} {len(ls)}" for cls, ls in sorted(found.items(),
+                                                                                                  reverse=True)))
     for cls, r in results.items():
         print(f"{cls}: {r.readable} readable real objects, {len(r.leaks)} leaked, frames without a leak "
               f"{r.frame_no_leak.hits}/{r.frame_no_leak.total}, passed {r.passed}")

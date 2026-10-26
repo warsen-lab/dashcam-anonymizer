@@ -114,6 +114,22 @@ def evaluate_objects(tracks: list[Track], objects: dict[str, str], frames: dict[
     return out
 
 
+def find_leaks(tracks: list[Track], frames: dict[str, str], masks_by_frame: dict[int, list[Box]],
+               frame_height: int) -> dict[str, tuple[Leak, ...]]:
+    """Per class, every track with a must-mask-size unmasked frame judged readable, whatever question A said (spec §12:
+    the leak finder)."""
+    out = {}
+    for cls in LABEL_CLASSES:
+        found = []
+        for t in (t for t in tracks if t.cls == cls):
+            leaked = tuple(f for f in leak_frames(t, masks_by_frame, frame_height)
+                           if frames.get(frame_id(t.id, f)) == "readable")
+            if leaked:
+                found.append(Leak(t.id, leaked))
+        out[cls] = tuple(found)
+    return out
+
+
 def model_error_rate(judgments: Iterable[Judgment], sample_ids: set[str]) -> Rate:
     """Over the sampled ids people judged: how often their verdict differs from the last model verdict."""
     judgments = list(judgments)
@@ -135,16 +151,31 @@ def _pct(rate: Rate) -> str:
 
 
 def write_report(results: dict[str, ClassResult], error_rates: dict[str, Rate], out_dir: Path, tracks: list[Track],
-                 images: dict[int, Path], masks_by_frame: dict[int, list[Box]]) -> Path:
-    """out_dir/summary.md with the table, the model error rates and every leak; a crop per leaked frame (from `images`,
-    the redacted frames: what a viewer sees) in out_dir/leaks/."""
+                 images: dict[int, Path], masks_by_frame: dict[int, list[Box]],
+                 found: dict[str, tuple[Leak, ...]] | None = None) -> Path:
+    """out_dir/summary.md with every leak first (`found`, the leak finder's, else the table's), then the table and the
+    model error rates; a crop per leaked frame (from `images`, the redacted frames: what a viewer sees) in
+    out_dir/leaks/."""
     import cv2
 
     out_dir = Path(out_dir)
     (out_dir / "leaks").mkdir(parents=True, exist_ok=True)
     by_id = {t.id: t for t in tracks}
-    lines = ["# 按目标与按帧泄露（在打码后的画面上判断）", "",
-             "| 类别 | 看得清的真目标 | 泄露 | 按目标不泄露率（95% 区间） | 按帧不泄露率（95% 区间） | 大家一起漏 | 达标 |",
+    leaks = found if found is not None else {cls: r.leaks for cls, r in results.items()}
+    lines = ["# 泄露查找（在打码后的画面上判断）", "",
+             "人工确认过的为准；任何候选轨迹都查，不看问题 A 的结论。", ""]
+    for cls, ls in leaks.items():
+        for leak in ls:
+            t = by_id[leak.track]
+            for f in leak.frames:
+                box = t.box_at(f)
+                name = f"o{t.id}@{f:06d}.jpg"
+                write_crop(cv2.imread(str(images[f])), box, out_dir / "leaks" / name, 3.0, 96)
+                around = ", ".join(f"{g}:{covered_fraction(box, masks_by_frame.get(g, [])):.0%}"
+                                   for g in range(f - NEIGHBOURS, f + NEIGHBOURS + 1))
+                lines.append(f"- {cls} o{t.id} 第 {f} 帧：![](leaks/{name}) 前后原始帧遮盖比例 {around}")
+    lines += ["", "## 按目标与按帧比例（仅供参考：分母依赖问题 A，问题 A 未过校准，见设计 §11、§12）", "",
+              "| 类别 | 看得清的真目标 | 泄露 | 按目标不泄露率（95% 区间） | 按帧不泄露率（95% 区间） | 大家一起漏 | 达标 |",
              "|---|---|---|---|---|---|---|"]
     for cls, r in results.items():
         missed = _pct(r.missed_by_all) if r.missed_by_all is not None else "未抽查"
@@ -156,17 +187,6 @@ def write_report(results: dict[str, ClassResult], error_rates: dict[str, Rate], 
                      f"{missed}{flag} | {verdict} |")
     lines += ["", "## 模型出错率（H2 抽核里被人工推翻的比例）", ""]
     lines += [f"- {name}：{_pct(rate)}" for name, rate in error_rates.items()]
-    lines += ["", "## 泄露目标", ""]
-    for cls, r in results.items():
-        for leak in r.leaks:
-            t = by_id[leak.track]
-            for f in leak.frames:
-                box = t.box_at(f)
-                name = f"o{t.id}@{f:06d}.jpg"
-                write_crop(cv2.imread(str(images[f])), box, out_dir / "leaks" / name, 3.0, 96)
-                around = ", ".join(f"{g}:{covered_fraction(box, masks_by_frame.get(g, [])):.0%}"
-                                   for g in range(f - NEIGHBOURS, f + NEIGHBOURS + 1))
-                lines.append(f"- {cls} o{t.id} 第 {f} 帧：![](leaks/{name}) 前后原始帧遮盖比例 {around}")
     page = out_dir / "summary.md"
     page.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return page
