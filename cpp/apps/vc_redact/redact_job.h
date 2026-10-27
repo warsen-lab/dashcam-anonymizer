@@ -56,6 +56,13 @@ struct RedactStats {
   int64_t detections = 0;  // the boxes passed to the timeline: not counting the dropped ones or verifier rejections
   int64_t largeFacesDropped = 0;  // large faces scoring below large_face_min_score (spec 2026-10-19 §3.6)
   int64_t narrowPlatesDropped = 0;  // plates narrower than plate_min_width_px (2026-10-22)
+  // Track-level masking (spec 2026-10-27): the lookahead and backfill in keyframes, the mask boxes they added
+  // (masks.jsonl origin "bridged" / "backfilled") and the most frames held at once.
+  int lookaheadKeyframes = 0;
+  int backfillKeyframes = 0;
+  int64_t bridgedMaskBoxes = 0;
+  int64_t backfilledMaskBoxes = 0;
+  int64_t bufferedFramesPeak = 0;
   std::string verifier;             // the verifier model's name; empty without one
   int64_t verifyChecked = 0;        // boxes the verifier scored
   int64_t verifyRejectedFaces = 0;  // ... and rejected, by class
@@ -112,13 +119,22 @@ struct RedactStats {
 // queue never holds much more than 256 MiB of frames.
 size_t pipelineQueueCapacity(int width, int height);
 
+// The most frames vc_redact holds at once with this lookahead (spec 2026-10-27 §3.3): lookahead + 1 keyframe
+// intervals of `stride` frames, an interval being at most the 120 frames after which a keyframe is forced.
+int64_t lookaheadBufferFrames(int lookahead, int64_t stride);
+
+// Throws VcError (naming track_lookahead_keyframes) when, with a lookahead, lookaheadBufferFrames of a width x height
+// video at 3 bytes per pixel exceed 2 GiB. Without a lookahead the buffer is what it always was: no check.
+void checkLookaheadBuffer(int lookahead, int64_t stride, int width, int height);
+
 // Lines for stderr after a successful run (empty when there is nothing to warn about): a note when detect_fps
 // is above the video's frame rate (so every frame is a keyframe), a note when the source was not 8-bit 4:2:0
 // (formatNote), and a warning for decoder errors, i.e. corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
 
 // The summary printed after a successful run: one "name: value" line each for the output, the frame
-// and mask counts, the detect rate (every how many frames of what frame rate), detector, encoder, audio,
+// and mask counts, the track masking (lookahead, backfill, the mask boxes they added, the frames buffered),
+// the detect rate (every how many frames of what frame rate), detector, encoder, audio,
 // setup time, stage rates, decode errors and elapsed time.
 std::string redactSummary(const RedactStats& stats);
 
