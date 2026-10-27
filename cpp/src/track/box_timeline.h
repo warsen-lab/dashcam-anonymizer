@@ -68,6 +68,10 @@ struct TimelineConfig {
   // Keyframes come from KeyframeLinker (spec 2026-10-27 §3.2): a track follows its BoxLink::track instead of being
   // matched, and is masked as BoxLink::masked says instead of by confirmScore.
   bool linked = false;
+  // A confirmed track whose best real detection scored at least this is held for one more interval when it is lost
+  // again at the next keyframe, as holdLostGhosts does for every track (spec 2026-10-27 §8: targets leaving the
+  // frame). Filled-in boxes do not count. nullopt: off.
+  std::optional<float> holdLostMinScore{};
 };
 
 // What advance() and finish() return.
@@ -91,7 +95,7 @@ struct TimelineOutput {
 // box; an unmatched ghost ends, and the interval after its last hold is not masked, unless holdLostGhosts
 // is set: then that interval (and, for a ghost left after the last keyframe, the tail of the video) is
 // masked at the box the hold ended at, which does not move on, with no motion margin and origin held, and
-// the track ends after it. A box that starts a track is masked from its own keyframe on, never before. Every
+// the track ends after it. holdLostMinScore does the same for the tracks whose best real detection scored at least that much. A box that starts a track is masked from its own keyframe on, never before. Every
 // mask is grown by expandFraction of its box plus motionExpandFraction of the interval's displacement along
 // each axis (for a hold, of its capped shift), to at least minBoxPx, and clipped to the frame.
 //
@@ -150,6 +154,7 @@ class BoxTimeline {
     int64_t link = 0;                // linked: KeyframeLinker's track id
     LinkKind kind = LinkKind::Real;  // linked: what `box` is
     bool anchorReal = true;          // `anchor` is a real detection (false while the track has only filled-in boxes)
+    float bestScore = 0.0f;          // the highest score of its real detections
   };
 
   // A track's smoothed mask size (spec §3.1).
@@ -182,6 +187,9 @@ class BoxTimeline {
   // against the track's previous mask (shown_) around the raw box's centre, clipped to the frame; nothing
   // when the raw box lies outside the frame.
   void emit(std::vector<MaskBox>& out, const Track& track, const Box& region, Offset motion, MaskOrigin origin);
+  // Whether the ghost `track`, lost again, is held for one more interval: holdLostGhosts, or its best real
+  // detection reaches holdLostMinScore.
+  bool holdsLostGhost(const Track& track) const;
   // The masks of `track` held from its keyframe `from` over `frames` (which start there); the motion
   // margin is the shift reached `span` frames after the keyframe.
   void hold(std::vector<std::vector<MaskBox>>& masks, const std::vector<FrameTime>& frames, const FrameTime& from,

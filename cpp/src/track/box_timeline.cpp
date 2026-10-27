@@ -105,8 +105,9 @@ bool validConfig(const TimelineConfig& c) {
       c.matchMaxDistanceLoose > 0 && std::isfinite(c.shrinkPerFrame) && c.shrinkPerFrame > 0 &&
       c.shrinkPerFrame <= 1 && std::isfinite(c.maxMaskAreaRatio) && c.maxMaskAreaRatio >= 1;
   // NaN fails both comparisons.
-  return numbers && std::all_of(c.confirmScore.begin(), c.confirmScore.end(),
-                                [](float s) { return s >= 0.0f && s <= 1.0f; });
+  return numbers &&
+         std::all_of(c.confirmScore.begin(), c.confirmScore.end(), [](float s) { return s >= 0.0f && s <= 1.0f; }) &&
+         (!c.holdLostMinScore || (*c.holdLostMinScore >= 0.0f && *c.holdLostMinScore <= 1.0f));
 }
 
 }  // namespace
@@ -169,6 +170,7 @@ BoxTimeline::Track BoxTimeline::startTrack(const Keyframe& next, size_t j) {
     t.kind = link.kind;
     t.anchorReal = link.kind == LinkKind::Real;
   }
+  t.bestScore = t.kind == LinkKind::Real ? box.score : 0.0f;
   return t;
 }
 
@@ -181,6 +183,7 @@ BoxTimeline::Track BoxTimeline::continueTrack(const Track& old, const Keyframe& 
     t.confirmed = next.links[j].masked;
     t.kind = next.links[j].kind;
   }
+  t.bestScore = std::max(old.bestScore, t.kind == LinkKind::Real ? box.score : 0.0f);
   if (t.kind == LinkKind::Real) {
     if (old.anchorReal) {
       const Point a = centerOf(old.anchor);
@@ -193,6 +196,10 @@ BoxTimeline::Track BoxTimeline::continueTrack(const Track& old, const Keyframe& 
     t.anchorReal = true;
   }
   return t;
+}
+
+bool BoxTimeline::holdsLostGhost(const Track& track) const {
+  return config_.holdLostGhosts || (config_.holdLostMinScore && track.bestScore >= *config_.holdLostMinScore);
 }
 
 BoxTimeline::Size BoxTimeline::smoothed(Size shown, Size raw, double shrink, bool held) {
@@ -327,7 +334,7 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
       }
     } else if (!track.ghost && masked) {
       hold(out.masks, frames, prevTime, track, steps);
-    } else if (track.ghost && config_.holdLostGhosts) {
+    } else if (track.ghost && holdsLostGhost(track)) {
       holdGhost(out.masks, frames, track);  // lost for the second keyframe in a row: held, then it ends (spec §3.7)
     }
     // Otherwise an unmatched ghost, or an unconfirmed track seen once, ends here unmasked.
@@ -349,6 +356,7 @@ TimelineOutput BoxTimeline::advance(const std::vector<FrameTime>& frames, const 
                 track.anchorSteps + steps, -1, true};
     ghost.link = track.link;
     ghost.anchorReal = track.anchorReal;
+    ghost.bestScore = track.bestScore;
     tracks.push_back(ghost);
   }
   // Tracks that ended forget their masks.
@@ -380,7 +388,7 @@ TimelineOutput BoxTimeline::finish(const std::vector<FrameTime>& frames) {
     if (track.keyBox >= 0) out.confirmed[static_cast<size_t>(track.keyBox)] = track.confirmed;
     if (!track.ghost && track.confirmed) {
       hold(out.masks, frames, prevTime, track, span);
-    } else if (track.ghost && config_.holdLostGhosts) {
+    } else if (track.ghost && holdsLostGhost(track)) {
       holdGhost(out.masks, frames, track);
     }
   }

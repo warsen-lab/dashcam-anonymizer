@@ -30,7 +30,10 @@ namespace vc {
 struct RedactConfig {
   double detectFps = 10.0;  // keyframes per second of video, in [5, 60]; spaced by frame index (detect_rate.h)
   DecodeParams decode{.scoreThreshold = 0.05f};
-  TimelineConfig timeline{.expandFraction = 0.2, .motionExpandFraction = 0.25, .shrinkPerFrame = 0.2};
+  // hold_lost_min_score (spec 2026-10-27 §8): a confirmed track whose best real detection scored at least this is held
+  // one more interval when lost, e.g. a plate leaving the frame; null switches it off.
+  TimelineConfig timeline{
+      .expandFraction = 0.2, .motionExpandFraction = 0.25, .shrinkPerFrame = 0.2, .holdLostMinScore = 0.5f};
   MosaicConfig mosaic;
   YuNetParams face{.scoreThreshold = 0.3f, .nmsIou = 0.3f};
   // Boxes scoring below these are masked only once their track is matched at two consecutive keyframes
@@ -51,9 +54,10 @@ struct RedactConfig {
   // Track-level masking (spec 2026-10-27): the output runs trackLookaheadKeyframes keyframes behind detection, so a
   // confirmed target missed on up to that many keyframes in a row is masked across the gap, and a target is masked
   // trackBackfillKeyframes keyframe intervals before it was first detected. Lookahead in [0, 30], 0 = off (masks
-  // exactly as before); backfill in [0, lookahead - 1].
-  int trackLookaheadKeyframes = 5;
-  int trackBackfillKeyframes = 2;
+  // exactly as before); backfill in [0, lookahead - 1]. The defaults are the cheapest that fixed the bridgeable leaks
+  // of the pilot (spec 2026-10-27 §8): W 5, B 2 cost 32 % more unexplained mask area on sg_drive_60s, W 2, B 1 12 %.
+  int trackLookaheadKeyframes = 2;
+  int trackBackfillKeyframes = 1;
   // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
   // detector found or that score below verifyFaceUnlessBothAbove go through the verifier model when one is given
   // (vc_redact --verifier-model). The pass thresholds are the model's (model.json pass_threshold) unless set here.
@@ -82,7 +86,7 @@ inline constexpr std::array<std::string_view, 7> kNvencPresets = {"p1", "p2", "p
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans,
+// [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans, hold_lost_min_score is a number in [0, 1] or null (off),
 // nvenc_preset one of the strings "p1" to "p7", rate_control the string "quality" or "bitrate";
 // track_lookahead_keyframes must be a JSON integer in [0, 30] and track_backfill_keyframes one in
 // [0, track_lookahead_keyframes - 1] (0 when the lookahead is 0); every other value must be a finite number.

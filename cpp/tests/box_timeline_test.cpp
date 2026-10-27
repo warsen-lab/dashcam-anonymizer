@@ -1510,5 +1510,55 @@ TEST(BoxTimeline, TheNewOriginsHaveTheirNames) {
   EXPECT_STREQ(toString(MaskOrigin::Backfilled), "backfilled");
 }
 
+// ---- A lost track whose best real detection scored high enough is held for one more interval (spec 2026-10-27 §8).
+
+TEST(BoxTimeline, ALostTrackWhoseBestScoreReachesTheMinimumIsHeldOneMoreInterval) {
+  TimelineConfig c = confirming();
+  c.holdLostMinScore = 0.5f;
+  BoxTimeline t(c, 1920, 1080);
+  t.advance({}, key(0, {face(0, 0, 80, 80), weakFace(500, 0, 580, 80)}));
+  t.advance(frames(0, 6), key(6, {face(0, 0, 80, 80), weakFace(500, 0, 580, 80)}));  // both confirmed
+  t.advance(frames(6, 12), key(12, {}));                                              // both lost: held
+  const TimelineOutput out = t.advance(frames(12, 18), key(18, {}));
+  ASSERT_EQ(out.masks[0].size(), 1u);  // the face scoring 0.9, not the one scoring 0.3
+  expectBox(out.masks[0][0], 0, 0, 80, 80, MaskOrigin::Held);
+  expectBox(out.masks[5][0], 0, 0, 80, 80, MaskOrigin::Held);
+  const TimelineOutput after = t.advance(frames(18, 24), key(24, {}));
+  for (const auto& m : after.masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, TheMinimumScoreAlsoHoldsAGhostLeftAtTheEnd) {
+  for (const bool on : {false, true}) {
+    TimelineConfig c = exact();
+    if (on) c.holdLostMinScore = 0.5f;
+    BoxTimeline t(c, 1920, 1080);
+    t.advance({}, key(0, {face(0, 0, 80, 80)}));
+    t.advance(frames(0, 6), key(6, {face(0, 0, 80, 80)}));
+    t.advance(frames(6, 12), key(12, {}));
+    const TimelineOutput out = t.finish(frames(12, 18));
+    for (const auto& m : out.masks) EXPECT_EQ(m.size(), on ? 1u : 0u) << on;
+  }
+}
+
+TEST(BoxTimeline, OnlyRealBoxesCountTowardsTheBestScore) {
+  // the backfilled box scores 0.9, the only real one 0.3: the track is not held once more after it is lost
+  TimelineConfig c = linkedExact();
+  c.holdLostMinScore = 0.5f;
+  BoxTimeline t(c, 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Backfilled}}));
+  t.advance(frames(0, 6), linkedKey(6, {weakFace(0, 0, 80, 80)}, {{1}}));
+  t.advance(frames(6, 12), linkedKey(12, {}, {}));
+  const TimelineOutput out = t.advance(frames(12, 18), linkedKey(18, {}, {}));
+  for (const auto& m : out.masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, RejectsAMinimumHoldScoreOutsideZeroToOne) {
+  for (const float bad : {-0.1f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
+    TimelineConfig c = exact();
+    c.holdLostMinScore = bad;
+    EXPECT_THROW(BoxTimeline(c, 1920, 1080), std::invalid_argument) << bad;
+  }
+}
+
 }  // namespace
 }  // namespace vc

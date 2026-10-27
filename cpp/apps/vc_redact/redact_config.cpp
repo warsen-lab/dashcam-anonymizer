@@ -14,7 +14,7 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 31> kKeys = {
+constexpr std::array<std::string_view, 32> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
@@ -25,7 +25,7 @@ constexpr std::array<std::string_view, 31> kKeys = {
     "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
     "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
     "verify_threshold_plate", "plate_min_width_px", "track_lookahead_keyframes",
-    "track_backfill_keyframes"};
+    "track_backfill_keyframes", "hold_lost_min_score"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -163,6 +163,9 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(c.timeline.minBoxPx >= 0, "min_box_px must be >= 0");
   require(c.timeline.shrinkPerFrame > 0 && c.timeline.shrinkPerFrame <= 1, "shrink_per_frame must be in (0, 1]");
   require(c.timeline.maxMaskAreaRatio >= 1, "max_mask_area_ratio must be >= 1");
+  require(!c.timeline.holdLostMinScore ||
+              (*c.timeline.holdLostMinScore >= 0 && *c.timeline.holdLostMinScore <= 1),
+          "hold_lost_min_score must be in [0, 1] or null");
   require(c.mosaic.minBlockPx >= 1 && c.mosaic.minBlockPx <= kMaxMosaicSetting,
           "mosaic_min_block_px must be in [1, 4096]");
   require(c.mosaic.blocksPerLongSide >= 1 && c.mosaic.blocksPerLongSide <= kMaxMosaicSetting,
@@ -243,6 +246,9 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   c.verifyThresholdFace = optionalFloatSetting(j, "verify_threshold_face", origin);
   c.verifyThresholdPlate = optionalFloatSetting(j, "verify_threshold_plate", origin);
   c.timeline.holdLostGhosts = boolSetting(j, "hold_lost_ghosts", c.timeline.holdLostGhosts, origin);
+  if (j.contains("hold_lost_min_score")) {  // absent keeps the default, null switches it off
+    c.timeline.holdLostMinScore = optionalFloatSetting(j, "hold_lost_min_score", origin);
+  }
   c.mosaic.minBlockPx = integerSetting(j, "mosaic_min_block_px", c.mosaic.minBlockPx, 1, kMaxMosaicSetting, origin);
   c.mosaic.blocksPerLongSide =
       integerSetting(j, "mosaic_blocks_per_long_side", c.mosaic.blocksPerLongSide, 1, kMaxMosaicSetting, origin);
@@ -295,6 +301,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["verify_threshold_plate"] =
       c.verifyThresholdPlate ? nlohmann::ordered_json(jsonFloat(*c.verifyThresholdPlate)) : nlohmann::ordered_json(nullptr);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
+  j["hold_lost_min_score"] = c.timeline.holdLostMinScore ? nlohmann::ordered_json(jsonFloat(*c.timeline.holdLostMinScore))
+                                                         : nlohmann::ordered_json(nullptr);
   j["track_lookahead_keyframes"] = c.trackLookaheadKeyframes;
   j["track_backfill_keyframes"] = c.trackBackfillKeyframes;
   j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;
