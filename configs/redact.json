@@ -23,6 +23,8 @@
   "verify_threshold_face": null,
   "verify_threshold_plate": null,
   "hold_lost_ghosts": false,
+  "track_lookahead_keyframes": 5,
+  "track_backfill_keyframes": 2,
   "output_bitrate_factor_hevc": 1.5,
   "rate_control": "quality",
   "nvenc_preset": "p4",

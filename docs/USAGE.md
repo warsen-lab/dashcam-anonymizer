@@ -125,6 +125,8 @@ VC_REDACT_ARGS="--hwaccel videotoolbox" scripts/redact.sh ~/redacted ~/dashcam/ 
 | `large_face_min_score` | 0.6 | 面积超过上一行比例的人脸框，分数低于它的直接丢弃（YuNet 会把路面、楼群认成占画面很大的人脸，分数多在 0.3–0.6；丢了几个见 `stats.json` 的 `large_faces_dropped`）。调高丢得多、大块误打少，但贴近镜头的低分真人脸会漏；调低保留得多；0 关闭这条规则 |
 | `plate_min_width_px` | 16 | 车牌框（外扩之前）宽度小于它的直接丢弃、不打码（不到约 24 px 的车牌每个字只有约 3 px，看不清；r3 的误打车牌里 78% 是这么窄的框）。丢了几个见 `stats.json` 的 `narrow_plates_dropped`。人脸不受影响；0 关闭。默认 16：三个留出段上车牌召回 98.2%（不设门槛 98.4%），误打车牌少 58%；20 px 少 73% 但召回 97.8%，因为学生模型画的车牌框比老师的窄。调大误打少，但宽于门槛前的远处车牌不打码 |
 | `hold_lost_ghosts` | false | 同一个目标连续两个关键帧都漏检时，第二个间隔是否仍在它最后停留的位置打码（JSON 布尔，不能写 0 / 1）。`true` 把没有框的空档从两个检测间隔缩到一个，代价是消失的目标（包括误检）多留一个间隔的码；`false` 时那个间隔不打码 |
+| `track_lookahead_keyframes` | 5 | 按轨迹打码（设计 2026-10-27）：输出比检测晚这么多个关键帧（10 档时 5 个约 0.5 秒）。已确认的目标在这个窗口里连续漏检、又被检出时，中间的空档整段打码（`masks.jsonl` 的 `origin` 为 `bridged`）。0 关闭，打码与以前完全一样。整数 0–30；窗口越大，帧缓存越多（60 fps 1080p、5 个约 110 MB） |
+| `track_backfill_keyframes` | 2 | 目标确认要打码后，往它第一次检出之前补这么多个关键帧间隔（`origin` 为 `backfilled`），按它前两次检出的速度往回推，每个间隔最多移半个框宽 / 框高。整数 0 到 `track_lookahead_keyframes` − 1；`track_lookahead_keyframes` 为 0 时只能是 0 |
 | `rate_control` | `"quality"` | 输出一律 H.264。`"quality"`：恒定画质，文件大小由画面决定（VideoToolbox `q:v` 65、libx264 `crf` 18、NVENC `vbr` 加 `cq` 19，NVENC 的 19 是暂定值，等 GPU 计划 1c 在目标机上按 SSIM 标定），清晰度接近原片，1080p 行车记录的文件约为原片 4 倍。`"bitrate"`：按码率编码，码率见下一行，文件小、画质差一些。只能写这两个字符串 |
 | `output_bitrate_factor_hevc` | 1.5 | 只在 `rate_control` 为 `"bitrate"` 时起作用：H.264 原片沿用原码率，HEVC 等其他编码的原片按原码率乘这个系数（同样的画质 H.264 要更高的码率），范围 [1, 4]；读不到原码率时按 8 Mb/s 乘系数。调大画质好、文件大 |
 | `nvenc_preset` | `p4` | NVENC 编码预设（Linux + NVIDIA），`p1` 最快、`p7` 画质最好；只在用 `h264_nvenc` 编码时起作用 |

@@ -14,7 +14,7 @@
 namespace vc {
 namespace {
 
-constexpr std::array<std::string_view, 29> kKeys = {
+constexpr std::array<std::string_view, 31> kKeys = {
     "detect_fps",          "score_threshold",        "nms_iou",
     "match_max_distance",  "match_max_distance_loose", "expand_fraction",
     "motion_expand_fraction", "min_box_px",          "shrink_per_frame",
@@ -24,7 +24,8 @@ constexpr std::array<std::string_view, 29> kKeys = {
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
     "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
     "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
-    "verify_threshold_plate", "plate_min_width_px"};
+    "verify_threshold_plate", "plate_min_width_px", "track_lookahead_keyframes",
+    "track_backfill_keyframes"};
 
 // Keys of older configs that no longer exist (spec 2026-10-19 §2): refused with a message that says so.
 constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "motion_threshold"};
@@ -33,6 +34,8 @@ constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "mot
 constexpr int kMaxMosaicSetting = 4096;
 // More onnxruntime threads than this is a typo, not a thread count.
 constexpr int kMaxOrtIntraThreads = 1024;
+// Half a minute at 1 keyframe per second: past it, a typo.
+constexpr int kMaxLookaheadKeyframes = 30;
 constexpr double kMinBitrateFactor = 1.0;
 constexpr double kMaxBitrateFactor = 4.0;
 
@@ -187,6 +190,12 @@ void validateRedactConfig(const RedactConfig& c, const std::string& origin) {
   require(std::find(kNvencPresets.begin(), kNvencPresets.end(), c.nvencPreset) != kNvencPresets.end(),
           "nvenc_preset must be one of p1 ... p7, got '" + c.nvencPreset + "'");
   require(c.ortIntraThreads >= 0 && c.ortIntraThreads <= kMaxOrtIntraThreads, "ort_intra_threads must be in [0, 1024]");
+  require(c.trackLookaheadKeyframes >= 0 && c.trackLookaheadKeyframes <= kMaxLookaheadKeyframes,
+          "track_lookahead_keyframes must be in [0, 30]");
+  require(c.trackBackfillKeyframes >= 0 && c.trackBackfillKeyframes <= std::max(0, c.trackLookaheadKeyframes - 1),
+          "track_backfill_keyframes must be in [0, track_lookahead_keyframes - 1] (0 when track_lookahead_keyframes "
+          "is 0), got " + std::to_string(c.trackBackfillKeyframes) + " with track_lookahead_keyframes " +
+              std::to_string(c.trackLookaheadKeyframes));
 }
 
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin) {
@@ -242,6 +251,10 @@ RedactConfig parseRedactConfig(const std::string& text, const std::string& origi
   c.nvencPreset = stringSetting(j, "nvenc_preset", c.nvencPreset, origin);
   c.trtFp16 = boolSetting(j, "trt_fp16", c.trtFp16, origin);
   c.ortIntraThreads = integerSetting(j, "ort_intra_threads", c.ortIntraThreads, 0, kMaxOrtIntraThreads, origin);
+  c.trackLookaheadKeyframes = integerSetting(j, "track_lookahead_keyframes", c.trackLookaheadKeyframes, 0,
+                                             kMaxLookaheadKeyframes, origin);
+  c.trackBackfillKeyframes = integerSetting(j, "track_backfill_keyframes", c.trackBackfillKeyframes, 0,
+                                            kMaxLookaheadKeyframes, origin);
   validateRedactConfig(c, origin);
   return c;
 }
@@ -282,6 +295,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["verify_threshold_plate"] =
       c.verifyThresholdPlate ? nlohmann::ordered_json(jsonFloat(*c.verifyThresholdPlate)) : nlohmann::ordered_json(nullptr);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
+  j["track_lookahead_keyframes"] = c.trackLookaheadKeyframes;
+  j["track_backfill_keyframes"] = c.trackBackfillKeyframes;
   j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;
   j["rate_control"] = std::string(c.rateControl == RateControl::Quality ? kQualityName : kBitrateName);
   j["nvenc_preset"] = c.nvencPreset;
@@ -299,6 +314,11 @@ TimelineConfig timelineFor(const RedactConfig& config, const std::vector<std::st
                                                : 0.0f);
   }
   return t;
+}
+
+TrackMaskerConfig trackMaskerFor(const RedactConfig& config, const std::vector<std::string>& classes) {
+  return TrackMaskerConfig{timelineFor(config, classes), config.trackLookaheadKeyframes,
+                           config.trackBackfillKeyframes};
 }
 
 }  // namespace vc

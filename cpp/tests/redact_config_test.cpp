@@ -28,7 +28,8 @@ const std::set<std::string> kAllKeys = {
     "hold_lost_ghosts",    "output_bitrate_factor_hevc", "rate_control",
     "nvenc_preset",        "trt_fp16",            "ort_intra_threads",
     "verify_plate_below",  "verify_face_unless_both_above", "verify_threshold_face",
-    "verify_threshold_plate", "plate_min_width_px"};
+    "verify_threshold_plate", "plate_min_width_px", "track_lookahead_keyframes",
+    "track_backfill_keyframes"};
 
 // Field-by-field comparison (RedactConfig has no operator==).
 void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
@@ -57,6 +58,8 @@ void expectSameConfig(const RedactConfig& c, const RedactConfig& d) {
   EXPECT_EQ(c.verifyThresholdFace, d.verifyThresholdFace);
   EXPECT_EQ(c.verifyThresholdPlate, d.verifyThresholdPlate);
   EXPECT_EQ(c.timeline.holdLostGhosts, d.timeline.holdLostGhosts);
+  EXPECT_EQ(c.trackLookaheadKeyframes, d.trackLookaheadKeyframes);
+  EXPECT_EQ(c.trackBackfillKeyframes, d.trackBackfillKeyframes);
   EXPECT_DOUBLE_EQ(c.outputBitrateFactorHevc, d.outputBitrateFactorHevc);
   EXPECT_EQ(c.rateControl, d.rateControl);
   EXPECT_EQ(c.nvencPreset, d.nvencPreset);
@@ -94,6 +97,8 @@ RedactConfig nonDefaultConfig() {
   c.verifyThresholdFace = 0.25f;
   c.verifyThresholdPlate = 0.125f;
   c.timeline.holdLostGhosts = true;
+  c.trackLookaheadKeyframes = 9;
+  c.trackBackfillKeyframes = 4;
   c.outputBitrateFactorHevc = 2.25;
   c.rateControl = RateControl::Bitrate;
   c.nvencPreset = "p1";
@@ -128,6 +133,8 @@ TEST(RedactConfig, DefaultsAreTheValidatedSettings) {
   EXPECT_FLOAT_EQ(c.largeFaceMinScore, 0.6f);
   EXPECT_DOUBLE_EQ(c.plateMinWidthPx, 16.0);
   EXPECT_FALSE(c.timeline.holdLostGhosts);
+  EXPECT_EQ(c.trackLookaheadKeyframes, 5);
+  EXPECT_EQ(c.trackBackfillKeyframes, 2);
   EXPECT_FLOAT_EQ(DecodeParams{}.scoreThreshold, 0.15f);
   EXPECT_DOUBLE_EQ(TimelineConfig{}.expandFraction, 0.15);
 }
@@ -233,6 +240,33 @@ TEST(RedactConfig, ReadsThePlateMinimumWidth) {
   RedactConfig c;
   c.plateMinWidthPx = std::numeric_limits<double>::infinity();
   EXPECT_THROW(validateRedactConfig(c, "cli"), VcError);
+}
+
+// Track-level masking (spec 2026-10-27): lookahead in [0, 30], backfill in [0, lookahead - 1].
+TEST(RedactConfig, ReadsTheTrackLookahead) {
+  const RedactConfig c = parseRedactConfig(R"({"track_lookahead_keyframes": 8, "track_backfill_keyframes": 7})", "t");
+  EXPECT_EQ(c.trackLookaheadKeyframes, 8);
+  EXPECT_EQ(c.trackBackfillKeyframes, 7);
+  const RedactConfig off = parseRedactConfig(R"({"track_lookahead_keyframes": 0, "track_backfill_keyframes": 0})", "t");
+  EXPECT_EQ(off.trackLookaheadKeyframes, 0);
+  for (const std::string text :
+       {R"({"track_lookahead_keyframes": 31})", R"({"track_lookahead_keyframes": -1})",
+        R"({"track_lookahead_keyframes": 2.5})", R"({"track_backfill_keyframes": "2"})",
+        R"({"track_backfill_keyframes": 5})", R"({"track_lookahead_keyframes": 0})"}) {
+    SCOPED_TRACE(text);
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted";
+    } catch (const VcError& e) {
+      const std::string message = e.what();
+      EXPECT_EQ(message.rfind("cfg: ", 0), 0u) << message;
+      EXPECT_NE(message.find("track_"), std::string::npos) << message;
+    }
+  }
+  const TrackMaskerConfig m = trackMaskerFor(c, {"face", "plate"});
+  EXPECT_EQ(m.lookahead, 8);
+  EXPECT_EQ(m.backfill, 7);
+  EXPECT_EQ(m.timeline.confirmScore, (std::vector<float>{0.5f, 0.2f}));
 }
 
 // Each refusal starts with the origin and names the key.
@@ -448,7 +482,7 @@ TEST(RedactConfig, RejectsTheRemovedKeysByName) {
 
 TEST(RedactConfig, SerialisesEveryKey) {
   const nlohmann::ordered_json j = redactConfigToJson(RedactConfig{});
-  EXPECT_EQ(j.size(), 29u);
+  EXPECT_EQ(j.size(), 31u);
   EXPECT_DOUBLE_EQ(j.at("match_max_distance_loose").get<double>(), 6.0);
   EXPECT_DOUBLE_EQ(j.at("detect_fps").get<double>(), 10.0);
   EXPECT_EQ(j.at("mosaic_blocks_per_long_side").get<int>(), 8);

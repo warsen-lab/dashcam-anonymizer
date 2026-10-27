@@ -14,6 +14,7 @@
 #include "io/rate_control.h"
 #include "mask/mosaic.h"
 #include "track/box_timeline.h"
+#include "track/track_masker.h"
 
 namespace vc {
 
@@ -47,6 +48,12 @@ struct RedactConfig {
   // fewer unexplained plate masks; 20 and 24 cut more but miss plates the student draws narrower than the teacher
   // (cpp/README.md). 0 keeps plates of any width; faces are never affected.
   double plateMinWidthPx = 16.0;
+  // Track-level masking (spec 2026-10-27): the output runs trackLookaheadKeyframes keyframes behind detection, so a
+  // confirmed target missed on up to that many keyframes in a row is masked across the gap, and a target is masked
+  // trackBackfillKeyframes keyframe intervals before it was first detected. Lookahead in [0, 30], 0 = off (masks
+  // exactly as before); backfill in [0, lookahead - 1].
+  int trackLookaheadKeyframes = 5;
+  int trackBackfillKeyframes = 2;
   // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
   // detector found or that score below verifyFaceUnlessBothAbove go through the verifier model when one is given
   // (vc_redact --verifier-model). The pass thresholds are the model's (model.json pass_threshold) unless set here.
@@ -76,7 +83,9 @@ inline constexpr std::array<std::string_view, 7> kNvencPresets = {"p1", "p2", "p
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
 // [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans,
-// nvenc_preset one of the strings "p1" to "p7", rate_control the string "quality" or "bitrate"; every other value must be a finite number.
+// nvenc_preset one of the strings "p1" to "p7", rate_control the string "quality" or "bitrate";
+// track_lookahead_keyframes must be a JSON integer in [0, 30] and track_backfill_keyframes one in
+// [0, track_lookahead_keyframes - 1] (0 when the lookahead is 0); every other value must be a finite number.
 // face_score_threshold, face_confirm_score, plate_confirm_score and large_face_min_score are in [0, 1],
 // face_nms_iou and large_face_area_fraction in (0, 1], output_bitrate_factor_hevc in [1, 4], plate_min_width_px >= 0.
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);
@@ -87,5 +96,8 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& config);
 // config.timeline with confirmScore set for a detector with these classes: "face" -> faceConfirmScore,
 // "plate" -> plateConfirmScore, any other class 0 (needs no confirmation).
 TimelineConfig timelineFor(const RedactConfig& config, const std::vector<std::string>& classes);
+
+// The masking settings for a detector with these classes: timelineFor() plus the lookahead and backfill.
+TrackMaskerConfig trackMaskerFor(const RedactConfig& config, const std::vector<std::string>& classes);
 
 }  // namespace vc
