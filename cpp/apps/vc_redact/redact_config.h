@@ -53,9 +53,13 @@ struct RedactConfig {
   double plateMinWidthPx = 16.0;
   // Track-level masking (spec 2026-10-27): the output runs trackLookaheadKeyframes keyframes behind detection, so a
   // confirmed target missed on up to that many keyframes in a row is masked across the gap, and a target is masked
-  // trackBackfillKeyframes keyframe intervals before it was first detected. Lookahead in [0, 30], 0 = off (masks
-  // exactly as before); backfill in [0, lookahead - 1]. The defaults are the cheapest that fixed the bridgeable leaks
-  // of the pilot (spec 2026-10-27 §8): W 5, B 2 cost 32 % more unexplained mask area on sg_drive_60s, W 2, B 1 12 %.
+  // trackBackfillKeyframes keyframe intervals before it was first detected. Lookahead in [0, 30], 0 = off; backfill
+  // in [0, lookahead - 1]. The output is byte-identical to before track masking only when the lookahead is 0, the
+  // backfill is 0 and timeline.holdLostMinScore is null: holdLostMinScore (default 0.5) also applies at lookahead 0.
+  // The defaults are the cheapest that fixed the bridgeable leaks of the pilot (spec 2026-10-27 §8). On sg_drive_60s
+  // W 2, B 1 with holdLostMinScore 0.5 cost 14 % more unexplained mask area (mean; p95 11 %) and 15 % more mask
+  // area on screen, and masked all three human-confirmed leaks; W 5, B 2 without holdLostMinScore cost 32 % more
+  // unexplained area (mean).
   int trackLookaheadKeyframes = 2;
   int trackBackfillKeyframes = 1;
   // The verifier (spec 2026-10-21 §3.1, §4.3): plates scoring below verifyPlateBelow and faces that only one
@@ -86,10 +90,11 @@ inline constexpr std::array<std::string_view, 7> kNvencPresets = {"p1", "p2", "p
 // Keys may be omitted; unknown keys, the removed max_detect_fps and motion_threshold, wrong types and
 // out-of-range values throw VcError("<origin>: …"). detect_fps is in [5, 60]; shrink_per_frame is in (0, 1],
 // max_mask_area_ratio >= 1; mosaic_min_block_px and mosaic_blocks_per_long_side must be JSON integers in
-// [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans, hold_lost_min_score is a number in [0, 1] or null (off),
-// nvenc_preset one of the strings "p1" to "p7", rate_control the string "quality" or "bitrate";
-// track_lookahead_keyframes must be a JSON integer in [0, 30] and track_backfill_keyframes one in
-// [0, track_lookahead_keyframes - 1] (0 when the lookahead is 0); every other value must be a finite number.
+// [1, 4096], ort_intra_threads a JSON integer in [0, 1024]; hold_lost_ghosts and trt_fp16 must be JSON booleans,
+// hold_lost_min_score is a number in [0, 1] or null (off), nvenc_preset one of the strings "p1" to "p7",
+// rate_control the string "quality" or "bitrate"; track_lookahead_keyframes must be a JSON integer in [0, 30] and
+// track_backfill_keyframes one in [0, track_lookahead_keyframes - 1] (0 when the lookahead is 0); every other
+// value must be a finite number.
 // face_score_threshold, face_confirm_score, plate_confirm_score and large_face_min_score are in [0, 1],
 // face_nms_iou and large_face_area_fraction in (0, 1], output_bitrate_factor_hevc in [1, 4], plate_min_width_px >= 0.
 RedactConfig parseRedactConfig(const std::string& text, const std::string& origin);

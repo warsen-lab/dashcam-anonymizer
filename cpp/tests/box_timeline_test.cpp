@@ -1552,6 +1552,22 @@ TEST(BoxTimeline, OnlyRealBoxesCountTowardsTheBestScore) {
   for (const auto& m : out.masks) EXPECT_TRUE(m.empty());
 }
 
+TEST(BoxTimeline, ALinkedTrackWhoseRealBoxScoresHighIsHeldOneMoreInterval) {
+  // the twin of OnlyRealBoxesCountTowardsTheBestScore with a real box scoring 0.9: now it is held after it is lost
+  TimelineConfig c = linkedExact();
+  c.holdLostMinScore = 0.5f;
+  BoxTimeline t(c, 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Backfilled}}));
+  t.advance(frames(0, 6), linkedKey(6, {face(0, 0, 80, 80)}, {{1}}));
+  t.advance(frames(6, 12), linkedKey(12, {}, {}));
+  const TimelineOutput out = t.advance(frames(12, 18), linkedKey(18, {}, {}));
+  ASSERT_EQ(out.masks.size(), 6u);
+  for (const auto& m : out.masks) {
+    ASSERT_EQ(m.size(), 1u);
+    expectBox(m[0], 0, 0, 80, 80, MaskOrigin::Held);
+  }
+}
+
 TEST(BoxTimeline, RejectsAMinimumHoldScoreOutsideZeroToOne) {
   for (const float bad : {-0.1f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
     TimelineConfig c = exact();

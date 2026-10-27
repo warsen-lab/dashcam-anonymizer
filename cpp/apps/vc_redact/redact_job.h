@@ -104,7 +104,7 @@ struct RedactStats {
   StageStat detectStudent;  // the student (or fake) detector's own busy time; equals detect without a face model
   StageStat detectFace;     // the face model's own busy time (it overlaps detectStudent); {0, 0} without one
   StageStat verify;         // items = keyframes with something to verify or dump: cropping + scoring
-  StageStat track;   // keyframe choice + BoxTimeline; items = frames
+  StageStat track;   // keyframe choice + TrackMasker; items = frames
   StageStat mosaic;
   StageStat encode;
   // From the start of runRedact until the first frame reaches the processing thread: opening the
@@ -143,8 +143,8 @@ std::string redactSummary(const RedactStats& stats);
 // also verify_crops.bin / verify_crops.jsonl.
 // On each keyframe, after the large-face rule, the boxes needsVerification() picks are cropped (verifier_crop.h):
 // the crops of dumped keyframes go to the dump, and with a verifier model the boxes of a class it knows are scored;
-// one below its pass threshold never reaches BoxTimeline and is written with "verify", "verified": false and
-// "confirmed": false (spec 2026-10-21 §4.3).
+// one below its pass threshold never reaches the masker (TrackMasker) and is written with "verify", "verified":
+// false and "confirmed": false (spec 2026-10-21 §4.3).
 // The options, the output directory, the input (including whether MP4 can store its audio) and the
 // detector (with the face model and the verifier, if any) are checked, in that order, before anything is created or removed (with overwrite, the
 // previous output is removed once they pass); any later failure removes this run's files (and the output root and its new parent
@@ -155,7 +155,7 @@ std::string redactSummary(const RedactStats& stats);
 // OutputExistsError when the output directory exists without overwrite, or with overwrite is
 // neither empty nor holds masks.jsonl; VcError for an invalid config, media, detector and I/O
 // failures (a frame without a timestamp, an encoder that cannot be opened, fewer frames encoded
-// than decoded, a video stream without a usable frame rate, ...). Errors from BoxTimeline
+// than decoded, a video stream without a usable frame rate, ...). Errors from the masker
 // (std::invalid_argument) propagate as they are.
 RedactStats runRedact(const RedactOptions& options);
 

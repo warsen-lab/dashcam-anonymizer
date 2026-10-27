@@ -13,7 +13,9 @@ namespace {
 constexpr int kFace = 0;
 
 // Faces scoring below 0.5 need confirming (and plates below 0.15), as in BoxTimeline's tests.
-LinkerConfig linker(int lookahead, int backfill) { return LinkerConfig{MatchParams{1.0, 6.0, {0.5f, 0.15f}}, lookahead, backfill}; }
+LinkerConfig linker(int lookahead, int backfill) {
+  return LinkerConfig{MatchParams{1.0, 6.0, {0.5f, 0.15f}}, lookahead, backfill};
+}
 
 Box face(float x1, float x2, float score = 0.9f) { return Box{kFace, x1, 100, x2, 180, score}; }
 

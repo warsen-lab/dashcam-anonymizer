@@ -34,7 +34,7 @@ constexpr std::array<std::string_view, 2> kRemovedKeys = {"max_detect_fps", "mot
 constexpr int kMaxMosaicSetting = 4096;
 // More onnxruntime threads than this is a typo, not a thread count.
 constexpr int kMaxOrtIntraThreads = 1024;
-// Half a minute at 1 keyframe per second: past it, a typo.
+// 30 keyframes is at most 6 s (detect_fps is 5 to 60) and 30 s at 1 keyframe per second: past it, a typo.
 constexpr int kMaxLookaheadKeyframes = 30;
 constexpr double kMinBitrateFactor = 1.0;
 constexpr double kMaxBitrateFactor = 4.0;
@@ -301,8 +301,9 @@ nlohmann::ordered_json redactConfigToJson(const RedactConfig& c) {
   j["verify_threshold_plate"] =
       c.verifyThresholdPlate ? nlohmann::ordered_json(jsonFloat(*c.verifyThresholdPlate)) : nlohmann::ordered_json(nullptr);
   j["hold_lost_ghosts"] = c.timeline.holdLostGhosts;
-  j["hold_lost_min_score"] = c.timeline.holdLostMinScore ? nlohmann::ordered_json(jsonFloat(*c.timeline.holdLostMinScore))
-                                                         : nlohmann::ordered_json(nullptr);
+  j["hold_lost_min_score"] = c.timeline.holdLostMinScore
+                                 ? nlohmann::ordered_json(jsonFloat(*c.timeline.holdLostMinScore))
+                                 : nlohmann::ordered_json(nullptr);
   j["track_lookahead_keyframes"] = c.trackLookaheadKeyframes;
   j["track_backfill_keyframes"] = c.trackBackfillKeyframes;
   j["output_bitrate_factor_hevc"] = c.outputBitrateFactorHevc;

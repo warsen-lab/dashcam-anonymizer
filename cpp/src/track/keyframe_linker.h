@@ -28,7 +28,9 @@ struct LinkerConfig {
 // gets a box interpolated by frame index between its last detection and the new one (LinkKind::Bridged). When a
 // track is confirmed, up to B keyframes before its first detection get its first box (LinkKind::Backfilled, never
 // before the first keyframe), moved back along its velocity once it has one (in place until then) by at most half
-// its width and height per keyframe interval. Filled-in boxes never set a velocity or confirm anything; a velocity
+// its width and height per keyframe interval; when the velocity first becomes known, which may be only after a gap,
+// only the backfilled boxes on keyframes not yet returned are moved back along it, those already returned stay
+// where they were. Filled-in boxes never set a velocity or confirm anything; a velocity
 // runs between a track's last two detections.
 //
 // Keyframes come out once nothing can change them any more: real boxes first, in the order given, then the

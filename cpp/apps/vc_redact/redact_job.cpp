@@ -43,7 +43,8 @@ constexpr size_t kMaxQueueCapacity = 64;
 constexpr size_t kMinQueueCapacity = 4;
 constexpr uint64_t kQueueBudgetBytes = 256ull * 1024 * 1024;
 constexpr uint64_t kBytesPerPixel = 3;  // the largest layout the reader emits: 8-bit 4:4:4
-// A keyframe is forced after this many buffered frames, whatever the stride (for very high frame rates).
+// A keyframe is forced once this many frames have come since the last one, whatever the stride (for very high frame
+// rates): one interval, not all the frames held for the lookahead.
 constexpr size_t kMaxBufferedFrames = 120;
 // The frames held for the lookahead may take at most this much memory (spec 2026-10-27 §3.3).
 constexpr uint64_t kMaxLookaheadBufferBytes = 2ull * 1024 * 1024 * 1024;
@@ -268,7 +269,7 @@ class Processor {
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
     // A keyframe every schedule_.stride frames by frame index (spec 2026-10-19 §2), the first frame always
-    // (BoxTimeline starts on a keyframe), and one whenever kMaxBufferedFrames frames have come since the last.
+    // (the masker starts on a keyframe), and one whenever kMaxBufferedFrames frames have come since the last.
     const bool key = options_.detectEveryFrame || !sawKeyframe_ || onSchedule(schedule_, item.index) ||
                      interval_.size() >= kMaxBufferedFrames;
     stats_.track.busySec += secondsSince(started);
@@ -767,8 +768,8 @@ int64_t lookaheadBufferFrames(int lookahead, int64_t stride) {
 void checkLookaheadBuffer(int lookahead, int64_t stride, int width, int height) {
   if (lookahead <= 0) return;
   const auto frames = static_cast<uint64_t>(lookaheadBufferFrames(lookahead, stride));
-  const uint64_t bytes = frames * static_cast<uint64_t>(std::max(width, 1)) * static_cast<uint64_t>(std::max(height, 1)) *
-                         kBytesPerPixel;
+  const uint64_t bytes = frames * static_cast<uint64_t>(std::max(width, 1)) *
+                         static_cast<uint64_t>(std::max(height, 1)) * kBytesPerPixel;
   if (bytes > kMaxLookaheadBufferBytes) {
     throw VcError(formatted("track_lookahead_keyframes %d would hold about %llu frames (%.1f GiB) of this %dx%d video, "
                             "over the 2 GiB limit: lower track_lookahead_keyframes",
@@ -802,8 +803,8 @@ std::string redactSummary(const RedactStats& s) {
       static_cast<long long>(s.largeFacesDropped), static_cast<long long>(s.narrowPlatesDropped),
       static_cast<long long>(s.maskedFrames),
       static_cast<long long>(s.maskBoxes));
-  out += formatted("tracks:        lookahead %d keyframes, backfill %d; bridged %lld, backfilled %lld mask boxes; up to "
-                   "%lld frames buffered\n",
+  out += formatted("tracks:        lookahead %d keyframes, backfill %d; bridged %lld, backfilled %lld mask boxes; "
+                   "up to %lld frames buffered\n",
                    s.lookaheadKeyframes, s.backfillKeyframes, static_cast<long long>(s.bridgedMaskBoxes),
                    static_cast<long long>(s.backfilledMaskBoxes), static_cast<long long>(s.bufferedFramesPeak));
   out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,

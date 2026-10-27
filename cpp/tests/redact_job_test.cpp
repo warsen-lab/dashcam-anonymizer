@@ -598,6 +598,13 @@ TEST(RedactJob, BridgesATargetMissedOnTwoKeyframesInARow) {
   EXPECT_EQ(s.bridgedMaskBoxes, 17);
   EXPECT_EQ(s.frames, 60);
   EXPECT_EQ(lineCount(s.outputDir / "masks.jsonl"), 60u);
+  // with a lookahead the frames still come out in order, each once (masksByFrame's map would hide that)
+  std::ifstream in(s.outputDir / "masks.jsonl");
+  int expected = 0;
+  for (std::string line; std::getline(in, line); ++expected) {
+    EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int>(), expected);
+  }
+  EXPECT_EQ(expected, 60);
 }
 
 TEST(RedactJob, BackfillsBeforeTheFirstDetection) {

@@ -95,7 +95,8 @@ struct TimelineOutput {
 // box; an unmatched ghost ends, and the interval after its last hold is not masked, unless holdLostGhosts
 // is set: then that interval (and, for a ghost left after the last keyframe, the tail of the video) is
 // masked at the box the hold ended at, which does not move on, with no motion margin and origin held, and
-// the track ends after it. holdLostMinScore does the same for the tracks whose best real detection scored at least that much. A box that starts a track is masked from its own keyframe on, never before. Every
+// the track ends after it. holdLostMinScore does the same for the tracks whose best real detection scored at
+// least that much. A box that starts a track is masked from its own keyframe on, never before. Every
 // mask is grown by expandFraction of its box plus motionExpandFraction of the interval's displacement along
 // each axis (for a hold, of its capped shift), to at least minBoxPx, and clipped to the frame.
 //
@@ -150,9 +151,10 @@ class BoxTimeline {
     Box anchor{};                      // the target's last real detection (the box itself unless a ghost)
     double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 unless a ghost)
     int keyBox = -1;                   // index of `box` in the last keyframe's boxes; -1 for a ghost
-    bool confirmed = true;             // masked: a high score, or matched at two consecutive keyframes
+    // masked: a high score, or matched at two consecutive keyframes; on linked keyframes the linker's BoxLink::masked
+    bool confirmed = true;
     int64_t link = 0;                // linked: KeyframeLinker's track id
-    LinkKind kind = LinkKind::Real;  // linked: what `box` is
+    LinkKind kind = LinkKind::Real;  // linked: what `box` is (a ghost's is Real)
     bool anchorReal = true;          // `anchor` is a real detection (false while the track has only filled-in boxes)
     float bestScore = 0.0f;          // the highest score of its real detections
   };
@@ -174,7 +176,7 @@ class BoxTimeline {
   bool needsConfirmation(const Box& box) const;  // scores below its class's confirmScore
   // Linked: pairs each track with the box of `next` that has its link id.
   std::vector<MatchPair> matchLinks(const Keyframe& next) const;
-  // The track box j of `next` starts (a new id).
+  // Starts a new track (a new id) from box j of `next`.
   Track startTrack(const Keyframe& next, size_t j);
   // `old` continued by box j of `next`, `steps` frames later: a real box becomes the anchor and gives the velocity
   // from the last real one; a filled-in box changes neither.

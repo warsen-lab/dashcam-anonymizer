@@ -52,7 +52,8 @@ Result run(const TrackMaskerConfig& c, const std::vector<std::vector<Box>>& keyf
     const Keyframe k{at(index), keyframes[n]};
     if (bare) {
       TimelineOutput o = t.advance(interval, k);
-      take(std::move(o.masks), started ? std::vector<std::vector<bool>>{o.confirmed} : std::vector<std::vector<bool>>{});
+      take(std::move(o.masks),
+           started ? std::vector<std::vector<bool>>{o.confirmed} : std::vector<std::vector<bool>>{});
       started = true;
     } else {
       TrackingOutput o = m.advance(interval, k);
@@ -116,9 +117,10 @@ TEST(TrackMasker, WithLookaheadEveryFrameGetsItsMasksOnceInOrder) {
 }
 
 TEST(TrackMasker, WithLookaheadEachMaskFollowsItsFramesInterpolatedPosition) {
-  // The face on keyframe n (frame 6 n) is at x1 = 100 + 6 n^2, so the steps grow (6, 18, 30, ...): on a straight line any
-  // interval paired with the wrong keyframes would interpolate to the same x1, here it does not. Only the frames before
-  // the last keyframe are checked; past it the masker holds and extrapolates, which this test is not about.
+  // The face on keyframe n (frame 6 n) is at x1 = 100 + 6 n^2, so the steps grow (6, 18, 30, ...): on a straight
+  // line any interval paired with the wrong keyframes would interpolate to the same x1, here it does not. Only the
+  // frames before the last keyframe are checked; past it the masker holds and extrapolates, which this test is not
+  // about.
   const auto x1 = [](int n) { return 100.0 + 6.0 * n * n; };
   std::vector<std::vector<Box>> script;
   for (int n = 0; n < 10; ++n) {
@@ -253,7 +255,8 @@ TEST(TrackMasker, BackfillsBeforeTheFirstDetection) {
 }
 
 TEST(TrackMasker, ConfirmedListsTheRealBoxesOfEachKeyframe) {
-  const Result r = run(masker(2, 1), {{face(100, 180), face(900, 980, 0.3f)}, {face(100, 180)}, {}, {face(500, 580, 0.3f)}});
+  const Result r =
+      run(masker(2, 1), {{face(100, 180), face(900, 980, 0.3f)}, {face(100, 180)}, {}, {face(500, 580, 0.3f)}});
   EXPECT_EQ(r.confirmed, (std::vector<std::vector<bool>>{{true, false}, {true}, {}, {false}}));
 }
 
