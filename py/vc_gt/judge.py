@@ -120,25 +120,31 @@ def ask(items: list[Item], prompt: str, allowed: tuple[str, ...], runner: Runner
         work_dir: Path, batch: int, tile: int, parallel: int = 1) -> Counter:
     """Asks about every item without a judgment in `judgments` yet: batches of up to `batch` items of one class on a
     numbered grid (written to work_dir), `parallel` calls at once. Each batch's verdicts are appended as it comes, so an
-    interrupted run keeps them; an item the answer leaves out is "unsure". Returns counts per verdict."""
+    interrupted run keeps them; an item the answer leaves out is "unsure". A batch whose command gives no answer at all
+    (timeout, failure) is not recorded, so a rerun asks again. Returns counts per verdict, and "no answer"."""
     known = resolve(read_judgments(judgments))
     todo = [it for it in items if it.id not in known]
     batches = [same[i : i + batch] for cls in sorted({it.cls for it in todo})
                for same in [[it for it in todo if it.cls == cls]] for i in range(0, len(same), batch)]
 
-    def one(b: list[Item]) -> list[Judgment]:
+    def one(b: list[Item]) -> tuple[list[Judgment], int]:
         cls = b[0].cls
         image = grid_image(b, tile, Path(work_dir) / f"batch_{b[0].id}.jpg")  # JPEG: a seventh of the PNG upload
         out = runner(image, _fill(prompt, {"{count}": str(len(b)), "{cls_zh}": CLS_ZH[cls], "{cls}": cls}), cls)
+        if out is None:
+            return [], len(b)
         answers = parse_answers(out, allowed)
-        detail = f"grid of {len(b)}" if answers else ("no answer" if out is None else "no verdicts in the output")
-        return [Judgment(it.id, answers.get(k + 1, "unsure"), judge, None, detail) for k, it in enumerate(b)]
+        detail = f"grid of {len(b)}" if answers else "no verdicts in the output"
+        return [Judgment(it.id, answers.get(k + 1, "unsure"), judge, None, detail) for k, it in enumerate(b)], 0
 
     counts: Counter = Counter()
     with ThreadPoolExecutor(max_workers=parallel) as pool:
-        for got in pool.map(one, batches):
-            append_judgments(judgments, got, verdicts=allowed)
+        for got, unanswered in pool.map(one, batches):
+            if got:
+                append_judgments(judgments, got, verdicts=allowed)
             counts.update(j.verdict for j in got)
+            if unanswered:
+                counts["no answer"] += unanswered
     return counts
 
 

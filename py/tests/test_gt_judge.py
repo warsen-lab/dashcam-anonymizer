@@ -64,11 +64,15 @@ def test_question_b_may_answer_that_the_box_holds_no_plate_or_face(tmp_path):
     assert read_judgments(tmp_path / "f.jsonl")[0].verdict == "not_target"
 
 
-def test_a_command_that_does_not_answer_leaves_its_items_unsure(tmp_path):
-    ask([Item("o0", "plate", (_crop(tmp_path, "a.jpg"),))], "{count}{cls_zh}", OBJECT_VERDICTS, _Runner(None),
-        "llm:fake", tmp_path / "j.jsonl", tmp_path / "llm", batch=4, tile=64)
-    j = read_judgments(tmp_path / "j.jsonl")[0]
-    assert (j.verdict, j.detail) == ("unsure", "no answer")
+def test_a_command_that_does_not_answer_leaves_its_items_unjudged_for_a_rerun(tmp_path):
+    # the 2026-10-26 run: 1,245 frames whose calls timed out were recorded "unsure" and a rerun skipped them
+    items = [Item("o0", "plate", (_crop(tmp_path, "a.jpg"),))]
+    counts = ask(items, "{count}{cls_zh}", OBJECT_VERDICTS, _Runner(None), "llm:fake", tmp_path / "j.jsonl",
+                 tmp_path / "llm", batch=4, tile=64)
+    assert counts == {"no answer": 1} and read_judgments(tmp_path / "j.jsonl") == []
+    ask(items, "{count}{cls_zh}", OBJECT_VERDICTS, _Runner('[{"n": 1, "verdict": "not_real"}]'), "llm:fake",
+        tmp_path / "j.jsonl", tmp_path / "llm", batch=4, tile=64)
+    assert read_judgments(tmp_path / "j.jsonl")[0].verdict == "not_real"
 
 
 class _PerObject:
