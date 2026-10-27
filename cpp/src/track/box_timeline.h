@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "detect/box.h"
+#include "track/box_matching.h"
 
 namespace vc {
 
@@ -65,12 +66,7 @@ struct TimelineOutput {
 // Turns detections on keyframes into one mask per target and frame (spec 2026-10-19 §3). Boxes on
 // consecutive keyframes are matched into tracks; a track has at most one mask per frame.
 //
-// Matching runs in two greedy, one-to-one passes over same-class pairs, cheapest first; both try the
-// target staying put and keeping its velocity. The first pass takes pairs whose centres are at most
-// matchMaxDistance mean box sides apart. The second pass, over what is left, takes pairs of similar size
-// (each side within a factor of 3 of the other's) whose centres are at most matchMaxDistanceLoose times
-// the largest side of the two boxes apart along each axis, and only if neither box is below its class's
-// confirmScore (spec §3.8; a ghost counts by its last real detection): such pairs match in the first pass only.
+// Boxes are matched to the tracks with matchBoxes (box_matching.h); a ghost's anchor is its last real detection.
 //
 // A matched track is interpolated between its two keyframe boxes (centre and size, linearly in time). A
 // track missed at the next keyframe is held at its box, moved along its velocity by at most half the
@@ -133,11 +129,6 @@ class BoxTimeline {
     bool confirmed = true;             // masked: a high score, or matched at two consecutive keyframes
   };
 
-  struct Match {
-    size_t track = 0;
-    size_t next = 0;
-  };
-
   // A track's smoothed mask size (spec §3.1).
   struct Size {
     double w = 0;
@@ -151,7 +142,7 @@ class BoxTimeline {
   // just enough to bring its area down to `ratio` times raw's; unchanged when it is no larger than that.
   static Size cappedArea(Size size, Size raw, double ratio);
 
-  std::vector<Match> match(const Keyframe& next, double steps) const;
+  std::vector<MatchPair> match(const Keyframe& next, double steps) const;
   bool needsConfirmation(const Box& box) const;  // scores below its class's confirmScore
   // How far a held track has moved `since` frames after its keyframe: along its velocity, at most half
   // its box's width along x and half its height along y.
