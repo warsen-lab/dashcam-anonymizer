@@ -57,7 +57,7 @@ cmake --build build/cpp -j 4
 ./build/cpp/tests/vc_tests --gtest_filter='VideoReader.*:JpegWriter.*:VideoWriter.*:FrameFileName.*'
 ./build/cpp/tests/vc_tests --gtest_filter='ExtractCli.*:ExtractJob.*'
 ./build/cpp/tests/vc_tests --gtest_filter='Box.*:Letterbox.*:ModelInfo.*:YoloDecode.*:FakeDetector.*:OnnxYoloDetector.*:YuNetDecode.*:YuNetDetector.*:DetectionMerge.*:MergedDetector.*:Detector.*:ExecutionProvider.*'
-./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:BoxMatching.*:KeyframeLinker.*:Mosaic.*:MosaicGrid.*:BoundedQueue.*:RedactConfig.*:Records.*'
+./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:BoxMatching.*:KeyframeLinker.*:TrackMasker.*:Mosaic.*:MosaicGrid.*:BoundedQueue.*:RedactConfig.*:Records.*'
 ./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*:DetectCli.*:DetectImages.*:DetectRate.*'
 ```
 

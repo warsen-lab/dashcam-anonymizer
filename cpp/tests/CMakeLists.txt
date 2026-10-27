@@ -7,6 +7,7 @@ add_executable(vc_tests
   box_timeline_test.cpp
   box_matching_test.cpp
   keyframe_linker_test.cpp
+  track_masker_test.cpp
   build_config_test.cpp
   detect_rate_test.cpp
   bounded_queue_test.cpp
