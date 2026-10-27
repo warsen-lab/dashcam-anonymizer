@@ -35,8 +35,10 @@ FrameTime at(int64_t i) { return {i, i * 1000.0 / 60.0}; }
 
 // keyframes[n] on frame 6 n, then `tail` frames after the last keyframe; with a TrackMasker, or with a bare
 // BoxTimeline when `bare`.
-Result run(const TrackMaskerConfig& c, const std::vector<std::vector<Box>>& keyframes, int tail = 6, bool bare = false) {
-  TrackMasker m(c, 1920, 1080);
+Result run(const TrackMaskerConfig& c, const std::vector<std::vector<Box>>& keyframes, int tail = 6, bool bare = false,
+           TrackMasker* reuse = nullptr) {
+  TrackMasker own(c, 1920, 1080);
+  TrackMasker& m = reuse ? *reuse : own;
   BoxTimeline t(c.timeline, 1920, 1080);
   bool started = false;
   Result r;
@@ -70,6 +72,22 @@ Result run(const TrackMaskerConfig& c, const std::vector<std::vector<Box>>& keyf
   return r;
 }
 
+std::vector<FrameTime> frames(int64_t from, int64_t to) {
+  std::vector<FrameTime> f;
+  for (int64_t i = from; i < to; ++i) f.push_back(at(i));
+  return f;
+}
+
+// What a sequence of calls handed back, summed up.
+struct Tally {
+  std::vector<std::vector<MaskBox>> masks;
+  size_t confirmed = 0;
+  void add(TrackingOutput o) {
+    for (auto& m : o.masks) masks.push_back(std::move(m));
+    confirmed += o.confirmed.size();
+  }
+};
+
 TEST(TrackMasker, WithoutLookaheadItIsBoxTimeline) {
   const std::vector<std::vector<Box>> script{
       {face(100, 180)}, {face(130, 210), face(900, 980, 0.3f)}, {}, {}, {face(200, 280)}, {face(600, 680, 0.3f)}, {}};
@@ -95,6 +113,116 @@ TEST(TrackMasker, WithLookaheadEveryFrameGetsItsMasksOnceInOrder) {
   ASSERT_EQ(r.masks.size(), 58u);  // 9 intervals of 6 and a tail of 4
   for (const auto& m : r.masks) EXPECT_EQ(m.size(), 1u);
   EXPECT_EQ(r.confirmed.size(), 10u);
+}
+
+TEST(TrackMasker, WithLookaheadEachMaskFollowsItsFramesInterpolatedPosition) {
+  // The face moves 12 px per keyframe, 6 frames apart: x1 = 100 + 2 f, and the tail after the last keyframe carries on at the same speed.
+  std::vector<std::vector<Box>> script;
+  for (int n = 0; n < 10; ++n) script.push_back({face(100.0f + 12 * n, 180.0f + 12 * n)});
+  for (const auto& config : {masker(3, 0), masker(2, 1), masker(0, 0)}) {
+    const Result r = run(config, script, 4);
+    ASSERT_EQ(r.masks.size(), 58u);
+    for (size_t f = 0; f < r.masks.size(); ++f) {
+      ASSERT_EQ(r.masks[f].size(), 1u) << f;
+      const float expected = 100.0f + 2.0f * static_cast<float>(f);
+      EXPECT_NEAR(r.masks[f][0].x1, expected, 1e-3) << "lookahead " << config.lookahead << " frame " << f;
+    }
+  }
+}
+
+TEST(TrackMasker, FinishWithoutKeyframesReturnsNothing) {
+  for (const int lookahead : {0, 3}) {
+    TrackMasker m(masker(lookahead, 0), 1920, 1080);
+    const TrackingOutput o = m.finish({});
+    EXPECT_TRUE(o.masks.empty()) << lookahead;
+    EXPECT_TRUE(o.confirmed.empty()) << lookahead;
+  }
+}
+
+TEST(TrackMasker, FewerKeyframesThanTheLookaheadStillMaskEveryFrame) {
+  const Result r = run(masker(3, 0), {{face(100, 180)}}, 6);
+  ASSERT_EQ(r.masks.size(), 6u);
+  for (size_t f = 0; f < r.masks.size(); ++f) EXPECT_EQ(r.masks[f].size(), 1u) << f;
+  EXPECT_EQ(r.confirmed.size(), 1u);
+}
+
+TEST(TrackMasker, LinkedAdvanceRejectsBadFramesAndStaysUsable) {
+  struct Case {
+    const char* name;
+    std::vector<FrameTime> frames;
+  };
+  const std::vector<Case> cases{
+      {"not starting at the previous keyframe", frames(1, 6)},
+      {"no frames", {}},
+      {"not strictly increasing", {at(6), at(8), at(7)}},
+      {"repeating an index", {at(6), at(6), at(7)}},
+      {"reaching the next keyframe", frames(6, 13)},
+  };
+  for (const Case& c : cases) {
+    TrackMasker m(masker(3, 0), 1920, 1080);
+    Tally t;
+    t.add(m.advance({}, Keyframe{at(0), {face(100, 180)}}));
+    t.add(m.advance(frames(0, 6), Keyframe{at(6), {face(100, 180)}}));
+    // frames of the interval 6..12 go with the keyframe at 12.
+    EXPECT_THROW(m.advance(c.frames, Keyframe{at(12), {face(100, 180)}}), std::invalid_argument) << c.name;
+    t.add(m.advance(frames(6, 12), Keyframe{at(12), {face(100, 180)}}));
+    t.add(m.advance(frames(12, 18), Keyframe{at(18), {face(100, 180)}}));
+    t.add(m.finish(frames(18, 24)));
+    ASSERT_EQ(t.masks.size(), 24u) << c.name;
+    for (const auto& x : t.masks) EXPECT_EQ(x.size(), 1u) << c.name;
+    EXPECT_EQ(t.confirmed, 4u) << c.name;
+  }
+}
+
+TEST(TrackMasker, LinkedAdvanceRejectsFramesBeforeTheFirstKeyframeAndStaysUsable) {
+  TrackMasker m(masker(3, 0), 1920, 1080);
+  Tally t;
+  EXPECT_THROW(m.advance(frames(0, 3), Keyframe{at(6), {face(100, 180)}}), std::invalid_argument);
+  t.add(m.advance({}, Keyframe{at(0), {face(100, 180)}}));
+  t.add(m.advance(frames(0, 6), Keyframe{at(6), {face(100, 180)}}));
+  t.add(m.finish(frames(6, 12)));
+  EXPECT_EQ(t.masks.size(), 12u);
+  EXPECT_EQ(t.confirmed, 2u);
+}
+
+TEST(TrackMasker, LinkedFinishRejectsBadFramesAndStaysUsable) {
+  struct Case {
+    const char* name;
+    std::vector<FrameTime> frames;
+  };
+  const std::vector<Case> cases{
+      {"not starting at the last keyframe", frames(7, 12)},
+      {"not strictly increasing", {at(6), at(8), at(7)}},
+  };
+  for (const Case& c : cases) {
+    TrackMasker m(masker(3, 0), 1920, 1080);
+    Tally t;
+    t.add(m.advance({}, Keyframe{at(0), {face(100, 180)}}));
+    t.add(m.advance(frames(0, 6), Keyframe{at(6), {face(100, 180)}}));
+    EXPECT_THROW(m.finish(c.frames), std::invalid_argument) << c.name;
+    t.add(m.finish(frames(6, 12)));
+    EXPECT_EQ(t.masks.size(), 12u) << c.name;
+    EXPECT_EQ(t.confirmed, 2u) << c.name;
+  }
+  TrackMasker m(masker(3, 0), 1920, 1080);
+  EXPECT_THROW(m.finish(frames(0, 3)), std::invalid_argument);  // no keyframe yet
+}
+
+TEST(TrackMasker, CanBeReusedAfterFinish) {
+  const std::vector<std::vector<Box>> first{{face(100, 180)}, {face(130, 210)}, {}, {face(200, 280)}, {face(220, 300)}};
+  const std::vector<std::vector<Box>> second{{face(400, 480)}, {face(430, 510)}, {face(460, 540)}};
+  const TrackMaskerConfig c = masker(3, 0);
+  TrackMasker reused(c, 1920, 1080);
+  (void)run(c, first, 6, false, &reused);
+  const Result again = run(c, second, 5, false, &reused);
+  const Result fresh = run(c, second, 5);
+  ASSERT_EQ(again.masks.size(), fresh.masks.size());
+  ASSERT_EQ(again.masks.size(), 17u);
+  for (size_t f = 0; f < fresh.masks.size(); ++f) {
+    ASSERT_EQ(again.masks[f].size(), fresh.masks[f].size()) << f;
+    for (size_t k = 0; k < fresh.masks[f].size(); ++k) EXPECT_EQ(again.masks[f][k].x1, fresh.masks[f][k].x1) << f;
+  }
+  EXPECT_EQ(again.confirmed, fresh.confirmed);
 }
 
 TEST(TrackMasker, BridgesTheGapBoxTimelineLeaves) {

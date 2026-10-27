@@ -35,15 +35,21 @@ class TrackMasker {
   TrackMasker(const TrackMaskerConfig& config, int frameWidth, int frameHeight);
 
   // As BoxTimeline::advance: `frames` from the previous keyframe (inclusive) to `next` (exclusive), empty on the
-  // first call.
+  // first call. Invalid arguments throw std::invalid_argument and leave the masker unchanged; any other exception
+  // (from inside the timeline) leaves it unusable.
   TrackingOutput advance(const std::vector<FrameTime>& frames, const Keyframe& next);
 
   // As BoxTimeline::finish: the frames from the last keyframe to the end of the video. Returns every mask and flag
-  // still owed and resets.
+  // still owed and resets. Invalid arguments throw std::invalid_argument and leave the masker unchanged; any other
+  // exception (from inside the timeline) leaves it unusable.
   TrackingOutput finish(const std::vector<FrameTime>& frames);
 
  private:
   static TimelineConfig timelineConfig(const TrackMaskerConfig& config);
+  // Linked path: throws std::invalid_argument, touching nothing, unless `frames` start at the previous keyframe
+  // (or are empty before the first one, or in finish() with no keyframes), have strictly increasing indices and,
+  // when `next` is given, end before it.
+  void requireFrames(const std::vector<FrameTime>& frames, const std::optional<FrameTime>& next) const;
   // Puts a keyframe the linker settled into the timeline, adding what comes out to `out`.
   void feed(Keyframe key, TrackingOutput& out);
 

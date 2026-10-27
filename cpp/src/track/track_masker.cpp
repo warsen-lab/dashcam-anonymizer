@@ -33,10 +33,7 @@ TrackingOutput TrackMasker::advance(const std::vector<FrameTime>& frames, const 
     lastKey_ = next.time.index;
     return out;
   }
-  if (!lastKey_ && !frames.empty()) throw std::invalid_argument("TrackMasker: frames before the first keyframe");
-  if (lastKey_ && (frames.empty() || frames.front().index != *lastKey_)) {
-    throw std::invalid_argument("TrackMasker: frames must start at the previous keyframe");
-  }
+  requireFrames(frames, next.time);
   std::vector<Keyframe> settled = linker_->push(next);  // throws before anything here changes
   if (lastKey_) intervals_.back() = frames;
   intervals_.emplace_back();
@@ -54,13 +51,8 @@ TrackingOutput TrackMasker::finish(const std::vector<FrameTime>& frames) {
     lastKey_.reset();
     return out;
   }
-  if (!lastKey_) {
-    if (!frames.empty()) throw std::invalid_argument("TrackMasker: frames before the first keyframe");
-    return out;
-  }
-  if (!frames.empty() && frames.front().index != *lastKey_) {
-    throw std::invalid_argument("TrackMasker: frames must start at the previous keyframe");
-  }
+  requireFrames(frames, std::nullopt);
+  if (!lastKey_) return out;
   intervals_.back() = frames;
   for (Keyframe& k : linker_->finish()) feed(std::move(k), out);
   TimelineOutput step = timeline_.finish(intervals_.front());
@@ -69,6 +61,25 @@ TrackingOutput TrackMasker::finish(const std::vector<FrameTime>& frames) {
   fed_ = false;
   lastKey_.reset();
   return out;
+}
+
+void TrackMasker::requireFrames(const std::vector<FrameTime>& frames, const std::optional<FrameTime>& next) const {
+  if (!lastKey_) {
+    if (!frames.empty()) throw std::invalid_argument("TrackMasker: frames before the first keyframe");
+    return;
+  }
+  // finish() may be given no frames at all; advance() always needs the previous keyframe's frames.
+  if (frames.empty() ? next.has_value() : frames.front().index != *lastKey_) {
+    throw std::invalid_argument("TrackMasker: frames must start at the previous keyframe");
+  }
+  for (size_t i = 1; i < frames.size(); ++i) {
+    if (frames[i].index <= frames[i - 1].index) {
+      throw std::invalid_argument("TrackMasker: frame indices must be strictly increasing");
+    }
+  }
+  if (next && !frames.empty() && frames.back().index >= next->index) {
+    throw std::invalid_argument("TrackMasker: the next keyframe must follow the frames");
+  }
 }
 
 void TrackMasker::feed(Keyframe key, TrackingOutput& out) {
