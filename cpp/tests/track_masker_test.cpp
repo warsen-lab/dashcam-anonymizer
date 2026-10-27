@@ -116,15 +116,21 @@ TEST(TrackMasker, WithLookaheadEveryFrameGetsItsMasksOnceInOrder) {
 }
 
 TEST(TrackMasker, WithLookaheadEachMaskFollowsItsFramesInterpolatedPosition) {
-  // The face moves 12 px per keyframe, 6 frames apart: x1 = 100 + 2 f, and the tail after the last keyframe carries on at the same speed.
+  // The face on keyframe n (frame 6 n) is at x1 = 100 + 6 n^2, so the steps grow (6, 18, 30, ...): on a straight line any
+  // interval paired with the wrong keyframes would interpolate to the same x1, here it does not. Only the frames before
+  // the last keyframe are checked; past it the masker holds and extrapolates, which this test is not about.
+  const auto x1 = [](int n) { return 100.0 + 6.0 * n * n; };
   std::vector<std::vector<Box>> script;
-  for (int n = 0; n < 10; ++n) script.push_back({face(100.0f + 12 * n, 180.0f + 12 * n)});
+  for (int n = 0; n < 10; ++n) {
+    script.push_back({face(static_cast<float>(x1(n)), static_cast<float>(x1(n) + 80))});
+  }
   for (const auto& config : {masker(3, 0), masker(2, 1), masker(0, 0)}) {
     const Result r = run(config, script, 4);
     ASSERT_EQ(r.masks.size(), 58u);
-    for (size_t f = 0; f < r.masks.size(); ++f) {
+    for (int f = 0; f < 54; ++f) {  // frame 54 is the last keyframe
       ASSERT_EQ(r.masks[f].size(), 1u) << f;
-      const float expected = 100.0f + 2.0f * static_cast<float>(f);
+      const int n = f / 6;
+      const double expected = x1(n) + (x1(n + 1) - x1(n)) * (f - 6 * n) / 6.0;
       EXPECT_NEAR(r.masks[f][0].x1, expected, 1e-3) << "lookahead " << config.lookahead << " frame " << f;
     }
   }
