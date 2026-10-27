@@ -1424,5 +1424,91 @@ TEST(BoxTimeline, AClassWithoutAConfirmScoreStillMatchesLoosely) {
 
 TEST(BoxTimeline, HoldLostGhostsIsOffByDefault) { EXPECT_FALSE(TimelineConfig{}.holdLostGhosts); }
 
+// ---- Linked keyframes (spec 2026-10-27 §3.2): KeyframeLinker's track ids and kinds instead of matching.
+
+TimelineConfig linkedExact() {
+  TimelineConfig c = exact();
+  c.linked = true;
+  return c;
+}
+
+Keyframe linkedKey(int64_t index, std::vector<Box> boxes, std::vector<BoxLink> links) {
+  Keyframe k = key(index, std::move(boxes));
+  k.links = std::move(links);
+  return k;
+}
+
+TEST(BoxTimeline, LinkedTracksFollowTheirIdsWhereverTheBoxesAre) {
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80), face(1000, 0, 1080, 80)}, {{1}, {2}}));
+  // the ids cross: track 1 goes to the right, track 2 to the left; half way both are in the middle
+  const TimelineOutput out =
+      t.advance(frames(0, 6), linkedKey(6, {face(0, 0, 80, 80), face(1000, 0, 1080, 80)}, {{2}, {1}}));
+  ASSERT_EQ(out.masks[3].size(), 2u);
+  for (const MaskBox& m : out.masks[3]) expectBox(m, 500, 0, 580, 80, MaskOrigin::Interpolated);
+}
+
+TEST(BoxTimeline, FramesNextToABridgedBoxAreBridged) {
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1}}));
+  const TimelineOutput a = t.advance(frames(0, 6), linkedKey(6, {face(60, 0, 140, 80)}, {{1, LinkKind::Bridged}}));
+  const TimelineOutput b = t.advance(frames(6, 12), linkedKey(12, {face(120, 0, 200, 80)}, {{1}}));
+  expectBox(a.masks[0][0], 0, 0, 80, 80, MaskOrigin::Detected);
+  expectBox(a.masks[3][0], 30, 0, 110, 80, MaskOrigin::Bridged);
+  expectBox(b.masks[0][0], 60, 0, 140, 80, MaskOrigin::Bridged);
+  expectBox(b.masks[5][0], 110, 0, 190, 80, MaskOrigin::Bridged);
+}
+
+TEST(BoxTimeline, FramesFromABackfilledBoxAreBackfilled) {
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Backfilled}}));
+  const TimelineOutput out = t.advance(frames(0, 6), linkedKey(6, {face(60, 0, 140, 80)}, {{1}}));
+  expectBox(out.masks[0][0], 0, 0, 80, 80, MaskOrigin::Backfilled);
+  expectBox(out.masks[5][0], 50, 0, 130, 80, MaskOrigin::Backfilled);
+}
+
+TEST(BoxTimeline, AnUnmaskedLinkIsNotMaskedEvenWhenItsTrackGoesOn) {
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Real, false}}));
+  const TimelineOutput out =
+      t.advance(frames(0, 6), linkedKey(6, {face(0, 0, 80, 80)}, {{1, LinkKind::Real, false}}));
+  for (const auto& m : out.masks) EXPECT_TRUE(m.empty());
+  EXPECT_EQ(out.confirmed, std::vector<bool>{false});
+}
+
+TEST(BoxTimeline, ALinkedTrackThatEndsIsHeldForOneIntervalAsBefore) {
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1}}));
+  const TimelineOutput held = t.advance(frames(0, 6), linkedKey(6, {}, {}));
+  const TimelineOutput after = t.advance(frames(6, 12), linkedKey(12, {}, {}));
+  expectBox(held.masks[0][0], 0, 0, 80, 80, MaskOrigin::Detected);
+  expectBox(held.masks[5][0], 0, 0, 80, 80, MaskOrigin::Held);
+  for (const auto& m : after.masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, OnlyRealBoxesSetALinkedTracksVelocity) {
+  // the track starts on a backfilled box: its first real box takes no velocity from it, so the hold that follows
+  // stays where the real box was instead of moving on
+  BoxTimeline t(linkedExact(), 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Backfilled}}));
+  t.advance(frames(0, 6), linkedKey(6, {face(60, 0, 140, 80)}, {{1}}));
+  const TimelineOutput held = t.advance(frames(6, 12), linkedKey(12, {}, {}));
+  expectBox(held.masks[5][0], 60, 0, 140, 80, MaskOrigin::Held);
+}
+
+TEST(BoxTimeline, ALinkedKeyframeNeedsOneUniqueLinkPerBox) {
+  BoxTimeline linked(linkedExact(), 1920, 1080);
+  EXPECT_THROW(linked.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {})), std::invalid_argument);
+  EXPECT_THROW(linked.advance({}, linkedKey(0, {face(0, 0, 80, 80), face(200, 0, 280, 80)}, {{1}, {1}})),
+               std::invalid_argument);
+  BoxTimeline plain(exact(), 1920, 1080);
+  EXPECT_THROW(plain.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1}})), std::invalid_argument);
+}
+
+TEST(BoxTimeline, TheNewOriginsHaveTheirNames) {
+  EXPECT_STREQ(toString(MaskOrigin::Bridged), "bridged");
+  EXPECT_STREQ(toString(MaskOrigin::Backfilled), "backfilled");
+}
+
 }  // namespace
 }  // namespace vc

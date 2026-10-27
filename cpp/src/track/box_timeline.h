@@ -11,10 +11,21 @@
 
 namespace vc {
 
-enum class MaskOrigin { Detected, Interpolated, Held };
+enum class MaskOrigin { Detected, Interpolated, Held, Bridged, Backfilled };
 
-// "detected" | "interpolated" | "held" — the values written to masks.jsonl.
+// "detected" | "interpolated" | "held" | "bridged" | "backfilled" — the values written to masks.jsonl.
 const char* toString(MaskOrigin origin);
+
+// What a box on a linked keyframe is (KeyframeLinker, spec 2026-10-27 §2): a detection, or filled in where its
+// track was missed (bridged) or before it was first detected (backfilled).
+enum class LinkKind { Real, Bridged, Backfilled };
+
+// A box's place in KeyframeLinker's tracks.
+struct BoxLink {
+  int64_t track = 0;  // the linker's track id, from 1
+  LinkKind kind = LinkKind::Real;
+  bool masked = true;  // the linker's confirmation: false for a low-score box it did not confirm
+};
 
 struct MaskBox {
   int cls = 0;
@@ -36,6 +47,8 @@ struct FrameTime {
 struct Keyframe {
   FrameTime time;
   std::vector<Box> boxes;
+  // With TimelineConfig::linked, one per box (unique track ids); otherwise empty.
+  std::vector<BoxLink> links{};
 };
 
 struct TimelineConfig {
@@ -52,6 +65,9 @@ struct TimelineConfig {
   // Whether a ghost that is missed again at the next keyframe is still masked, at the box it was held to, over
   // its whole interval (spec 2026-10-19 §3.7); off: that interval is not masked.
   bool holdLostGhosts = false;
+  // Keyframes come from KeyframeLinker (spec 2026-10-27 §3.2): a track follows its BoxLink::track instead of being
+  // matched, and is masked as BoxLink::masked says instead of by confirmScore.
+  bool linked = false;
 };
 
 // What advance() and finish() return.
@@ -92,6 +108,10 @@ struct TimelineOutput {
 //
 // A track's velocity runs from its last real detection. Feed keyframes in order; frames are identified by
 // decode index.
+//
+// With config.linked the keyframes come from KeyframeLinker: tracks follow the boxes' link ids instead of matching,
+// a box is masked as its link says (no confirmScore), and frames between a bridged or backfilled box and its
+// neighbours get that origin (backfilled before bridged before interpolated). Filled-in boxes never set a velocity.
 class BoxTimeline {
  public:
   // Throws std::invalid_argument for a non-positive frame size or invalid config.
@@ -127,6 +147,9 @@ class BoxTimeline {
     double anchorSteps = 0;            // frames from `anchor` to the last keyframe (0 unless a ghost)
     int keyBox = -1;                   // index of `box` in the last keyframe's boxes; -1 for a ghost
     bool confirmed = true;             // masked: a high score, or matched at two consecutive keyframes
+    int64_t link = 0;                // linked: KeyframeLinker's track id
+    LinkKind kind = LinkKind::Real;  // linked: what `box` is
+    bool anchorReal = true;          // `anchor` is a real detection (false while the track has only filled-in boxes)
   };
 
   // A track's smoothed mask size (spec §3.1).
@@ -144,6 +167,13 @@ class BoxTimeline {
 
   std::vector<MatchPair> match(const Keyframe& next, double steps) const;
   bool needsConfirmation(const Box& box) const;  // scores below its class's confirmScore
+  // Linked: pairs each track with the box of `next` that has its link id.
+  std::vector<MatchPair> matchLinks(const Keyframe& next) const;
+  // The track box j of `next` starts (a new id).
+  Track startTrack(const Keyframe& next, size_t j);
+  // `old` continued by box j of `next`, `steps` frames later: a real box becomes the anchor and gives the velocity
+  // from the last real one; a filled-in box changes neither.
+  Track continueTrack(const Track& old, const Keyframe& next, size_t j, double steps) const;
   // How far a held track has moved `since` frames after its keyframe: along its velocity, at most half
   // its box's width along x and half its height along y.
   Offset heldShift(const Track& track, double since) const;
