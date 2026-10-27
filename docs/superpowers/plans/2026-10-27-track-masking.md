@@ -2281,3 +2281,197 @@ git commit -m "docs: track-level masking acceptance report
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+---
+
+## 修订（2026-10-27，Task 7 试跑后，用户决定；见设计 §8）
+
+以下覆盖前文：
+- **默认值**：`track_lookahead_keyframes` 2、`track_backfill_keyframes` 1；新键 `hold_lost_min_score` 默认 0.5（Task 10）。
+- **Task 7**：Step 2 的 W = 0 配置还要设 `track_backfill_keyframes` 0、`hold_lost_min_score` null（`data/track-configs/w0.json`）；Step 3 改为新默认值，输出到 `data/redacted/track-w2`，期望 `lookahead_keyframes` 2、`backfill_keyframes` 1、`buffered_frames_peak` 18；Step 4 期望新默认值下三行都是 `masked`。
+- **Task 8**：设计文档 §7、§8 已由控制者写好，Task 8 只改 `cpp/README.md`，段落里的默认值写 2 和 1，并加一句 `hold_lost_min_score` 的规则（见设计 §8）。
+- **Task 9**：所有 `track-w5` 路径改为 `track-w2`；报告结论写"是否保留默认 W = 2、B = 1、`hold_lost_min_score` 0.5"。Step 8 的调参范围改为 W ∈ {2, 3}、B ∈ {0, 1}、`hold_lost_min_score` ∈ {0.5, 0.7, null}。
+- **执行顺序**：Task 10 → Task 7（重跑）→ Task 8 → Task 9。
+
+### Task 10: 新默认值与高分轨迹丢失后多保持一个间隔
+
+**Files:**
+- Modify: `cpp/src/track/box_timeline.h`、`cpp/src/track/box_timeline.cpp`
+- Modify: `cpp/apps/vc_redact/redact_config.h`、`cpp/apps/vc_redact/redact_config.cpp`
+- Modify: `configs/redact.json`、`docs/USAGE.md`（按轨迹打码的两行，及新增一行）
+- Test: `cpp/tests/box_timeline_test.cpp`、`cpp/tests/redact_config_test.cpp`
+
+**Interfaces:**
+- Produces:
+  - `TimelineConfig::holdLostMinScore`（`std::optional<float>`，默认 `std::nullopt` = 关闭）
+  - `RedactConfig` 默认 `timeline.holdLostMinScore = 0.5f`、`trackLookaheadKeyframes = 2`、`trackBackfillKeyframes = 1`
+  - 配置键 `hold_lost_min_score`：[0, 1] 内的数，或 `null`（关闭）；缺省 0.5
+
+- [ ] **Step 1: 写失败的测试**
+
+`cpp/tests/box_timeline_test.cpp` 末尾（`}  // namespace` 之前）加：
+```cpp
+// ---- A lost track whose best real detection scored high enough is held for one more interval (spec 2026-10-27 §8).
+
+TEST(BoxTimeline, ALostTrackWhoseBestScoreReachesTheMinimumIsHeldOneMoreInterval) {
+  TimelineConfig c = confirming();
+  c.holdLostMinScore = 0.5f;
+  BoxTimeline t(c, 1920, 1080);
+  t.advance({}, key(0, {face(0, 0, 80, 80), weakFace(500, 0, 580, 80)}));
+  t.advance(frames(0, 6), key(6, {face(0, 0, 80, 80), weakFace(500, 0, 580, 80)}));  // both confirmed
+  t.advance(frames(6, 12), key(12, {}));                                              // both lost: held
+  const TimelineOutput out = t.advance(frames(12, 18), key(18, {}));
+  ASSERT_EQ(out.masks[0].size(), 1u);  // the face scoring 0.9, not the one scoring 0.3
+  expectBox(out.masks[0][0], 0, 0, 80, 80, MaskOrigin::Held);
+  expectBox(out.masks[5][0], 0, 0, 80, 80, MaskOrigin::Held);
+  const TimelineOutput after = t.advance(frames(18, 24), key(24, {}));
+  for (const auto& m : after.masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, TheMinimumScoreAlsoHoldsAGhostLeftAtTheEnd) {
+  for (const bool on : {false, true}) {
+    TimelineConfig c = exact();
+    if (on) c.holdLostMinScore = 0.5f;
+    BoxTimeline t(c, 1920, 1080);
+    t.advance({}, key(0, {face(0, 0, 80, 80)}));
+    t.advance(frames(0, 6), key(6, {face(0, 0, 80, 80)}));
+    t.advance(frames(6, 12), key(12, {}));
+    const TimelineOutput out = t.finish(frames(12, 18));
+    for (const auto& m : out.masks) EXPECT_EQ(m.size(), on ? 1u : 0u) << on;
+  }
+}
+
+TEST(BoxTimeline, OnlyRealBoxesCountTowardsTheBestScore) {
+  // the backfilled box scores 0.9, the only real one 0.3: the track is not held once more after it is lost
+  TimelineConfig c = linkedExact();
+  c.holdLostMinScore = 0.5f;
+  BoxTimeline t(c, 1920, 1080);
+  t.advance({}, linkedKey(0, {face(0, 0, 80, 80)}, {{1, LinkKind::Backfilled}}));
+  t.advance(frames(0, 6), linkedKey(6, {weakFace(0, 0, 80, 80)}, {{1}}));
+  t.advance(frames(6, 12), linkedKey(12, {}, {}));
+  const TimelineOutput out = t.advance(frames(12, 18), linkedKey(18, {}, {}));
+  for (const auto& m : out.masks) EXPECT_TRUE(m.empty());
+}
+
+TEST(BoxTimeline, RejectsAMinimumHoldScoreOutsideZeroToOne) {
+  for (const float bad : {-0.1f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
+    TimelineConfig c = exact();
+    c.holdLostMinScore = bad;
+    EXPECT_THROW(BoxTimeline(c, 1920, 1080), std::invalid_argument) << bad;
+  }
+}
+```
+
+`cpp/tests/redact_config_test.cpp`：
+- `kAllKeys` 加 `"hold_lost_min_score"`；`SerialisesEveryKey` 的 `31u` 改为 `32u`。
+- `DefaultsAreTheValidatedSettings`：`trackLookaheadKeyframes` 期望改为 2、`trackBackfillKeyframes` 改为 1，并加 `ASSERT_TRUE(c.timeline.holdLostMinScore.has_value()); EXPECT_FLOAT_EQ(*c.timeline.holdLostMinScore, 0.5f); EXPECT_FALSE(TimelineConfig{}.holdLostMinScore.has_value());`。
+- `ReadsTheTrackLookahead` 里 `{"track_backfill_keyframes": 5}` 那条在新默认 W = 2 下仍被拒（B ≤ 1），保留。
+- `expectSameConfig`（往返比较的辅助函数）加上 `holdLostMinScore` 的比较；非默认往返配置里设 `hold_lost_min_score` 为 0.7。
+- 新测试：
+```cpp
+TEST(RedactConfig, ReadsTheMinimumHoldScore) {
+  EXPECT_FLOAT_EQ(*parseRedactConfig(R"({"hold_lost_min_score": 0.7})", "t").timeline.holdLostMinScore, 0.7f);
+  EXPECT_FALSE(parseRedactConfig(R"({"hold_lost_min_score": null})", "t").timeline.holdLostMinScore.has_value());
+  EXPECT_FLOAT_EQ(*parseRedactConfig("{}", "t").timeline.holdLostMinScore, 0.5f);  // absent: the default
+  for (const std::string value : {"-0.1", "1.5", R"("0.5")", "true"}) {
+    const std::string text = R"({"hold_lost_min_score": )" + value + "}";
+    SCOPED_TRACE(text);
+    try {
+      parseRedactConfig(text, "cfg");
+      ADD_FAILURE() << "accepted";
+    } catch (const VcError& e) {
+      EXPECT_NE(std::string(e.what()).find("hold_lost_min_score"), std::string::npos) << e.what();
+    }
+  }
+  const nlohmann::ordered_json off = redactConfigToJson(parseRedactConfig(R"({"hold_lost_min_score": null})", "t"));
+  EXPECT_TRUE(off.at("hold_lost_min_score").is_null());
+}
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `cmake --build build/cpp -j 4 --target vc_tests`
+Expected: 编译失败，`no member named 'holdLostMinScore'`。
+
+- [ ] **Step 3: `BoxTimeline`**
+
+`box_timeline.h`：`TimelineConfig` 末尾（`linked` 之后）加：
+```cpp
+  // A confirmed track whose best real detection scored at least this is held for one more interval when it is lost
+  // again at the next keyframe, as holdLostGhosts does for every track (spec 2026-10-27 §8: targets leaving the
+  // frame). Filled-in boxes do not count. nullopt: off.
+  std::optional<float> holdLostMinScore{};
+```
+私有 `Track` 末尾加 `float bestScore = 0.0f;  // the highest score of its real detections`；私有方法加：
+```cpp
+  // Whether the ghost `track`, lost again, is held for one more interval: holdLostGhosts, or its best real
+  // detection reaches holdLostMinScore.
+  bool holdsLostGhost(const Track& track) const;
+```
+类注释里讲 holdLostGhosts 的那句后面加：`holdLostMinScore does the same for the tracks whose best real detection scored at least that much.`
+
+`box_timeline.cpp`：
+- `validConfig` 的返回值再与上 `(!c.holdLostMinScore || (*c.holdLostMinScore >= 0.0f && *c.holdLostMinScore <= 1.0f))`（NaN 两个比较都不成立，被拒）。
+- `startTrack` 末尾（`return t;` 之前）加 `t.bestScore = t.kind == LinkKind::Real ? box.score : 0.0f;`。
+- `continueTrack` 在 `if (config_.linked) {...}` 之后加 `t.bestScore = std::max(old.bestScore, t.kind == LinkKind::Real ? box.score : 0.0f);`。
+- 建幽灵处加 `ghost.bestScore = track.bestScore;`。
+- 新增：
+```cpp
+bool BoxTimeline::holdsLostGhost(const Track& track) const {
+  return config_.holdLostGhosts || (config_.holdLostMinScore && track.bestScore >= *config_.holdLostMinScore);
+}
+```
+- `advance()` 和 `finish()` 里两处 `track.ghost && config_.holdLostGhosts` 改为 `track.ghost && holdsLostGhost(track)`。
+
+- [ ] **Step 4: 配置**
+
+`redact_config.h`：
+- `TimelineConfig timeline{...}` 的指定初始化末尾加 `.holdLostMinScore = 0.5f`（字段按声明顺序，它在 `linked` 之后）。
+- `trackLookaheadKeyframes` 改为 `2`、`trackBackfillKeyframes` 改为 `1`，上方注释末尾加一句：`The defaults are the cheapest that fixed the bridgeable leaks of the pilot (spec 2026-10-27 §8): W 5, B 2 cost 32 % more unexplained mask area on sg_drive_60s, W 2, B 1 12 %.`
+- 加注释说明 `timeline.holdLostMinScore`：`// hold_lost_min_score (spec 2026-10-27 §8): a confirmed track whose best real detection scored at least this is held one more interval when lost, e.g. a plate leaving the frame; null switches it off.`
+- `parseRedactConfig` 的规则注释里加 `hold_lost_min_score is a number in [0, 1] or null (off);`。
+
+`redact_config.cpp`：
+- `kKeys` 改为 32 个，加 `"hold_lost_min_score"`。
+- `validateRedactConfig` 加：
+```cpp
+  require(!c.timeline.holdLostMinScore ||
+              (*c.timeline.holdLostMinScore >= 0 && *c.timeline.holdLostMinScore <= 1),
+          "hold_lost_min_score must be in [0, 1] or null");
+```
+- `parseRedactConfig` 里 `hold_lost_ghosts` 那行之后加（缺省保留默认值，null 关闭）：
+```cpp
+  if (j.contains("hold_lost_min_score")) {
+    c.timeline.holdLostMinScore = optionalFloatSetting(j, "hold_lost_min_score", origin);
+  }
+```
+- `redactConfigToJson` 里 `hold_lost_ghosts` 之后加：
+```cpp
+  j["hold_lost_min_score"] = c.timeline.holdLostMinScore ? nlohmann::ordered_json(jsonFloat(*c.timeline.holdLostMinScore))
+                                                         : nlohmann::ordered_json(nullptr);
+```
+
+`configs/redact.json`：`"hold_lost_ghosts": false,` 之后加 `"hold_lost_min_score": 0.5,`；`track_lookahead_keyframes` 改为 2、`track_backfill_keyframes` 改为 1。
+
+`docs/USAGE.md`：`track_lookahead_keyframes` 一行的默认值改为 2，"（10 档时 5 个约 0.5 秒）"改为"（10 档时 2 个约 0.2 秒）"，"60 fps 1080p、5 个约 110 MB"改为"60 fps 1080p、2 个约 55 MB"，并加一句"默认 2、`track_backfill_keyframes` 1：`sg_drive_60s` 试跑中能连上的泄露都补上了，误打面积多 12%；5 / 2 多 32%（设计 2026-10-27 §8）"；`track_backfill_keyframes` 一行默认值改为 1。在 `hold_lost_ghosts` 一行之后加：
+```markdown
+| `hold_lost_min_score` | 0.5 | 已确认的轨迹丢失后，若它真实检出里的最高分不低于这个值，就像 `hold_lost_ghosts` 那样在最后停留的位置再多打一个间隔的码，然后结束（主要为开出画面、之后再没检出的车牌，设计 2026-10-27 §8）。补出来的框的分数不算。[0, 1] 内的数，`null` 关闭；与 `hold_lost_ghosts` 是"或"的关系 |
+```
+
+- [ ] **Step 5: 运行测试**
+
+```bash
+cmake --build build/cpp -j 4 --target vc_tests
+./build/cpp/tests/vc_tests --gtest_filter='BoxTimeline.*:BoxMatching.*:KeyframeLinker.*:TrackMasker.*:RedactConfig.*:Records.*'
+./build/cpp/tests/vc_tests --gtest_filter='RedactJob.*:RedactCli.*'
+```
+Expected: 全部通过（`baseOptions` 把 `timeline` 设成 `TimelineConfig{}`，其中 `holdLostMinScore` 为空，所以原有 RedactJob 测试不受影响）。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add cpp/src/track/box_timeline.h cpp/src/track/box_timeline.cpp cpp/apps/vc_redact/redact_config.h cpp/apps/vc_redact/redact_config.cpp cpp/tests/box_timeline_test.cpp cpp/tests/redact_config_test.cpp configs/redact.json docs/USAGE.md
+git commit -m "feat: hold_lost_min_score holds high-score lost tracks one more interval; lookahead defaults 2 and 1
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
