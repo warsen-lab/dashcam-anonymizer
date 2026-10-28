@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -52,6 +53,9 @@ RedactOptions baseOptions(const std::string& outName) {
   o.config.detectFps = 5.0;
   o.config.decode = DecodeParams{};
   o.config.timeline = TimelineConfig{};
+  // Without lookahead: these tests were written for BoxTimeline alone (spec 2026-10-27 has its own below).
+  o.config.trackLookaheadKeyframes = 0;
+  o.config.trackBackfillKeyframes = 0;
   return o;
 }
 
@@ -550,6 +554,128 @@ TEST(RedactJob, TheSummaryCountsTheLargeFacesDropped) {
       << summary;
   s.largeFacesDropped = 0;
   EXPECT_NE(redactSummary(s).find("large faces dropped 0,"), std::string::npos);  // shown even when 0
+}
+
+// ---- Track-level masking (spec 2026-10-27).
+
+// Fake detections: a face (score `score`) at x `x1` on each of `frames`.
+fs::path faceFrames(const std::string& name, const std::vector<int>& frames, double score = 0.9) {
+  const fs::path path = test::tmpDir() / (name + ".jsonl");
+  std::ofstream out(path);
+  for (int f : frames) {
+    out << R"({"video":"noisy_audio.mp4","frame":)" << f
+        << R"(,"pts_ms":0,"cls":"face","x1":100,"y1":100,"x2":180,"y2":180,"score":)" << score
+        << R"(,"src":"fake"})" << '\n';
+  }
+  return path;
+}
+
+// frame -> its masks.jsonl boxes.
+std::map<int, nlohmann::json> masksByFrame(const RedactStats& s) {
+  std::map<int, nlohmann::json> out;
+  std::ifstream in(s.outputDir / "masks.jsonl");
+  for (std::string line; std::getline(in, line);) {
+    const nlohmann::json record = nlohmann::json::parse(line);
+    out[record.at("frame").get<int>()] = record.at("boxes");
+  }
+  return out;
+}
+
+TEST(RedactJob, BridgesATargetMissedOnTwoKeyframesInARow) {
+  // seen on keyframe 12, missed on 18 and 24, seen on 30
+  RedactOptions off = baseOptions("redact_bridge_off");
+  off.fakeDetections = faceFrames("redact_bridge_off", {12, 30});
+  const std::map<int, nlohmann::json> before = masksByFrame(runRedact(off));
+  for (int f = 18; f < 30; ++f) EXPECT_TRUE(before.at(f).empty()) << f;
+
+  RedactOptions o = baseOptions("redact_bridge");
+  o.fakeDetections = faceFrames("redact_bridge", {12, 30});
+  o.config.trackLookaheadKeyframes = 3;
+  const RedactStats s = runRedact(o);
+  const std::map<int, nlohmann::json> masks = masksByFrame(s);
+  for (int f = 12; f < 36; ++f) ASSERT_EQ(masks.at(f).size(), 1u) << f;
+  for (int f = 13; f < 30; ++f) EXPECT_EQ(masks.at(f)[0].at("origin"), "bridged") << f;
+  EXPECT_EQ(s.bridgedMaskBoxes, 17);
+  EXPECT_EQ(s.frames, 60);
+  EXPECT_EQ(lineCount(s.outputDir / "masks.jsonl"), 60u);
+  // with a lookahead the frames still come out in order, each once (masksByFrame's map would hide that)
+  std::ifstream in(s.outputDir / "masks.jsonl");
+  int expected = 0;
+  for (std::string line; std::getline(in, line); ++expected) {
+    EXPECT_EQ(nlohmann::json::parse(line).at("frame").get<int>(), expected);
+  }
+  EXPECT_EQ(expected, 60);
+}
+
+TEST(RedactJob, BackfillsBeforeTheFirstDetection) {
+  RedactOptions o = baseOptions("redact_backfill");
+  o.fakeDetections = faceFrames("redact_backfill", {30});
+  o.config.trackLookaheadKeyframes = 3;
+  o.config.trackBackfillKeyframes = 2;
+  const RedactStats s = runRedact(o);
+  const std::map<int, nlohmann::json> masks = masksByFrame(s);
+  for (int f = 0; f < 18; ++f) EXPECT_TRUE(masks.at(f).empty()) << f;
+  for (int f = 18; f < 30; ++f) {
+    ASSERT_EQ(masks.at(f).size(), 1u) << f;
+    EXPECT_EQ(masks.at(f)[0].at("origin"), "backfilled") << f;
+  }
+  EXPECT_EQ(s.backfilledMaskBoxes, 12);
+  const std::vector<nlohmann::json> lines = detectionLines(s);
+  ASSERT_EQ(lines.size(), 1u);  // filled-in boxes are not detections
+  EXPECT_EQ(lines[0].at("frame").get<int>(), 30);
+  EXPECT_TRUE(lines[0].at("confirmed").get<bool>());
+}
+
+TEST(RedactJob, TheLookaheadKeepsTheConfirmationOfEveryDetection) {
+  // MasksALowScoreFaceOnlyOnceItIsConfirmed with a lookahead: the same flags, each keyframe written once
+  RedactOptions o = baseOptions("redact_confirm_lookahead");
+  o.config.faceConfirmScore = 0.5f;
+  o.config.trackLookaheadKeyframes = 3;
+  const fs::path fake = test::tmpDir() / "redact_confirm_lookahead.jsonl";
+  {
+    std::ofstream out(fake);
+    for (const auto& [frame, x1] : std::vector<std::pair<int, int>>{{12, 100}, {24, 300}, {30, 300}}) {
+      out << R"({"video":"noisy_audio.mp4","frame":)" << frame << R"(,"pts_ms":0,"cls":"face","x1":)" << x1
+          << R"(,"y1":100,"x2":)" << x1 + 80 << R"(,"y2":180,"score":0.3,"src":"fake"})" << '\n';
+    }
+  }
+  o.fakeDetections = fake;
+  const RedactStats s = runRedact(o);
+  std::map<int, bool> confirmed;
+  for (const nlohmann::json& d : detectionLines(s)) confirmed[d.at("frame").get<int>()] = d.at("confirmed").get<bool>();
+  EXPECT_EQ(confirmed, (std::map<int, bool>{{12, false}, {24, true}, {30, true}}));
+  EXPECT_EQ(s.maskedFrames, 12);
+}
+
+TEST(RedactJob, StatsRecordTheLookahead) {
+  RedactOptions o = baseOptions("redact_lookahead_stats");
+  o.config.trackLookaheadKeyframes = 3;
+  o.config.trackBackfillKeyframes = 2;
+  const RedactStats s = runRedact(o);
+  EXPECT_EQ(s.bufferedFramesPeak, 24);  // 4 intervals of 6 frames
+  const nlohmann::json stats = statsJson(s);
+  EXPECT_EQ(stats.at("lookahead_keyframes").get<int>(), 3);
+  EXPECT_EQ(stats.at("backfill_keyframes").get<int>(), 2);
+  EXPECT_EQ(stats.at("bridged_mask_boxes").get<int>(), 0);
+  EXPECT_EQ(stats.at("backfilled_mask_boxes").get<int>(), 0);  // the face is there from frame 0
+  EXPECT_EQ(stats.at("buffered_frames_peak").get<int>(), 24);
+  EXPECT_NE(redactSummary(s).find("tracks:        lookahead 3 keyframes, backfill 2; bridged 0, backfilled 0 mask "
+                                  "boxes; up to 24 frames buffered\n"),
+            std::string::npos)
+      << redactSummary(s);
+}
+
+TEST(RedactJob, RefusesALookaheadThatWouldBufferTooMuch) {
+  EXPECT_EQ(lookaheadBufferFrames(5, 6), 36);
+  EXPECT_EQ(lookaheadBufferFrames(5, 1000), 720);  // an interval never exceeds 120 frames
+  EXPECT_NO_THROW(checkLookaheadBuffer(5, 6, 1920, 1080));
+  EXPECT_NO_THROW(checkLookaheadBuffer(0, 1000, 7680, 4320));  // no lookahead, no new limit
+  try {
+    checkLookaheadBuffer(30, 24, 3840, 2160);
+    ADD_FAILURE() << "accepted";
+  } catch (const VcError& e) {
+    EXPECT_NE(std::string(e.what()).find("track_lookahead_keyframes"), std::string::npos) << e.what();
+  }
 }
 
 TEST(RedactJob, DetectEveryFrameMakesEveryFrameAKeyframe) {
