@@ -52,7 +52,10 @@ add_library(vc_core STATIC
   src/mask/mosaic.cpp
   src/sampler/frame_sampler.cpp
   src/sampler/luma_thumb.cpp
+  src/track/box_matching.cpp
   src/track/box_timeline.cpp
+  src/track/keyframe_linker.cpp
+  src/track/track_masker.cpp
 )
 target_include_directories(vc_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(vc_core PUBLIC FFmpeg::FFmpeg)

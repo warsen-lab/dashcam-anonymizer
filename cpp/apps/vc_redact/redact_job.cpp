@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -27,7 +28,7 @@
 #include "io/av_ptr.h"
 #include "io/video_writer.h"
 #include "mask/mosaic.h"
-#include "track/box_timeline.h"
+#include "track/track_masker.h"
 #include "vc_redact/detect_rate.h"
 #include "vc_redact/records.h"
 #include "vc_redact/verify_dump.h"
@@ -42,8 +43,11 @@ constexpr size_t kMaxQueueCapacity = 64;
 constexpr size_t kMinQueueCapacity = 4;
 constexpr uint64_t kQueueBudgetBytes = 256ull * 1024 * 1024;
 constexpr uint64_t kBytesPerPixel = 3;  // the largest layout the reader emits: 8-bit 4:4:4
-// A keyframe is forced after this many buffered frames, whatever the stride (for very high frame rates).
+// A keyframe is forced once this many frames have come since the last one, whatever the stride (for very high frame
+// rates): one interval, not all the frames held for the lookahead.
 constexpr size_t kMaxBufferedFrames = 120;
+// The frames held for the lookahead may take at most this much memory (spec 2026-10-27 §3.3).
+constexpr uint64_t kMaxLookaheadBufferBytes = 2ull * 1024 * 1024 * 1024;
 constexpr const char* kMasksFile = "masks.jsonl";
 constexpr const char* kDetectionsFile = "detections.jsonl";
 constexpr const char* kVerifyCropsFile = "verify_crops.bin";
@@ -238,7 +242,7 @@ KeyframeFilter filterKeyframe(std::vector<SourcedBox> found, const std::vector<s
   return out;
 }
 
-// Keyframe choice, detection, BoxTimeline and mosaic: everything between decode and encode.
+// Keyframe choice, detection, TrackMasker and mosaic: everything between decode and encode.
 class Processor {
  public:
   Processor(const RedactOptions& options, Detector& detector, const VideoInfo& info, const DetectSchedule& schedule,
@@ -254,7 +258,7 @@ class Processor {
         stats_(stats),
         width_(info.width),
         height_(info.height),
-        timeline_(timelineFor(options.config, detector.classes()), info.width, info.height),
+        masker_(trackMaskerFor(options.config, detector.classes()), info.width, info.height),
         blocks_(options.config.mosaic),
         plateClass_(classIndex(detector.classes(), "plate")),
         verifier_(verifier),
@@ -265,12 +269,12 @@ class Processor {
   void onVideo(VideoItem item) {
     const Clock::time_point started = Clock::now();
     // A keyframe every schedule_.stride frames by frame index (spec 2026-10-19 §2), the first frame always
-    // (BoxTimeline starts on a keyframe), and one whenever kMaxBufferedFrames frames are waiting.
+    // (the masker starts on a keyframe), and one whenever kMaxBufferedFrames frames have come since the last.
     const bool key = options_.detectEveryFrame || !sawKeyframe_ || onSchedule(schedule_, item.index) ||
-                     buffer_.size() >= kMaxBufferedFrames;
+                     interval_.size() >= kMaxBufferedFrames;
     stats_.track.busySec += secondsSince(started);
     if (!key) {
-      buffer_.push_back(std::move(item));
+      keep(std::move(item));
       return;
     }
     sawKeyframe_ = true;
@@ -296,28 +300,32 @@ class Processor {
     stats_.detections += static_cast<int64_t>(boxes.size());
     stats_.largeFacesDropped += filtered.largeFaces;
     stats_.narrowPlatesDropped += filtered.narrowPlates;
+    pending_.push_back(KeyframeDetections{item.index, item.ptsMs, found, std::move(verified)});
 
     const Clock::time_point trackStarted = Clock::now();
-    const TimelineOutput step = timeline_.advance(times(), Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
+    const TrackingOutput step = masker_.advance(interval_, Keyframe{FrameTime{item.index, item.ptsMs}, boxes});
     stats_.track.busySec += secondsSince(trackStarted);
-    // The previous keyframe's boxes are written now that the timeline has said which of them it masked.
+    // The keyframes the masker has settled are written now that it has said which of their boxes it masked.
     writeDetections(step.confirmed);
-    pending_ = KeyframeDetections{item.index, item.ptsMs, found, std::move(verified)};
     emit(step.masks);
-    buffer_.push_back(std::move(item));
+    interval_.clear();
+    keep(std::move(item));
   }
 
   void onEnd() {
     const Clock::time_point started = Clock::now();
-    const TimelineOutput step = timeline_.finish(times());
+    const TrackingOutput step = masker_.finish(interval_);
     stats_.track.busySec += secondsSince(started);
     writeDetections(step.confirmed);
     emit(step.masks);
+    if (!buffer_.empty() || !pending_.empty()) {
+      throw VcError("internal error: frames or detections were left without masks at the end");
+    }
     if (!out_.push(Item{EndItem{}})) throw PipelineAborted{};
   }
 
  private:
-  // A keyframe's detections, written once the next keyframe (or the end) says which were masked.
+  // A keyframe's detections, written once the masker says which were masked.
   struct KeyframeDetections {
     int64_t frame = 0;
     double ptsMs = 0;
@@ -325,28 +333,30 @@ class Processor {
     std::vector<std::optional<VerifyResult>> verified{};  // per box: the verifier's result, nullopt when not scored
   };
 
-  // Writes the pending keyframe's detections.jsonl lines with their confirmation flags: `confirmed` holds one
-  // per box the timeline got, in order; a box the verifier rejected is written unconfirmed.
-  void writeDetections(const std::vector<bool>& confirmed) {
-    if (!pending_) return;
-    size_t next = 0;
-    for (size_t i = 0; i < pending_->boxes.size(); ++i) {
-      const SourcedBox& b = pending_->boxes[i];
-      const std::optional<VerifyResult>& v = pending_->verified[i];
-      bool masked = false;
-      if (!v || v->passed) {
-        if (next >= confirmed.size()) {
-          throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+  // Writes the detections.jsonl lines of the oldest pending keyframes, one keyframe per entry of `confirmed` (its
+  // flags: one per box the masker got, in order); a box the verifier rejected is written unconfirmed.
+  void writeDetections(const std::vector<std::vector<bool>>& confirmed) {
+    for (const std::vector<bool>& flags : confirmed) {
+      if (pending_.empty()) throw VcError("internal error: confirmation flags for a keyframe that is not pending");
+      const KeyframeDetections& d = pending_.front();
+      size_t next = 0;
+      for (size_t i = 0; i < d.boxes.size(); ++i) {
+        const SourcedBox& b = d.boxes[i];
+        const std::optional<VerifyResult>& v = d.verified[i];
+        bool masked = false;
+        if (!v || v->passed) {
+          if (next >= flags.size()) {
+            throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+          }
+          masked = flags[next++];
         }
-        masked = confirmed[next++];
+        detections_ << detectionRecord(video_, d.frame, d.ptsMs, b.box, detector_.classes(), b.src, masked, v);
       }
-      detections_ << detectionRecord(video_, pending_->frame, pending_->ptsMs, b.box, detector_.classes(), b.src,
-                                     masked, v);
+      if (next != flags.size()) {
+        throw VcError("internal error: confirmation flags do not match the keyframe's detections");
+      }
+      pending_.pop_front();
     }
-    if (next != confirmed.size()) {
-      throw VcError("internal error: confirmation flags do not match the keyframe's detections");
-    }
-    pending_.reset();
   }
 
   // Crops every box needsVerification() picks when there is a verifier or a dump; writes the crops of dumped
@@ -417,22 +427,23 @@ class Processor {
     return v;
   }
 
-  std::vector<FrameTime> times() const {
-    std::vector<FrameTime> t;
-    t.reserve(buffer_.size());
-    for (const VideoItem& f : buffer_) t.push_back(FrameTime{f.index, f.ptsMs});
-    return t;
+  // Holds a frame until its masks come out; it belongs to the interval of the last keyframe.
+  void keep(VideoItem item) {
+    interval_.push_back(FrameTime{item.index, item.ptsMs});
+    buffer_.push_back(std::move(item));
+    stats_.bufferedFramesPeak = std::max(stats_.bufferedFramesPeak, static_cast<int64_t>(buffer_.size()));
   }
 
-  // Writes masks.jsonl, pixelates and sends every buffered frame downstream, in order. A mask's block comes
-  // from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4); a
+  // Writes masks.jsonl, pixelates and sends the oldest masks.size() held frames downstream, in order. A mask's block
+  // comes from its track (TrackBlocks), so a target keeps its mosaic from frame to frame (spec 2026-10-19 §4); a
   // plate's mosaic stays inside its mask instead of snapping out to the grid.
   void emit(const std::vector<std::vector<MaskBox>>& masks) {
-    if (masks.size() != buffer_.size()) throw VcError("internal error: masks do not match the buffered frames");
-    for (size_t k = 0; k < buffer_.size(); ++k) {
-      VideoItem& frame = buffer_[k];
+    if (masks.size() > buffer_.size()) throw VcError("internal error: more masks than held frames");
+    for (const std::vector<MaskBox>& frameMasks : masks) {
+      VideoItem frame = std::move(buffer_.front());
+      buffer_.pop_front();
       const Clock::time_point started = Clock::now();
-      std::vector<MaskBox> boxes = masks[k];
+      std::vector<MaskBox> boxes = frameMasks;
       std::vector<MosaicRect> rects;
       rects.reserve(boxes.size());
       for (MaskBox& m : boxes) {
@@ -440,6 +451,8 @@ class Processor {
         m.block = blocks_.blockFor(m.track, rect);
         m.snap = m.cls != plateClass_;
         rects.push_back(MosaicRect{rect, m.block, m.snap});
+        if (m.origin == MaskOrigin::Bridged) ++stats_.bridgedMaskBoxes;
+        if (m.origin == MaskOrigin::Backfilled) ++stats_.backfilledMaskBoxes;
       }
       blocks_.endFrame();
       if (!boxes.empty()) {
@@ -453,7 +466,6 @@ class Processor {
       masks_ << maskRecord(video_, frame.index, boxes, detector_.classes());
       if (!out_.push(Item{std::move(frame)})) throw PipelineAborted{};
     }
-    buffer_.clear();
   }
 
   const RedactOptions& options_;
@@ -466,7 +478,7 @@ class Processor {
   RedactStats& stats_;
   int width_;
   int height_;
-  BoxTimeline timeline_;
+  TrackMasker masker_;
   TrackBlocks blocks_;
   int plateClass_;  // -1 when the detector has no plate class
   Verifier* verifier_;              // nullptr: nothing is verified
@@ -476,8 +488,9 @@ class Processor {
   std::vector<uint8_t> cropBytes_;  // the crops of the current keyframe, size * size * 3 bytes each
   std::vector<float> cropFloats_;   // the scored ones as the verifier's input
   bool sawKeyframe_ = false;
-  std::vector<VideoItem> buffer_;
-  std::optional<KeyframeDetections> pending_;
+  std::deque<VideoItem> buffer_;     // decoded, waiting for their masks, oldest first
+  std::vector<FrameTime> interval_;  // the frames from the last keyframe (inclusive) on
+  std::deque<KeyframeDetections> pending_;  // keyframes waiting for their flags, oldest first
 };
 
 void decodeStage(VideoReader& reader, BoundedQueue<Item>& out, StageStat& decode) {
@@ -696,6 +709,11 @@ void writeStats(const fs::path& path, const RedactStats& s, const RedactOptions&
   j["verify"]["dumped"] = s.verifyDumped;
   j["masked_frames"] = s.maskedFrames;
   j["mask_boxes"] = s.maskBoxes;
+  j["lookahead_keyframes"] = s.lookaheadKeyframes;
+  j["backfill_keyframes"] = s.backfillKeyframes;
+  j["bridged_mask_boxes"] = s.bridgedMaskBoxes;
+  j["backfilled_mask_boxes"] = s.backfilledMaskBoxes;
+  j["buffered_frames_peak"] = s.bufferedFramesPeak;
   j["decode_errors"] = s.decodeErrors;
   j["detector"] = s.detector;
   j["encoder"] = s.encoder;
@@ -742,6 +760,24 @@ size_t pipelineQueueCapacity(int width, int height) {
   return static_cast<size_t>(std::clamp<uint64_t>(frames, kMinQueueCapacity, kMaxQueueCapacity));
 }
 
+int64_t lookaheadBufferFrames(int lookahead, int64_t stride) {
+  const int64_t interval = std::clamp<int64_t>(stride, 1, static_cast<int64_t>(kMaxBufferedFrames));
+  return (static_cast<int64_t>(std::max(lookahead, 0)) + 1) * interval;
+}
+
+void checkLookaheadBuffer(int lookahead, int64_t stride, int width, int height) {
+  if (lookahead <= 0) return;
+  const auto frames = static_cast<uint64_t>(lookaheadBufferFrames(lookahead, stride));
+  const uint64_t bytes = frames * static_cast<uint64_t>(std::max(width, 1)) *
+                         static_cast<uint64_t>(std::max(height, 1)) * kBytesPerPixel;
+  if (bytes > kMaxLookaheadBufferBytes) {
+    throw VcError(formatted("track_lookahead_keyframes %d would hold about %llu frames (%.1f GiB) of this %dx%d video, "
+                            "over the 2 GiB limit: lower track_lookahead_keyframes",
+                            lookahead, static_cast<unsigned long long>(frames),
+                            static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0), width, height));
+  }
+}
+
 std::vector<std::string> redactWarnings(const RedactStats& stats) {
   std::vector<std::string> warnings;
   if (stats.detectFpsAboveVideoRate) {
@@ -767,6 +803,10 @@ std::string redactSummary(const RedactStats& s) {
       static_cast<long long>(s.largeFacesDropped), static_cast<long long>(s.narrowPlatesDropped),
       static_cast<long long>(s.maskedFrames),
       static_cast<long long>(s.maskBoxes));
+  out += formatted("tracks:        lookahead %d keyframes, backfill %d; bridged %lld, backfilled %lld mask boxes; "
+                   "up to %lld frames buffered\n",
+                   s.lookaheadKeyframes, s.backfillKeyframes, static_cast<long long>(s.bridgedMaskBoxes),
+                   static_cast<long long>(s.backfilledMaskBoxes), static_cast<long long>(s.bufferedFramesPeak));
   out += formatted("detect rate:   %.2f /s (every %lld frames of a %.2f fps video)\n", s.detectFpsActual,
                    static_cast<long long>(s.keyframeStride), s.videoFps);
   out += "detector:      " + s.detector + "\n";
@@ -816,6 +856,11 @@ RedactStats runRedact(const RedactOptions& options) {
   stats.detectFpsActual = schedule.actualFps;
   stats.detectFpsRequested = options.detectEveryFrame ? 0.0 : options.config.detectFps;
   stats.detectFpsAboveVideoRate = schedule.aboveVideoRate;
+  stats.lookaheadKeyframes = options.config.trackLookaheadKeyframes;
+  stats.backfillKeyframes = options.config.trackBackfillKeyframes;
+  // Before the model is loaded: a lookahead this video cannot afford is refused at once (spec 2026-10-27 §3.3).
+  checkLookaheadBuffer(options.config.trackLookaheadKeyframes, schedule.stride, reader.info().width,
+                       reader.info().height);
   // 10-bit and 4:2:2 sources are encoded as 8-bit 4:2:0 (spec 2026-10-20 §3); read here, before the decode thread
   // owns the reader.
   stats.formatNote = h264FormatNote(static_cast<AVPixelFormat>(reader.videoStream()->codecpar->format)).value_or("");

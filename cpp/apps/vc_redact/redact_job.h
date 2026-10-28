@@ -56,6 +56,13 @@ struct RedactStats {
   int64_t detections = 0;  // the boxes passed to the timeline: not counting the dropped ones or verifier rejections
   int64_t largeFacesDropped = 0;  // large faces scoring below large_face_min_score (spec 2026-10-19 §3.6)
   int64_t narrowPlatesDropped = 0;  // plates narrower than plate_min_width_px (2026-10-22)
+  // Track-level masking (spec 2026-10-27): the lookahead and backfill in keyframes, the mask boxes they added
+  // (masks.jsonl origin "bridged" / "backfilled") and the most frames held at once.
+  int lookaheadKeyframes = 0;
+  int backfillKeyframes = 0;
+  int64_t bridgedMaskBoxes = 0;
+  int64_t backfilledMaskBoxes = 0;
+  int64_t bufferedFramesPeak = 0;
   std::string verifier;             // the verifier model's name; empty without one
   int64_t verifyChecked = 0;        // boxes the verifier scored
   int64_t verifyRejectedFaces = 0;  // ... and rejected, by class
@@ -97,7 +104,7 @@ struct RedactStats {
   StageStat detectStudent;  // the student (or fake) detector's own busy time; equals detect without a face model
   StageStat detectFace;     // the face model's own busy time (it overlaps detectStudent); {0, 0} without one
   StageStat verify;         // items = keyframes with something to verify or dump: cropping + scoring
-  StageStat track;   // keyframe choice + BoxTimeline; items = frames
+  StageStat track;   // keyframe choice + TrackMasker; items = frames
   StageStat mosaic;
   StageStat encode;
   // From the start of runRedact until the first frame reaches the processing thread: opening the
@@ -112,13 +119,22 @@ struct RedactStats {
 // queue never holds much more than 256 MiB of frames.
 size_t pipelineQueueCapacity(int width, int height);
 
+// The most frames vc_redact holds at once with this lookahead (spec 2026-10-27 §3.3): lookahead + 1 keyframe
+// intervals of `stride` frames, an interval being at most the 120 frames after which a keyframe is forced.
+int64_t lookaheadBufferFrames(int lookahead, int64_t stride);
+
+// Throws VcError (naming track_lookahead_keyframes) when, with a lookahead, lookaheadBufferFrames of a width x height
+// video at 3 bytes per pixel exceed 2 GiB. Without a lookahead the buffer is what it always was: no check.
+void checkLookaheadBuffer(int lookahead, int64_t stride, int width, int height);
+
 // Lines for stderr after a successful run (empty when there is nothing to warn about): a note when detect_fps
 // is above the video's frame rate (so every frame is a keyframe), a note when the source was not 8-bit 4:2:0
 // (formatNote), and a warning for decoder errors, i.e. corrupt packets that were skipped.
 std::vector<std::string> redactWarnings(const RedactStats& stats);
 
 // The summary printed after a successful run: one "name: value" line each for the output, the frame
-// and mask counts, the detect rate (every how many frames of what frame rate), detector, encoder, audio,
+// and mask counts, the track masking (lookahead, backfill, the mask boxes they added, the frames buffered),
+// the detect rate (every how many frames of what frame rate), detector, encoder, audio,
 // setup time, stage rates, decode errors and elapsed time.
 std::string redactSummary(const RedactStats& stats);
 
@@ -127,8 +143,8 @@ std::string redactSummary(const RedactStats& stats);
 // also verify_crops.bin / verify_crops.jsonl.
 // On each keyframe, after the large-face rule, the boxes needsVerification() picks are cropped (verifier_crop.h):
 // the crops of dumped keyframes go to the dump, and with a verifier model the boxes of a class it knows are scored;
-// one below its pass threshold never reaches BoxTimeline and is written with "verify", "verified": false and
-// "confirmed": false (spec 2026-10-21 §4.3).
+// one below its pass threshold never reaches the masker (TrackMasker) and is written with "verify", "verified":
+// false and "confirmed": false (spec 2026-10-21 §4.3).
 // The options, the output directory, the input (including whether MP4 can store its audio) and the
 // detector (with the face model and the verifier, if any) are checked, in that order, before anything is created or removed (with overwrite, the
 // previous output is removed once they pass); any later failure removes this run's files (and the output root and its new parent
@@ -139,7 +155,7 @@ std::string redactSummary(const RedactStats& stats);
 // OutputExistsError when the output directory exists without overwrite, or with overwrite is
 // neither empty nor holds masks.jsonl; VcError for an invalid config, media, detector and I/O
 // failures (a frame without a timestamp, an encoder that cannot be opened, fewer frames encoded
-// than decoded, a video stream without a usable frame rate, ...). Errors from BoxTimeline
+// than decoded, a video stream without a usable frame rate, ...). Errors from the masker
 // (std::invalid_argument) propagate as they are.
 RedactStats runRedact(const RedactOptions& options);
 
