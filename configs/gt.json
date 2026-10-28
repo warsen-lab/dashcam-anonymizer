@@ -1,0 +1,29 @@
+{
+  "owlv2_score": 0.05,
+  "tile_grid": 2,
+  "tile_overlap": 0.2,
+  "retinaface_score": 0.2,
+  "yunet_score": 0.3,
+  "coco_score": 0.3,
+  "student_score": 0.01,
+  "merge_iou": 0.5,
+  "plate_min_aspect": 1.2,
+  "plate_max_width_px": 400,
+  "track": {"min_iou": 0.3, "max_size_ratio": 2.0, "max_gap": 3},
+  "judge_min_score": 0.3,
+  "crops_per_object": 3,
+  "crop_factor": 3.0,
+  "min_crop_px": 96,
+  "audit": {"objects": 50, "frames": 50, "frames_per_class": 150, "seed": 20261022},
+  "llm": {
+    "name": "codex",
+    "command": ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-c",
+                "model_reasoning_effort=\"low\"", "--image={image}", "{prompt}"],
+    "timeout_s": 180,
+    "parallel": 4,
+    "batch": 4,
+    "tile": 384,
+    "object_prompt": "这张图由 {count} 张小图拼成，每张左上角有黄色编号 1 到 {count}；每张来自行车记录仪画面，红框是一个候选的{cls_zh}位置，各张互不相干。对每张判断红框里是不是真实的{cls_zh}：车牌指挂在车辆上、印有号码的牌照（新加坡车牌常见黑底白字、白底黑字或黄底黑字，一行或两行字符）；警示牌（如 SLOW VEHICLE）、车身文字和广告、车标、尾灯、反光条、路牌、路障都不是车牌。人脸指真人的脸（包括戴头盔、侧脸）；海报或广告上的脸、信号灯、树叶、车轮、窗户都不是人脸。如果是真实的{cls_zh}，再判断暂停并放大这张画面能不能认出（车牌：能读出大部分字符；人脸：认识这个人的人能认出是谁）。只回答一个 JSON 数组，每张一项：[{\"n\": 编号, \"verdict\": \"real_readable\" | \"real_unreadable\" | \"not_real\" | \"unsure\"}]。红框只框住目标的一部分时，按框里和紧挨框的内容判断；拿不准就答 unsure。",
+    "frame_prompt": "这张图由 {count} 张小图拼成，每张左上角有黄色编号 1 到 {count}；每张来自已经打过马赛克的行车记录仪画面，红框是一个候选的{cls_zh}位置。对每张判断：先看红框里是不是一块{cls_zh}（或打了马赛克的{cls_zh}）；不是（例如警示牌、车身文字、尾灯、标志）就答 not_target。是的话，暂停并放大这张画面，红框里还能不能认出这个{cls_zh}（车牌：能读出大部分字符；人脸：认识这个人的人能认出是谁）：能认出答 readable，被马赛克遮住或看不清答 unreadable。只回答一个 JSON 数组，每张一项：[{\"n\": 编号, \"verdict\": \"readable\" | \"unreadable\" | \"not_target\" | \"unsure\"}]。拿不准就答 unsure。"
+  }
+}

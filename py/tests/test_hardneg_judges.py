@@ -214,3 +214,19 @@ def test_a_rerun_asks_the_llm_about_what_an_interrupted_run_judged_but_never_ask
     assert counts == {"llm:fake:no": 2}
     # without an LLM a rerun has nothing to do
     assert run_judges(cands, path, tmp_path, FrameTeacherJudge(CFG), TeacherJudge(CFG, plate_detect, lambda i: [])) == {}
+
+
+def test_append_judgments_takes_other_verdict_sets(tmp_path):
+    path = tmp_path / "j.jsonl"
+    append_judgments(path, [Judgment("o1", "real_readable", "llm:x")], verdicts=("real_readable", "unsure"))
+    assert read_judgments(path)[0].verdict == "real_readable"
+    with pytest.raises(ValueError, match="real_readable"):
+        append_judgments(path, [Judgment("o2", "real_readable", "llm:x")])  # the default set is yes / no / unsure
+    assert len(read_judgments(path)) == 1
+
+
+def test_command_judge_run_is_public_and_fills_the_command(tmp_path):
+    cfg = LlmConfig("echo", (sys.executable, "-c", "import sys; print(sys.argv[1:])", "{image}", "{cls_zh}", "{prompt}"),
+                    10.0, "")
+    out, why = CommandJudge(cfg, env={"VC_HARDNEG_ALLOW_LLM": "1"}).run(tmp_path / "a.png", "问题", "plate")
+    assert why == "exit 0" and str(tmp_path / "a.png") in out and "车牌" in out and "问题" in out

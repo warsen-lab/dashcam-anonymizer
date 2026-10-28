@@ -1,0 +1,223 @@
+"""The LLM's two questions (spec 2026-10-22 §2 step 4): A, per object, real or not and readable at its best; B, per
+frame vc_redact left a real object unmasked, readable there or not. Verdicts go to objects.jsonl and frames.jsonl in
+vc_hardneg's judgment format, so people's verdicts (judge "human") override them. Only objects that reach the
+must-mask size and that some detector scored judge_min_score on are asked about (spec §8): the rest are too small to
+read or almost surely not plates and faces; the H3 audit counts any real one among them as missed by all."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from vc_eval.metrics import must_mask
+from vc_gt.config import GtConfig
+from vc_gt.crops import (CROPS_INDEX, Crop, append_crop_index, leak_frames, read_crop_index, write_frame_crop,
+                         write_object_crops)
+from vc_gt.tracks import Track
+from vc_hardneg.judges import CLS_ZH, CommandJudge, _fill
+from vc_hardneg.judgments import Judgment, append_judgments, read_judgments, resolve
+from vc_label.contracts import Box
+from vc_label.review import image_size
+
+OBJECT_VERDICTS = ("real_readable", "real_unreadable", "not_real", "unsure")
+FRAME_VERDICTS = ("readable", "unreadable", "not_target", "unsure")  # not_target: the box holds no plate / face (§11)
+REAL = ("real_readable", "real_unreadable")
+OBJECTS = "objects.jsonl"
+OBJECT_CROPS = "object_crops.jsonl"  # question A per crop (spec §11); objects.jsonl holds what they add up to
+FRAMES = "frames.jsonl"
+Runner = Callable[[Path, str, str], "str | None"]  # (grid image, prompt, class) -> the command's stdout
+
+
+def object_id(track_id: int) -> str:
+    return f"o{track_id}"
+
+
+def crop_id(object_id_: str, k: int) -> str:
+    return f"{object_id_}#{k}"
+
+
+def aggregate(verdicts: list[str]) -> str:
+    """One object's verdict from its crops' (spec §11): a track may hold other things too, so any real crop makes it
+    real (readable over unreadable); it is not real only when every crop says so; else unsure."""
+    for v in ("real_readable", "real_unreadable"):
+        if v in verdicts:
+            return v
+    return "not_real" if verdicts and all(v == "not_real" for v in verdicts) else "unsure"
+
+
+def frame_id(track_id: int, frame: int) -> str:
+    return f"o{track_id}@{frame}"
+
+
+def ever_must_mask(track: Track, frame_height: int) -> bool:
+    """Whether the track's box reaches the must-mask size (vc_eval.metrics) on at least one frame."""
+    return any(must_mask(b, frame_height) for b in track.boxes)
+
+
+def is_candidate(track: Track, frame_height: int, cfg: GtConfig) -> bool:
+    """Whether the questions are asked about the track at all: it reaches the must-mask size and some detector scored
+    it cfg.judge_min_score (spec §8, §9)."""
+    return ever_must_mask(track, frame_height) and max(b.score for b in track.boxes) >= cfg.judge_min_score
+
+
+@dataclass(frozen=True)
+class Item:
+    id: str
+    cls: str
+    crops: tuple[Crop, ...]
+
+
+def parse_answers(out: str | None, allowed: tuple[str, ...]) -> dict[int, str]:
+    """{n: verdict} from the last JSON array of objects in the output; rows with another verdict are left out."""
+    for text in reversed(re.findall(r"\[[^\[\]]*\]", out or "")):
+        try:
+            rows = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+            return {r["n"]: r["verdict"] for r in rows if isinstance(r.get("n"), int) and r.get("verdict") in allowed}
+    return {}
+
+
+def grid_image(items: list[Item], tile: int, out: Path) -> Path:
+    """Every item in one cell, its crops side by side, each fitted into tile x tile with the target in red and the
+    item's number (1, 2, ...) in yellow at the cell's top left; two cells per row when items have several crops,
+    else four."""
+    per = max(len(it.crops) for it in items)
+    cols = min(len(items), 2 if per > 1 else 4)
+    rows = (len(items) + cols - 1) // cols
+    cell = per * tile
+    grid = np.full((rows * tile, cols * cell, 3), 40, np.uint8)
+    for k, it in enumerate(items):
+        r, q = divmod(k, cols)
+        for j, crop in enumerate(it.crops):
+            img = cv2.imread(str(crop.path))
+            if img is None:
+                raise FileNotFoundError(f"{crop.path} cannot be read")
+            s = (tile - 4) / max(img.shape[:2])
+            img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+            x1, y1, x2, y2 = crop.box
+            cv2.rectangle(img, (round(x1 * s), round(y1 * s)), (round(x2 * s), round(y2 * s)), (0, 0, 255), 2)
+            oy, ox = r * tile + 2, q * cell + j * tile + 2
+            grid[oy : oy + img.shape[0], ox : ox + img.shape[1]] = img
+        for color, width in (((0, 0, 0), 5), ((0, 255, 255), 2)):
+            cv2.putText(grid, str(k + 1), (q * cell + 8, r * tile + 34), cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, width)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out), grid):
+        raise ValueError(f"cannot write {out}")
+    return out
+
+
+def ask(items: list[Item], prompt: str, allowed: tuple[str, ...], runner: Runner, judge: str, judgments: Path,
+        work_dir: Path, batch: int, tile: int, parallel: int = 1) -> Counter:
+    """Asks about every item without a judgment in `judgments` yet: batches of up to `batch` items of one class on a
+    numbered grid (written to work_dir), `parallel` calls at once. Each batch's verdicts are appended as it comes, so an
+    interrupted run keeps them; an item the answer leaves out is "unsure". A batch whose command gives no answer at all
+    (timeout, failure) is not recorded, so a rerun asks again. Returns counts per verdict, and "no answer"."""
+    known = resolve(read_judgments(judgments))
+    todo = [it for it in items if it.id not in known]
+    batches = [same[i : i + batch] for cls in sorted({it.cls for it in todo})
+               for same in [[it for it in todo if it.cls == cls]] for i in range(0, len(same), batch)]
+
+    def one(b: list[Item]) -> tuple[list[Judgment], int]:
+        cls = b[0].cls
+        image = grid_image(b, tile, Path(work_dir) / f"batch_{b[0].id}.jpg")  # JPEG: a seventh of the PNG upload
+        out = runner(image, _fill(prompt, {"{count}": str(len(b)), "{cls_zh}": CLS_ZH[cls], "{cls}": cls}), cls)
+        if out is None:
+            return [], len(b)
+        answers = parse_answers(out, allowed)
+        detail = f"grid of {len(b)}" if answers else "no verdicts in the output"
+        return [Judgment(it.id, answers.get(k + 1, "unsure"), judge, None, detail) for k, it in enumerate(b)], 0
+
+    counts: Counter = Counter()
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        for got, unanswered in pool.map(one, batches):
+            if got:
+                append_judgments(judgments, got, verdicts=allowed)
+            counts.update(j.verdict for j in got)
+            if unanswered:
+                counts["no answer"] += unanswered
+    return counts
+
+
+def _cached(index: dict[str, tuple[Crop, ...]], gt_dir: Path, item_id: str, make) -> tuple[Crop, ...]:
+    if item_id in index:
+        return index[item_id]
+    crops = tuple(make())
+    append_crop_index(gt_dir / CROPS_INDEX, item_id, crops)
+    return crops
+
+
+def judge_objects(gt_dir: Path, tracks: list[Track], images: dict[int, Path], cfg: GtConfig, runner: Runner,
+                  judge: str) -> Counter:
+    """Question A about every track not judged yet that reaches the must-mask size somewhere and scores
+    cfg.judge_min_score on some frame: each of its crops on its own (object_crops.jsonl, resumable), then the
+    aggregate per object to objects.jsonl. Returns counts of the objects' verdicts."""
+    gt_dir = Path(gt_dir)
+    if not tracks:
+        return Counter()
+    frame_height = image_size(next(iter(images.values())))[1]
+    known = resolve(read_judgments(gt_dir / OBJECTS))
+    index = read_crop_index(gt_dir / CROPS_INDEX)
+    pending = {object_id(t.id): (t.cls, _cached(index, gt_dir, object_id(t.id),
+                                               lambda t=t: write_object_crops(t, images, gt_dir / "crops" / "objects",
+                                                                              cfg)))
+               for t in tracks if object_id(t.id) not in known and is_candidate(t, frame_height, cfg)}
+    return ask_per_crop(gt_dir, pending, cfg, runner, judge)
+
+
+def ask_per_crop(gt_dir: Path, pending: dict[str, tuple[str, tuple[Crop, ...]]], cfg: GtConfig, runner: Runner,
+                  judge: str, objects_path: Path | None = None) -> Counter:
+    """Asks question A about every crop of the pending objects (object id -> class, crops) on its own, then appends
+    each object's aggregate to objects_path (default gt_dir/objects.jsonl)."""
+    items = [Item(crop_id(oid, k), cls, (crop,)) for oid, (cls, crops) in pending.items() for k, crop in enumerate(crops)]
+    ask(items, cfg.llm.object_prompt, OBJECT_VERDICTS, runner, judge, gt_dir / OBJECT_CROPS, gt_dir / "llm",
+        cfg.llm.batch, cfg.llm.tile, cfg.llm.parallel)
+    per_crop = resolve(read_judgments(gt_dir / OBJECT_CROPS))
+    done = []
+    for oid, (_, crops) in pending.items():
+        answers = [per_crop[crop_id(oid, k)].verdict for k in range(len(crops)) if crop_id(oid, k) in per_crop]
+        if len(answers) == len(crops):
+            done.append(Judgment(oid, aggregate(answers), judge, None, "per crop: " + ",".join(answers)))
+    if done:
+        append_judgments(objects_path or gt_dir / OBJECTS, done, verdicts=OBJECT_VERDICTS)
+    return Counter(j.verdict for j in done)
+
+
+def judge_frames(gt_dir: Path, tracks: list[Track], images: dict[int, Path], masks_by_frame: dict[int, list[Box]],
+                 cfg: GtConfig, runner: Runner, judge: str) -> Counter:
+    """Question B about every unmasked frame at must-mask size (crops.leak_frames) of every candidate track
+    (is_candidate) not judged yet, whatever question A said (spec §12: question A is too unreliable to decide which
+    tracks can leak). `images` are the redacted video's frames: the question is whether the mosaic left the object
+    readable (spec §10), so a loose candidate box around a masked plate is no leak; "not_target" when the box holds
+    no plate or face."""
+    gt_dir = Path(gt_dir)
+    if not tracks:
+        return Counter()
+    frame_height = image_size(next(iter(images.values())))[1]
+    known = resolve(read_judgments(gt_dir / FRAMES))
+    index = read_crop_index(gt_dir / CROPS_INDEX)
+    items = []
+    for t in (t for t in tracks if is_candidate(t, frame_height, cfg)):
+        for f in leak_frames(t, masks_by_frame, frame_height):
+            fid = frame_id(t.id, f)
+            if fid not in known:
+                crops = _cached(index, gt_dir, fid,
+                                lambda t=t, f=f: [write_frame_crop(t, f, images, gt_dir / "crops" / "frames", cfg)])
+                items.append(Item(fid, t.cls, crops))
+    return ask(items, cfg.llm.frame_prompt, FRAME_VERDICTS, runner, judge, gt_dir / FRAMES, gt_dir / "llm",
+               cfg.llm.batch, cfg.llm.tile, cfg.llm.parallel)
+
+
+def make_runner(cfg: GtConfig) -> tuple[Runner, str]:
+    """(the runner, its judge name "llm:<name>"); raises PermissionError without VC_HARDNEG_ALLOW_LLM=1."""
+    command = CommandJudge(cfg.llm.command_config())
+    return (lambda image, prompt, cls: command.run(image, prompt, cls)[0]), command.name

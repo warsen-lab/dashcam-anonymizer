@@ -128,8 +128,8 @@ class CommandJudge:
         cv2.imwrite(str(out), img)
         return out
 
-    def _run(self, image: Path, prompt: str, cls: str) -> tuple[str | None, str]:
-        """The command's stdout, or None and why it did not answer."""
+    def run(self, image: Path, prompt: str, cls: str) -> tuple[str | None, str]:
+        """The command's stdout for this image and prompt, or None and why it did not answer (also used by vc_gt)."""
         fields = {"{image}": str(image), "{cls}": cls, "{cls_zh}": CLS_ZH[cls], "{prompt}": prompt}
         argv = [_fill(a, fields) for a in self.cfg.command]
         try:
@@ -143,7 +143,7 @@ class CommandJudge:
 
     def judge(self, c: Candidate, image_path: Path) -> Judgment:
         fields = {"{image}": "", "{cls}": c.cls, "{cls_zh}": CLS_ZH[c.cls]}
-        out, why = self._run(self._shown(c, image_path), _fill(self.cfg.prompt, fields), c.cls)
+        out, why = self.run(self._shown(c, image_path), _fill(self.cfg.prompt, fields), c.cls)
         for text in reversed(re.findall(r"\{[^{}]*\}", out or "")):
             try:
                 answer = json.loads(text)
@@ -189,7 +189,7 @@ class CommandJudge:
             raise ValueError("a batch for the LLM judge must hold one class")
         cls = cands[0].cls
         prompt = _fill(self.cfg.batch_prompt, {"{count}": str(len(cands)), "{cls_zh}": CLS_ZH[cls], "{cls}": cls})
-        out, why = self._run(self._grid(cands, image_paths), prompt, cls)
+        out, why = self.run(self._grid(cands, image_paths), prompt, cls)
         answers: dict[int, str] = {}
         for text in reversed(re.findall(r"\[[^\[\]]*\]", out or "")):
             try:

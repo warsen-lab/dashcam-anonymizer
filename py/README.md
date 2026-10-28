@@ -270,3 +270,27 @@ PYTHONPATH=py .venv/bin/python -m vc_eval viewing --masks data/redacted/fps10/<s
 ```bash
 .venv/bin/pytest -q py/tests/test_eval_metrics.py py/tests/test_eval_coverage.py py/tests/test_eval_integrity.py py/tests/test_eval_viewing.py py/tests/test_eval_consistency.py py/tests/test_eval_spotcheck.py py/tests/test_eval_run.py
 ```
+
+## 测试集（vc_gt）
+
+按目标衡量泄露的标准答案（设计：`docs/superpowers/specs/2026-10-22-gt-test-set-design.md`）。每段一个目录 `data/gt/<段>/`，不进 git，**这些段永远不进 `vc_train dataset --stem`**。
+
+```bash
+build/cpp-release/vc_extract --input data/videos/test-v2/<段>.mp4 --out data/gt-frames --fps 10 --max-fps 10
+PYTHONPATH=py .venv/bin/python -m vc_gt candidates --frames data/gt-frames/<段> --out data/gt/<段>
+scripts/redact.sh data/redacted/gt data/videos/test-v2/<段>.mp4
+VC_HARDNEG_ALLOW_LLM=1 PYTHONPATH=py .venv/bin/python -m vc_gt judge --gt data/gt/<段> --frames data/gt-frames/<段> \
+  --masks data/redacted/gt/<段>/masks.jsonl
+PYTHONPATH=py .venv/bin/python -m vc_gt review --gt data/gt/<段> --frames data/gt-frames/<段> \
+  --masks data/redacted/gt/<段>/masks.jsonl --set h1 --out <页面目录>   # 再 --set h2
+PYTHONPATH=py .venv/bin/python -m vc_gt import-human --gt data/gt/<段> --file ~/Downloads/human_judgments.json --kind objects   # 或 frames
+PYTHONPATH=py .venv/bin/python -m vc_gt annotate --gt data/gt/<段> --frames data/gt-frames/<段> --out <页面目录>
+PYTHONPATH=py .venv/bin/python -m vc_gt import-human --gt data/gt/<段> --file ~/Downloads/audit_export.json --kind audit
+PYTHONPATH=py .venv/bin/python -m vc_eval objects --gt data/gt/<段> --frames data/gt-frames/<段> \
+  --masks data/redacted/gt/<段>/masks.jsonl --out data/reports/gt/<段>
+```
+
+- `judge` 会把截图发给 `configs/gt.json` 里的命令（默认 Codex），只有设置 `VC_HARDNEG_ALLOW_LLM=1` 才会运行，走计费流量。车牌宽、人脸高从未达到须遮住尺寸的目标不送判断。
+- `candidates` 最慢（OWLv2 逐车加 2×2 分块，本机每帧约 12 秒），可以 `--limit` 分批跑，中断后重跑会接着做。
+- 换打码设置只需重跑 vc_redact、`judge --stage frames`（只问新出现的未打码帧）和 `vc_eval objects`。
+- 页面要在本地静态服务器下打开（例如在页面目录里运行 `python3 -m http.server --bind 127.0.0.1`），直接双击 HTML 文件时，部分浏览器不加载相对路径的图片。
